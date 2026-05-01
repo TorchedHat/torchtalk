@@ -139,6 +139,13 @@ def _parse_native_functions(source: str) -> tuple[dict, dict]:
                         for k in key.split(","):
                             dispatch[k.strip()] = impl
 
+                # YAML emits single-tag entries as a bare string, multi-tag
+                # entries as a list. Downstream code iterates `tags` element-
+                # wise — normalize so a single tag never iterates as chars.
+                tags = entry.get("tags") or []
+                if isinstance(tags, str):
+                    tags = [tags]
+
                 func = {
                     "name": name,
                     "base_name": base,
@@ -147,7 +154,7 @@ def _parse_native_functions(source: str) -> tuple[dict, dict]:
                     "variants": entry.get("variants", ""),
                     "structured": entry.get("structured", False),
                     "structured_delegate": entry.get("structured_delegate"),
-                    "tags": entry.get("tags", []),
+                    "tags": tags,
                 }
                 functions[name] = func
                 if name != base and base not in functions:

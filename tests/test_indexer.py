@@ -14,6 +14,7 @@ from torchtalk.indexer import (
     _collect_test_attr_hits,
     _fuzzy_find,
     _infer_local_types,
+    _parse_native_functions,
     update_index,
 )
 
@@ -39,6 +40,37 @@ class TestServerState:
         assert "at::add" in state.by_cpp_name
         assert "CPU" in state.by_dispatch_key
         assert "CUDA" in state.by_dispatch_key
+
+
+class TestParseNativeFunctions:
+    def _write_yaml(self, tmp_path, body):
+        nf = tmp_path / "aten/src/ATen/native/native_functions.yaml"
+        nf.parent.mkdir(parents=True)
+        nf.write_text(body)
+        return tmp_path
+
+    def test_tags_single_string_normalized_to_list(self, tmp_path):
+        # YAML emits a bare string for single-tag entries; downstream code
+        # iterates element-wise so it must be a list, not iterate as chars.
+        src = self._write_yaml(
+            tmp_path,
+            "- func: foo() -> Tensor\n  tags: nondeterministic_seeded\n",
+        )
+        functions, _ = _parse_native_functions(str(src))
+        assert functions["foo"]["tags"] == ["nondeterministic_seeded"]
+
+    def test_tags_list_passes_through(self, tmp_path):
+        src = self._write_yaml(
+            tmp_path,
+            "- func: bar() -> Tensor\n  tags: [view, inplace_view]\n",
+        )
+        functions, _ = _parse_native_functions(str(src))
+        assert functions["bar"]["tags"] == ["view", "inplace_view"]
+
+    def test_tags_missing_defaults_to_empty_list(self, tmp_path):
+        src = self._write_yaml(tmp_path, "- func: baz() -> Tensor\n")
+        functions, _ = _parse_native_functions(str(src))
+        assert functions["baz"]["tags"] == []
 
 
 class TestFuzzyFind:
