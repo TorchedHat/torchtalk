@@ -156,11 +156,7 @@ def _seed_file_op_cohort(
     extra: set[str] = set()
     for func in funcs:
         bare = func.rsplit("::", 1)[-1]
-        loc = (
-            locs.get(func)
-            or locs.get(f"at::native::{bare}")
-            or locs.get(bare)
-        )
+        loc = locs.get(func) or locs.get(f"at::native::{bare}") or locs.get(bare)
         file = loc[0] if loc else (symbol_to_file or {}).get(bare)
         if not file:
             continue

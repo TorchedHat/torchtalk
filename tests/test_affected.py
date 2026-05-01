@@ -753,10 +753,7 @@ class TestAffectedTests:
         }
         ops_by_file = {
             "/p/aten/src/ATen/native/cudnn/Helper.cpp": set(),
-        } | {
-            f"/p/aten/src/ATen/native/cudnn/F{i}.cpp": {f"op_{i}"}
-            for i in range(35)
-        }
+        } | {f"/p/aten/src/ATen/native/cudnn/F{i}.cpp": {f"op_{i}"} for i in range(35)}
         result = affected_tests(
             funcs=["helper"],
             cpp_extractor=ext,

@@ -19,6 +19,7 @@ def is_vendor_path(path: str) -> bool:
     """True if `path` is inside an `aten/src/ATen/native/<vendor>/` subdir."""
     return any(m in path for m in _VENDOR_DIR_MARKERS)
 
+
 PYTHON_SEARCH_DIRS = [
     "torch/nn",
     "torch/optim",
