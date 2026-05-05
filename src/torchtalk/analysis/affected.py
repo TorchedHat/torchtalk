@@ -176,6 +176,12 @@ def _seed_file_op_cohort(
     return extra
 
 
+def _tag_apis(target: dict[str, set[str]], apis, tag: str) -> None:
+    """Record `tag` against each api in `apis` (any iterable of names)."""
+    for api in apis:
+        target.setdefault(api, set()).add(tag)
+
+
 def _file_cohort_apis(
     matched: list[dict],
     bindings_by_file: dict[str, list[dict]],
@@ -209,9 +215,15 @@ def _bindings_for(
     dispatch_to_op: dict[str, str] | None = None,
     bindings_by_file: dict[str, list[dict]] | None = None,
     cohort_cap: int = 15,
-) -> tuple[list[dict], set[str]]:
+) -> tuple[list[dict], dict[str, set[str]]]:
+    """Resolve cpp funcs to APIs with per-source provenance tags.
+
+    Returns (matched_bindings, api_sources) where api_sources maps each api
+    to the set of resolution paths that contributed it (`call_graph`,
+    `dispatch`, `cohort`).
+    """
     matched: list[dict] = []
-    apis: set[str] = set()
+    api_sources: dict[str, set[str]] = {}
     for fn in cpp_funcs:
         # Walked names are qualified (`at::native::add`); binding keys are bare
         # (`add`). Fall back to last `::` segment.
@@ -220,7 +232,7 @@ def _bindings_for(
         for binding in candidates:
             matched.append(binding)
             if py_name := binding.get("python_name"):
-                apis.add(normalize_api(py_name))
+                _tag_apis(api_sources, [normalize_api(py_name)], "call_graph")
         if candidates:
             continue
         # Fallback A: bare symbol is itself an ATen op name (implicit-dispatch
@@ -239,7 +251,7 @@ def _bindings_for(
             if (native_implementations and key in native_implementations) or (
                 native_functions and key in native_functions
             ):
-                apis.add(key)
+                _tag_apis(api_sources, [key], "call_graph")
                 break
         else:
             # Fallback B: bare symbol is a CPU/CUDA kernel impl registered via
@@ -250,10 +262,14 @@ def _bindings_for(
             if (kernel_impl_to_op and (op := kernel_impl_to_op.get(bare))) or (
                 dispatch_to_op and (op := dispatch_to_op.get(bare))
             ):
-                apis.add(op)
+                _tag_apis(api_sources, [op], "dispatch")
     if bindings_by_file:
-        apis |= _file_cohort_apis(matched, bindings_by_file, cohort_cap)
-    return matched, apis
+        _tag_apis(
+            api_sources,
+            _file_cohort_apis(matched, bindings_by_file, cohort_cap),
+            "cohort",
+        )
+    return matched, api_sources
 
 
 def _tests_for_apis(
@@ -330,16 +346,21 @@ def _tests_mentioning_apis(
     apis: set[str],
     test_attr_index: dict[str, list[dict]],
     test_files: dict[str, dict],
-    per_api_cap: int = 50,
-) -> dict[str, set[str]]:
+    per_api_cap: int | None = 50,
+) -> tuple[dict[str, set[str]], set[str]]:
     """Map test file → classes whose `test_*` methods reference any of `apis`.
 
     Drops an API's mention-only contribution entirely when it would exceed
     `per_api_cap`. Generic names like `add` mention-match thousands of unrelated
-    tests; over-cap APIs are too low-specificity to be a reliable signal. The
-    class-name match path (`_tests_for_apis`) is unaffected.
+    tests; over-cap APIs are too low-specificity to be a reliable signal. Pass
+    `per_api_cap=None` to disable the cap. The class-name match path
+    (`_tests_for_apis`) is unaffected.
+
+    Returns (by_file, contributing_apis) where contributing_apis is the subset
+    of `apis` that actually placed a hit into `by_file` (post-cap).
     """
     by_file: dict[str, set[str]] = {}
+    contributing: set[str] = set()
     for api in apis:
         api_hits: list[tuple[str, str]] = []
         for variant in api_attr_variants(api):
@@ -350,11 +371,12 @@ def _tests_mentioning_apis(
                     continue
                 if cls := hit.get("class"):
                     api_hits.append((hit["file"], cls))
-        if len(api_hits) > per_api_cap:
+        if per_api_cap is not None and len(api_hits) > per_api_cap:
             continue
         for path, cls in api_hits:
             by_file.setdefault(path, set()).add(cls)
-    return by_file
+            contributing.add(api)
+    return by_file, contributing
 
 
 def affected_tests(
@@ -378,13 +400,13 @@ def affected_tests(
     ops_by_file: dict[str, set[str]] | None = None,
     symbol_to_file: dict[str, str] | None = None,
     depth: int = 3,
-    mention_cap: int = 50,
+    mention_cap: int | None = 50,
     cohort_cap: int = 15,
     dir_cap: int = 30,
 ) -> dict[str, Any]:
     """Walk callers, derive Python APIs, return PyTorch-TestRun-shaped runs."""
     walked = _walk_callers(cpp_extractor, funcs, depth)
-    bindings, apis = _bindings_for(
+    bindings, api_sources = _bindings_for(
         walked,
         by_cpp_name,
         native_functions,
@@ -399,13 +421,17 @@ def affected_tests(
     # ops (e.g. cudnn helpers in `ConvShared.cpp` alongside `cudnn_convolution`),
     # union those ops in. Catches cases where the call graph misses upward edges.
     if ops_by_file:
-        apis |= _seed_file_op_cohort(
-            funcs,
-            cpp_extractor,
-            ops_by_file,
-            cohort_cap,
-            symbol_to_file=symbol_to_file,
-            dir_cap=dir_cap,
+        _tag_apis(
+            api_sources,
+            _seed_file_op_cohort(
+                funcs,
+                cpp_extractor,
+                ops_by_file,
+                cohort_cap,
+                symbol_to_file=symbol_to_file,
+                dir_cap=dir_cap,
+            ),
+            "vendor",
         )
 
     # Backward kernels are tested via gradcheck on the forward op's TestCase,
@@ -413,28 +439,31 @@ def affected_tests(
     # downstream test-class / OpInfo lookups run.
     if backward_to_forward:
         expanded: set[str] = set()
-        for api in apis:
+        for api in list(api_sources):
             expanded.update(backward_to_forward.get(api, ()))
-        apis |= expanded
+        _tag_apis(api_sources, expanded, "backward_alias")
 
     # Bridge internal aten names to user-facing python ops via the decomp/refs
     # registry (e.g. convolution_overrideable → conv2d) so downstream lookups
     # find the test classes / OpInfo entries that actually exist.
     if decomp_alias_map:
         expanded = set()
-        for api in apis:
+        for api in list(api_sources):
             expanded.update(decomp_alias_map.get(api, ()))
-        apis |= expanded
+        _tag_apis(api_sources, expanded, "decomp_alias")
 
+    apis: set[str] = set(api_sources)
     by_file = _tests_for_apis(apis, test_classes, test_files)
 
     # Symbol-mention catch generic-class tests (TestTorch::test_sizes) that
     # class-name matching can't reach. Merge into class-name results.
     if test_attr_index:
-        for path, classes in _tests_mentioning_apis(
+        mention_by_file, mention_apis = _tests_mentioning_apis(
             apis, test_attr_index, test_files, per_api_cap=mention_cap
-        ).items():
+        )
+        for path, classes in mention_by_file.items():
             by_file.setdefault(path, set()).update(classes)
+        _tag_apis(api_sources, mention_apis, "mention")
 
     # An API matches OpInfo directly OR via an `aliases=`/`aten_name=` link.
     opinfo_keys: set[str] = set(opinfo_registry or {}) | set(opinfo_alias_map or {})
@@ -456,6 +485,7 @@ def affected_tests(
     if apis and not by_file and opinfo_test_files:
         for path in opinfo_test_files:
             by_file.setdefault(path, set())
+        _tag_apis(api_sources, apis, "opinfo_catchall")
 
     return {
         "input_functions": list(funcs),
@@ -469,6 +499,7 @@ def affected_tests(
             for b in bindings
         ],
         "python_apis": sorted(apis),
+        "api_sources": {api: sorted(tags) for api, tags in sorted(api_sources.items())},
         "test_runs": [
             {"file": f, "included_classes": sorted(classes)}
             for f, classes in sorted(by_file.items())

@@ -767,6 +767,189 @@ class TestAffectedTests:
         assert result["python_apis"] == []
 
 
+class TestApiSources:
+    @pytest.fixture
+    def extractor(self):
+        ext = MagicMock()
+        ext.get_callers.side_effect = lambda func, fuzzy: []
+        ext.function_locations = {}
+        return ext
+
+    def test_call_graph_tag_for_direct_binding(self, extractor):
+        by_cpp_name = {
+            "foo_kernel": [{"python_name": "aten.foo", "cpp_name": "foo"}],
+        }
+        result = affected_tests(
+            funcs=["foo_kernel"],
+            cpp_extractor=extractor,
+            by_cpp_name=by_cpp_name,
+            test_classes={},
+            test_files={},
+            depth=1,
+        )
+        assert result["api_sources"]["foo"] == ["call_graph"]
+
+    def test_dispatch_tag_for_kernel_impl_lookup(self, extractor):
+        kernel_impl_to_op = {"abs_kernel_impl": "abs"}
+        result = affected_tests(
+            funcs=["abs_kernel_impl"],
+            cpp_extractor=extractor,
+            by_cpp_name={},
+            test_classes={},
+            test_files={},
+            kernel_impl_to_op=kernel_impl_to_op,
+            depth=1,
+        )
+        assert result["api_sources"]["abs"] == ["dispatch"]
+
+    def test_cohort_tag_for_file_siblings(self, extractor):
+        by_cpp_name = {
+            "foo_kernel": [
+                {
+                    "python_name": "aten.foo",
+                    "cpp_name": "foo",
+                    "file_path": "/aten/native/Foo.cpp",
+                }
+            ],
+        }
+        bindings_by_file = {
+            "/aten/native/Foo.cpp": [
+                {"python_name": "aten.foo", "file_path": "/aten/native/Foo.cpp"},
+                {"python_name": "aten.foo_helper", "file_path": "/aten/native/Foo.cpp"},
+            ],
+        }
+        result = affected_tests(
+            funcs=["foo_kernel"],
+            cpp_extractor=extractor,
+            by_cpp_name=by_cpp_name,
+            test_classes={},
+            test_files={},
+            bindings_by_file=bindings_by_file,
+            cohort_cap=10,
+            depth=1,
+        )
+        assert "cohort" in result["api_sources"]["foo_helper"]
+
+    def test_vendor_tag_for_seed_file_op_cohort(self, extractor):
+        # `cudnn_helper` is a vendor symbol — symbol_to_file points it at
+        # ConvShared.cpp, ops_by_file maps that file to `cudnn_convolution`.
+        extractor.function_locations = {}
+        ops_by_file = {
+            "/aten/native/cudnn/ConvShared.cpp": {"cudnn_convolution"},
+        }
+        symbol_to_file = {"cudnn_helper": "/aten/native/cudnn/ConvShared.cpp"}
+        result = affected_tests(
+            funcs=["cudnn_helper"],
+            cpp_extractor=extractor,
+            by_cpp_name={},
+            test_classes={},
+            test_files={},
+            ops_by_file=ops_by_file,
+            symbol_to_file=symbol_to_file,
+            cohort_cap=10,
+            depth=1,
+        )
+        assert result["api_sources"]["cudnn_convolution"] == ["vendor"]
+
+    def test_backward_alias_tag_on_expansion(self, extractor):
+        by_cpp_name = {
+            "foo_backward_kernel": [{"python_name": "aten.foo_backward"}],
+        }
+        backward_to_forward = {"foo_backward": ["foo"]}
+        result = affected_tests(
+            funcs=["foo_backward_kernel"],
+            cpp_extractor=extractor,
+            by_cpp_name=by_cpp_name,
+            test_classes={},
+            test_files={},
+            backward_to_forward=backward_to_forward,
+            depth=1,
+        )
+        assert "backward_alias" in result["api_sources"]["foo"]
+
+    def test_decomp_alias_tag_on_expansion(self, extractor):
+        by_cpp_name = {"foo_kernel": [{"python_name": "aten.convolution_overrideable"}]}
+        decomp_alias_map = {"convolution_overrideable": ["conv2d"]}
+        result = affected_tests(
+            funcs=["foo_kernel"],
+            cpp_extractor=extractor,
+            by_cpp_name=by_cpp_name,
+            test_classes={},
+            test_files={},
+            decomp_alias_map=decomp_alias_map,
+            depth=1,
+        )
+        assert "decomp_alias" in result["api_sources"]["conv2d"]
+
+    def test_mention_tag_when_attr_index_contributes(self, extractor):
+        by_cpp_name = {"foo_kernel": [{"python_name": "aten.foo"}]}
+        attr_index = {
+            "foo": [
+                {
+                    "file": "test/test_torch.py",
+                    "class": "TestTorch",
+                    "function": "test_foo_thing",
+                }
+            ],
+        }
+        result = affected_tests(
+            funcs=["foo_kernel"],
+            cpp_extractor=extractor,
+            by_cpp_name=by_cpp_name,
+            test_classes={},
+            test_files={"test/test_torch.py": {}},
+            test_attr_index=attr_index,
+            depth=1,
+        )
+        assert "mention" in result["api_sources"]["foo"]
+
+    def test_opinfo_catchall_tag_when_no_class_match(self, extractor):
+        by_cpp_name = {"foo_kernel": [{"python_name": "aten._safe_softmax"}]}
+        result = affected_tests(
+            funcs=["foo_kernel"],
+            cpp_extractor=extractor,
+            by_cpp_name=by_cpp_name,
+            test_classes={},
+            test_files={"test/test_ops.py": {}},
+            opinfo_test_files={"test/test_ops.py"},
+            depth=1,
+        )
+        assert "opinfo_catchall" in result["api_sources"]["_safe_softmax"]
+
+    def test_python_apis_unchanged_shape(self, extractor):
+        # Backward compat: python_apis must remain a sorted list of strings.
+        by_cpp_name = {"foo_kernel": [{"python_name": "aten.foo"}]}
+        result = affected_tests(
+            funcs=["foo_kernel"],
+            cpp_extractor=extractor,
+            by_cpp_name=by_cpp_name,
+            test_classes={},
+            test_files={},
+            depth=1,
+        )
+        assert result["python_apis"] == ["foo"]
+        assert isinstance(result["python_apis"], list)
+        assert all(isinstance(a, str) for a in result["python_apis"])
+
+
+class TestMentionCapUnbounded:
+    def test_unbounded_keeps_high_volume_api(self):
+        # 100 hits on the same api would normally exceed default cap=50.
+        # With per_api_cap=None the api should still contribute.
+        attr_index = {
+            "add": [
+                {"file": f"test/f{i}.py", "class": f"TestF{i}", "function": "t"}
+                for i in range(100)
+            ],
+        }
+        test_files = {f"test/f{i}.py": {} for i in range(100)}
+        result, contributing = _tests_mentioning_apis(
+            {"add"}, attr_index, test_files, per_api_cap=None
+        )
+        assert len(result) == 100
+        assert "add" in contributing
+
+
 class TestApiAttrVariants:
     def test_includes_self_and_in_place_pair(self):
         assert api_attr_variants("copy") == {"copy", "copy_"}
@@ -801,7 +984,7 @@ class TestTestsMentioningApis:
             ],
         }
         test_files = {"test/test_torch.py": {}}
-        result = _tests_mentioning_apis({"size"}, attr_index, test_files)
+        result, _ = _tests_mentioning_apis({"size"}, attr_index, test_files)
         assert result == {"test/test_torch.py": {"TestTorch"}}
 
     def test_drops_api_when_over_cap(self):
@@ -813,7 +996,9 @@ class TestTestsMentioningApis:
             ],
         }
         test_files = {f"test/f{i}.py": {} for i in range(5)}
-        result = _tests_mentioning_apis({"add"}, attr_index, test_files, per_api_cap=3)
+        result, _ = _tests_mentioning_apis(
+            {"add"}, attr_index, test_files, per_api_cap=3
+        )
         assert result == {}
 
     def test_keeps_api_at_or_under_cap(self):
@@ -824,7 +1009,7 @@ class TestTestsMentioningApis:
             ],
         }
         test_files = {f"test/f{i}.py": {} for i in range(3)}
-        result = _tests_mentioning_apis(
+        result, _ = _tests_mentioning_apis(
             {"rare_op"}, attr_index, test_files, per_api_cap=3
         )
         assert len(result) == 3
@@ -840,7 +1025,7 @@ class TestTestsMentioningApis:
                 },
             ],
         }
-        result = _tests_mentioning_apis(
+        result, _ = _tests_mentioning_apis(
             {"copy_"}, attr_index, {"test/test_torch.py": {}}
         )
         assert result == {"test/test_torch.py": {"TestTorch"}}
@@ -857,7 +1042,7 @@ class TestTestsMentioningApis:
         }
         # Class-less hits don't contribute included_classes — we only use
         # this index to refine class lists, not to add whole-file runs.
-        result = _tests_mentioning_apis(
+        result, _ = _tests_mentioning_apis(
             {"size"}, attr_index, {"test/test_torch.py": {}}
         )
         assert result == {}
@@ -880,7 +1065,7 @@ class TestTestsMentioningApis:
                 },
             ],
         }
-        result = _tests_mentioning_apis({"copy"}, attr_index, {"test/test_x.py": {}})
+        result, _ = _tests_mentioning_apis({"copy"}, attr_index, {"test/test_x.py": {}})
         assert result == {"test/test_x.py": {"TestX"}}
 
     def test_keeps_unknown_receiver(self):
@@ -895,7 +1080,7 @@ class TestTestsMentioningApis:
                 },
             ],
         }
-        result = _tests_mentioning_apis({"copy"}, attr_index, {"test/test_x.py": {}})
+        result, _ = _tests_mentioning_apis({"copy"}, attr_index, {"test/test_x.py": {}})
         assert result == {"test/test_x.py": {"TestX"}}
 
     def test_drops_all_non_torch_filters_file(self):
@@ -916,7 +1101,7 @@ class TestTestsMentioningApis:
                 },
             ],
         }
-        result = _tests_mentioning_apis(
+        result, _ = _tests_mentioning_apis(
             {"copy"}, attr_index, {"test/test_dict_ops.py": {}}
         )
         assert result == {}
