@@ -2,9 +2,26 @@
 
 from __future__ import annotations
 
+import os
+
 from ..analysis.helpers import dedupe_by_key
 from ..formatting import coverage_note, create_formatter, relative_path
 from ..indexer import _cpp_status, _ensure_loaded, _state
+
+# Hard ceiling on impact-walk depth. Power users can raise the soft default
+# via the TORCHTALK_GRAPH_MAX_DEPTH env var, but never above this cap —
+# unbounded walks routinely traverse all of ATen and exhaust MCP timeouts.
+_GRAPH_HARD_DEPTH_CAP = 10
+
+
+def _max_depth() -> int:
+    raw = os.environ.get("TORCHTALK_GRAPH_MAX_DEPTH")
+    if not raw:
+        return 5
+    try:
+        return max(1, min(int(raw), _GRAPH_HARD_DEPTH_CAP))
+    except ValueError:
+        return 5
 
 
 def _rel_path(path: str) -> str:
@@ -73,12 +90,17 @@ async def _do_called_by(function_name: str) -> str:
     return _with_note(md.build())
 
 
-async def _do_impact(function_name: str, depth: int = 2, focus: str = "callers") -> str:
+async def _do_impact(
+    function_name: str,
+    depth: int = 2,
+    focus: str = "callers",
+    fuzzy_all_levels: bool = False,
+) -> str:
     _ensure_loaded()
     if status := _cpp_status():
         return status
 
-    depth = min(max(depth, 1), 5)
+    depth = min(max(depth, 1), _max_depth())
 
     visited = set()
     current_level = {function_name}
@@ -89,7 +111,8 @@ async def _do_impact(function_name: str, depth: int = 2, focus: str = "callers")
         level_callers = []
 
         for func in current_level:
-            for item in _state.cpp_extractor.get_callers(func, fuzzy=(level == 1)):
+            fuzzy = fuzzy_all_levels or level == 1
+            for item in _state.cpp_extractor.get_callers(func, fuzzy=fuzzy):
                 caller = item["caller"]
                 if caller not in visited and caller != function_name:
                     visited.add(caller)

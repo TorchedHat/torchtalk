@@ -23,6 +23,7 @@ class BindingType(Enum):
     TORCH_LIBRARY_IMPL = "torch_library_impl"  # TORCH_LIBRARY_IMPL(ns, dispatch_key, m)
     TORCH_OP = "torch_op"  # m.def("op", ...)
     CUDA_KERNEL = "cuda_kernel"  # __global__ void kernel(...)
+    CUDA_DEVICE_FUNC = "cuda_device_func"  # __device__ helper (callee-from-kernel)
     CUDA_WRAPPER = "cuda_wrapper"  # C++ function that calls CUDA kernel
     AT_DISPATCH = "at_dispatch"  # AT_DISPATCH_FLOATING_TYPES(...)
 
@@ -83,6 +84,27 @@ class BindingGraph:
 
 _IMPL_WRAPPERS = ("TORCH_FN_BOXED", "TORCH_FN")
 _NO_IMPL_MARKERS = ("makeFallthrough", "makeNamedNotSupported")
+
+# `__global__` kernel definition. Allows leading `template <...>`,
+# `static`/`inline`, and `__launch_bounds__`/`C10_LAUNCH_BOUNDS_*` attributes
+# in either order around the keyword.
+_KERNEL_PATTERN = re.compile(
+    r"(?:template\s*<[^>]+>\s*)?"
+    r"(?:(?:static|inline|__forceinline__)\s+)*"
+    r"(?:(?:__launch_bounds__|C10_LAUNCH_BOUNDS_\d+)\s*\([^)]*\)\s*)*"
+    r"__global__\s+"
+    r"(?:(?:static|inline|__forceinline__)\s+)*"
+    r"void\s+(\w+)(?:<([^>]+)>)?\s*\(([^)]*)\)"
+)
+
+# `__device__` helper. CUDA helpers commonly stack `__host__ __device__`
+# `__forceinline__` in arbitrary order, so anchor on the keyword and
+# absorb up to ~200 chars of return-type + remaining modifiers before
+# the `name(args) {` definition.
+_DEVICE_PATTERN = re.compile(
+    r"\b__device__\b[^;{}]{0,200}?"
+    r"\b(\w+)\s*\(([^)]*)\)\s*(?:const\s*)?\{"
+)
 
 
 def _clean_impl_target(raw: str, op_name: str = "") -> str:
@@ -152,6 +174,7 @@ class BindingDetector:
 
         if is_cuda:
             self._detect_cuda_kernels(content, file_path, graph)
+            self._detect_cuda_device_funcs(content, file_path, graph)
 
         self._detect_at_dispatch(content, file_path, graph)
 
@@ -473,9 +496,7 @@ class BindingDetector:
             graph.add_binding(binding)
 
     def _detect_cuda_kernels(self, content: str, file_path: str, graph: BindingGraph):
-        kernel_pattern = r"__global__\s+void\s+(\w+)(?:<([^>]+)>)?\s*\(([^)]*)\)"
-
-        for match in re.finditer(kernel_pattern, content):
+        for match in _KERNEL_PATTERN.finditer(content):
             kernel_name = match.group(1)
             template_params = match.group(2)
             parameters = match.group(3)
@@ -506,6 +527,24 @@ class BindingDetector:
                 python_name=kernel_name,  # Kernels typically have internal names
                 cpp_name=kernel_name,
                 binding_type=BindingType.CUDA_KERNEL.value,
+                file_path=file_path,
+                line_number=line_number,
+                dispatch_key="CUDA",
+                signature=parameters,
+            )
+            graph.add_binding(binding)
+
+    def _detect_cuda_device_funcs(
+        self, content: str, file_path: str, graph: BindingGraph
+    ):
+        for match in _DEVICE_PATTERN.finditer(content):
+            name = match.group(1)
+            parameters = match.group(2)
+            line_number = content[: match.start()].count("\n") + 1
+            binding = Binding(
+                python_name=name,
+                cpp_name=name,
+                binding_type=BindingType.CUDA_DEVICE_FUNC.value,
                 file_path=file_path,
                 line_number=line_number,
                 dispatch_key="CUDA",

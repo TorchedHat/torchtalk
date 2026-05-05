@@ -3,16 +3,20 @@
 import ast
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from torchtalk import indexer, snapshots
 from torchtalk.indexer import (
+    _FREE_FUNC_RE,
+    _METHOD_FUNC_RE,
     ServerState,
     _build_indexes,
     _classify_rhs,
     _collect_test_attr_hits,
     _fuzzy_find,
+    _impls_from_extractor,
     _infer_local_types,
     _parse_native_functions,
     update_index,
@@ -71,6 +75,110 @@ class TestParseNativeFunctions:
         src = self._write_yaml(tmp_path, "- func: baz() -> Tensor\n")
         functions, _ = _parse_native_functions(str(src))
         assert functions["baz"]["tags"] == []
+
+
+class TestImplRegex:
+    def _match(self, code: str) -> str | None:
+        m = _FREE_FUNC_RE.search(code) or _METHOD_FUNC_RE.search(code)
+        return m.group(1) if m else None
+
+    def test_matches_sym_int_return(self):
+        assert self._match("c10::SymInt foo(int x) { return 0; }") == "foo"
+
+    def test_matches_vector_tensor_return(self):
+        assert self._match("std::vector<Tensor> bar() { return {}; }") == "bar"
+
+    def test_matches_optional_return_with_modifier(self):
+        assert self._match("static c10::optional<Tensor> baz() { return {}; }") == "baz"
+
+    def test_matches_pointer_return(self):
+        assert self._match("MPSGraphTensor* makeGraph(int d) { return nullptr; }") == (
+            "makeGraph"
+        )
+
+    def test_matches_multiline_args(self):
+        code = "Tensor foo(\n    const Tensor& a,\n    int b\n) { return a; }"
+        assert self._match(code) == "foo"
+
+    def test_matches_namespaced_method(self):
+        code = "Tensor at::native::abs_(Tensor& self) { return self; }"
+        assert self._match(code) == "abs_"
+
+    def test_matches_template_function(self):
+        code = "template <typename T> void launch(T* p) { (void)p; }"
+        assert self._match(code) == "launch"
+
+    def test_matches_c10_host_device_template(self):
+        code = "inline C10_HOST_DEVICE T qux(T x) { return x; }"
+        assert self._match(code) == "qux"
+
+    def test_matches_sparse_tensor_ref(self):
+        code = "SparseTensor& spdiags(IntArrayRef offsets) { return *this; }"
+        assert self._match(code) == "spdiags"
+
+    def test_skips_declaration(self):
+        assert self._match("Tensor only_decl(int a);") is None
+
+    def test_skips_function_call(self):
+        assert self._match("foo(a, b);") is None
+
+    def test_skips_assignment(self):
+        assert self._match("int x = some_call(1, 2);") is None
+
+    def test_skips_struct_definition(self):
+        assert self._match("struct Foo {") is None
+
+
+class TestImplsFromExtractor:
+    @pytest.fixture(autouse=True)
+    def reset_state(self):
+        prior = indexer._state.cpp_extractor
+        try:
+            yield
+        finally:
+            indexer._state.cpp_extractor = prior
+
+    def _fake_extractor(self, locations: dict) -> SimpleNamespace:
+        return SimpleNamespace(function_locations=locations)
+
+    def test_empty_when_no_extractor(self):
+        indexer._state.cpp_extractor = None
+        assert _impls_from_extractor("foo") == []
+
+    def test_matches_qualified_name_by_suffix(self):
+        indexer._state.cpp_extractor = self._fake_extractor(
+            {
+                "at::native::add": ("/path/Add.cpp", 100),
+                "at::native::mul": ("/path/Mul.cpp", 200),
+            }
+        )
+        result = _impls_from_extractor("add")
+        assert result == [
+            {
+                "function_name": "add",
+                "file_path": "/path/Add.cpp",
+                "line_number": 100,
+                "signature": "at::native::add",
+            }
+        ]
+
+    def test_returns_all_matches_across_namespaces(self):
+        indexer._state.cpp_extractor = self._fake_extractor(
+            {
+                "at::native::cpu::abs": ("/cpu/Abs.cpp", 10),
+                "at::native::cuda::abs": ("/cuda/Abs.cu", 20),
+                "at::native::add": ("/Add.cpp", 30),
+            }
+        )
+        result = _impls_from_extractor("abs")
+        files = {r["file_path"] for r in result}
+        assert files == {"/cpu/Abs.cpp", "/cuda/Abs.cu"}
+
+    def test_no_match_returns_empty(self):
+        indexer._state.cpp_extractor = self._fake_extractor(
+            {"at::native::add": ("/Add.cpp", 1)}
+        )
+        assert _impls_from_extractor("nope") == []
 
 
 class TestFuzzyFind:

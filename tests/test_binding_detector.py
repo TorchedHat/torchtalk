@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from torchtalk.analysis.binding_detector import (
+    _DEVICE_PATTERN,
+    _KERNEL_PATTERN,
     BindingDetector,
     BindingType,
     _clean_impl_target,
@@ -126,3 +128,94 @@ class TestImplRegex:
         bindings = self._detect(src)
         cpp_names = {cpp for _, cpp in bindings}
         assert "unsupportedDynamicOp" in cpp_names
+
+
+class TestKernelPattern:
+    def _name(self, code: str) -> str | None:
+        m = _KERNEL_PATTERN.search(code)
+        return m.group(1) if m else None
+
+    def test_simple_global_kernel(self):
+        assert self._name("__global__ void simpleKernel(int* a) {") == "simpleKernel"
+
+    def test_template_prefix(self):
+        code = "template <typename T>\n__global__ void templated(T* a) {"
+        assert self._name(code) == "templated"
+
+    def test_launch_bounds_attribute(self):
+        code = "__launch_bounds__(256, 4) __global__ void boundedKernel(float* a) {"
+        assert self._name(code) == "boundedKernel"
+
+    def test_c10_launch_bounds_macro(self):
+        code = "C10_LAUNCH_BOUNDS_1(256) __global__ void clampedKernel(int* a) {"
+        assert self._name(code) == "clampedKernel"
+
+    def test_template_and_launch_bounds_combo(self):
+        code = "template <int N> __launch_bounds__(N) __global__ void combo(int* a) {"
+        assert self._name(code) == "combo"
+
+    def test_static_modifier(self):
+        assert self._name("static __global__ void staticKernel(int* a) {") == (
+            "staticKernel"
+        )
+
+    def test_skips_non_kernel_function(self):
+        assert self._name("void notKernel(int* a) {") is None
+
+
+class TestDevicePattern:
+    def _name(self, code: str) -> str | None:
+        m = _DEVICE_PATTERN.search(code)
+        return m.group(1) if m else None
+
+    def test_simple_device_function(self):
+        assert self._name("__device__ T fetch(const T* p) {") == "fetch"
+
+    def test_inline_modifier(self):
+        code = "__device__ inline int64_t start_index(int64_t a) {"
+        assert self._name(code) == "start_index"
+
+    def test_forceinline_const(self):
+        code = "__device__ __forceinline__ scalar_t op(scalar_t a) const {"
+        assert self._name(code) == "op"
+
+    def test_static_host_device_combo(self):
+        code = (
+            "static __host__ __device__ __forceinline__ "
+            "int isfinite_ensure_cuda_math(float val) {"
+        )
+        assert self._name(code) == "isfinite_ensure_cuda_math"
+
+    def test_pointer_return(self):
+        assert self._name("__device__ T* byte_offset(T* ptr, int64_t offset) {") == (
+            "byte_offset"
+        )
+
+    def test_skips_host_only_function(self):
+        assert self._name("void notDevice(int* a) {") is None
+
+
+class TestCudaDeviceFuncBinding:
+    def test_emits_device_func_binding_in_cu_file(self):
+        detector = BindingDetector()
+        src = "__device__ inline int helper(int x) { return x; }\n"
+        graph = detector.detect_bindings("test.cu", src)
+        device_bindings = [
+            b
+            for b in graph.bindings
+            if b.binding_type == BindingType.CUDA_DEVICE_FUNC.value
+        ]
+        assert len(device_bindings) == 1
+        assert device_bindings[0].cpp_name == "helper"
+        assert device_bindings[0].dispatch_key == "CUDA"
+
+    def test_skips_device_funcs_in_cpp_files(self):
+        detector = BindingDetector()
+        src = "__device__ inline int helper(int x) { return x; }\n"
+        graph = detector.detect_bindings("test.cpp", src)
+        device_bindings = [
+            b
+            for b in graph.bindings
+            if b.binding_type == BindingType.CUDA_DEVICE_FUNC.value
+        ]
+        assert device_bindings == []

@@ -193,6 +193,7 @@ async def graph(
     function_name: str,
     mode: Literal["calls", "callers", "impact"] = "callers",
     depth: int = 2,
+    fuzzy_all_levels: bool = False,
 ) -> str:
     """Query the C++ call graph.
 
@@ -202,7 +203,9 @@ async def graph(
     if mode == "calls":
         return await _do_calls(function_name)
     elif mode == "impact":
-        return await _do_impact(function_name, depth=depth)
+        return await _do_impact(
+            function_name, depth=depth, fuzzy_all_levels=fuzzy_all_levels
+        )
     return await _do_called_by(function_name)
 
 

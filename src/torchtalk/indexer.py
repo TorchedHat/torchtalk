@@ -197,6 +197,57 @@ def _parse_native_functions(source: str) -> tuple[dict, dict]:
     return functions, derivatives
 
 
+# Identifier with optional namespace, optional template args (one nesting
+# level), optional ptr/ref qualifier. Conservative — anything beyond two
+# levels of nesting falls back to the libclang lookup below.
+_TYPE_TOKEN = (
+    r"[\w:]+"
+    r"(?:\s*<[^<>]*(?:<[^<>]*>[^<>]*)*>)?"
+    r"(?:\s*[*&]+)?"
+)
+_MODIFIERS = (
+    r"(?:(?:static|inline|constexpr|TORCH_API|"
+    r"C10_HOST_DEVICE|C10_HOST|C10_DEVICE|C10_API|"
+    r"__forceinline__|virtual|explicit)\s+)*"
+)
+_TEMPLATE_PREFIX = r"(?:template\s*<[^>]+>\s*)?"
+_FREE_FUNC_RE = re.compile(
+    rf"^{_TEMPLATE_PREFIX}{_MODIFIERS}{_TYPE_TOKEN}\s+"
+    rf"(\w+)\s*\([^;]*\)\s*(?:const\s*)?\{{",
+    re.MULTILINE,
+)
+_METHOD_FUNC_RE = re.compile(
+    rf"^{_TEMPLATE_PREFIX}{_MODIFIERS}{_TYPE_TOKEN}\s+"
+    rf"(?:\w+::)+(\w+)\s*\([^;]*\)\s*(?:const\s*)?\{{",
+    re.MULTILINE,
+)
+
+
+def _impls_from_extractor(target: str) -> list[dict]:
+    """Look up `target` in the libclang call graph by bare-name suffix.
+
+    Hybrid path: catches definitions the regex pre-filter misses (deeply
+    templated returns, signatures whose layout the regex can't span).
+    Returns [] when the extractor isn't ready.
+    """
+    extractor = _state.cpp_extractor
+    if not extractor:
+        return []
+    out: list[dict] = []
+    for qname, (file, line) in extractor.function_locations.items():
+        if qname.rsplit("::", 1)[-1] != target:
+            continue
+        out.append(
+            {
+                "function_name": target,
+                "file_path": file,
+                "line_number": line,
+                "signature": qname,
+            }
+        )
+    return out
+
+
 def _find_implementations(
     source: str, functions: dict
 ) -> tuple[dict[str, list[dict]], dict[str, str]]:
@@ -222,17 +273,7 @@ def _find_implementations(
         f"in {len(search_dirs)} directories..."
     )
 
-    patterns = [
-        re.compile(
-            r"^(?:static\s+)?(?:inline\s+)?(?:TORCH_API\s+)?"
-            r"(?:Tensor&?|void|bool|int64_t|double|std::tuple<[^>]+>|at::Tensor)\s+"
-            r"(\w+)\s*\([^;]*\)\s*(?:const\s*)?{",
-            re.MULTILINE,
-        ),
-        re.compile(
-            r"^(?:Tensor&?|void)\s+(?:\w+::)+(\w+)\s*\([^;]*\)\s*{", re.MULTILINE
-        ),
-    ]
+    patterns = [_FREE_FUNC_RE, _METHOD_FUNC_RE]
 
     impls: dict[str, list[dict]] = {}
     symbol_to_file: dict[str, str] = {}

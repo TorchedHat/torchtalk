@@ -6,7 +6,7 @@ from typing import Literal
 
 from ..analysis.helpers import safe_sort_key, truncate
 from ..formatting import coverage_note, create_formatter, relative_path
-from ..indexer import _ensure_loaded, _fuzzy_find, _state
+from ..indexer import _ensure_loaded, _fuzzy_find, _impls_from_extractor, _state
 
 
 def _with_note(text: str) -> str:
@@ -159,6 +159,21 @@ async def trace(
             for impl_name in native.get("dispatch", {}).values():
                 if impl_name in _state.native_implementations:
                     impls.extend(_state.native_implementations[impl_name])
+
+        # Hybrid: augment with libclang locations the regex missed.
+        impl_keys = {(i["function_name"], i.get("file_path")) for i in impls}
+        targets = [base_name]
+        if native:
+            targets.extend(native.get("dispatch", {}).values())
+        for target in targets:
+            if not target:
+                continue
+            for impl in _impls_from_extractor(target):
+                key = (impl["function_name"], impl["file_path"])
+                if key in impl_keys:
+                    continue
+                impl_keys.add(key)
+                impls.append(impl)
 
         if impls:
             md.h3("C++ Implementations")
