@@ -121,6 +121,7 @@ def cache_paths(source: str | Path) -> dict[str, Path]:
         "bindings": CACHE_DIR / f"bindings_{h}.json",
         "callgraph": CACHE_DIR / "call_graph" / f"pytorch_callgraph_parallel_{h}.json",
         "test_infra": CACHE_DIR / f"test_infra_{h}.json",
+        "py_cpp_edges": CACHE_DIR / f"py_cpp_edges_{h}.json",
     }
 
 

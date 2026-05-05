@@ -8,17 +8,27 @@ from types import SimpleNamespace
 import pytest
 
 from torchtalk import indexer, snapshots
+from torchtalk.analysis.python_analyzer import (
+    PyBinding,
+    PyClass,
+    PyFunction,
+    PyModule,
+)
 from torchtalk.indexer import (
     _FREE_FUNC_RE,
     _METHOD_FUNC_RE,
+    _PY_CPP_EDGES_CACHE_VERSION,
     ServerState,
     _build_indexes,
+    _build_py_to_cpp_edges,
     _classify_rhs,
     _collect_test_attr_hits,
     _fuzzy_find,
     _impls_from_extractor,
     _infer_local_types,
+    _load_py_cpp_edges_cache,
     _parse_native_functions,
+    _save_py_cpp_edges_cache,
     update_index,
 )
 
@@ -179,6 +189,131 @@ class TestImplsFromExtractor:
             {"at::native::add": ("/Add.cpp", 1)}
         )
         assert _impls_from_extractor("nope") == []
+
+
+class TestBuildPyToCppEdges:
+    def _module_with_func(
+        self, name: str, qualname: str, bindings: list[PyBinding]
+    ) -> PyModule:
+        module = PyModule(name="torch.fake", file_path="/torch/fake.py")
+        module.functions.append(
+            PyFunction(
+                name=name,
+                qualified_name=qualname,
+                file_path="/torch/fake.py",
+                line_number=1,
+                cpp_bindings=bindings,
+            )
+        )
+        return module
+
+    def test_empty_modules_returns_empty(self):
+        assert _build_py_to_cpp_edges({}) == {}
+
+    def test_function_with_aten_call(self):
+        modules = {
+            "torch.fake": self._module_with_func(
+                "f",
+                "torch.fake.f",
+                [PyBinding(cpp_symbol="aten::add", line=12)],
+            )
+        }
+        edges = _build_py_to_cpp_edges(modules)
+        assert edges == {
+            "aten::add": [
+                {
+                    "caller_qualname": "torch.fake.f",
+                    "file": "/torch/fake.py",
+                    "line": 12,
+                }
+            ]
+        }
+
+    def test_method_calls_recorded(self):
+        module = PyModule(name="torch.fake", file_path="/torch/fake.py")
+        cls = PyClass(
+            name="M",
+            qualified_name="torch.fake.M",
+            file_path="/torch/fake.py",
+            line_number=1,
+        )
+        cls.methods.append(
+            PyFunction(
+                name="forward",
+                qualified_name="torch.fake.M.forward",
+                file_path="/torch/fake.py",
+                line_number=5,
+                cpp_bindings=[PyBinding(cpp_symbol="aten::relu", line=7)],
+            )
+        )
+        module.classes.append(cls)
+        edges = _build_py_to_cpp_edges({"torch.fake": module})
+        assert edges["aten::relu"][0]["caller_qualname"] == "torch.fake.M.forward"
+
+    def test_multiple_callers_same_symbol(self):
+        modules = {
+            "torch.a": self._module_with_func(
+                "f", "torch.a.f", [PyBinding(cpp_symbol="aten::add", line=1)]
+            ),
+            "torch.b": self._module_with_func(
+                "g", "torch.b.g", [PyBinding(cpp_symbol="aten::add", line=2)]
+            ),
+        }
+        edges = _build_py_to_cpp_edges(modules)
+        callers = sorted(e["caller_qualname"] for e in edges["aten::add"])
+        assert callers == ["torch.a.f", "torch.b.g"]
+
+
+class TestPyCppEdgesCache:
+    @pytest.fixture(autouse=True)
+    def reset_state(self):
+        prior_edges = indexer._state.py_to_cpp_edges
+        prior_src = indexer._state.pytorch_source
+        try:
+            yield
+        finally:
+            indexer._state.py_to_cpp_edges = prior_edges
+            indexer._state.pytorch_source = prior_src
+
+    def test_save_and_load_round_trip(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            indexer, "_source_fingerprint", lambda _: "deadbeefdeadbeef"
+        )
+        indexer._state.pytorch_source = "/fake/source"
+        indexer._state.py_to_cpp_edges = {
+            "aten::add": [{"caller_qualname": "torch.x.f", "file": "/x.py", "line": 5}]
+        }
+        cache = tmp_path / "edges.json"
+        _save_py_cpp_edges_cache(cache)
+
+        indexer._state.py_to_cpp_edges = {}
+        assert _load_py_cpp_edges_cache(cache, "/fake/source") is True
+        assert "aten::add" in indexer._state.py_to_cpp_edges
+
+    def test_load_rejects_stale_fingerprint(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(indexer, "_source_fingerprint", lambda _: "fp_v1")
+        indexer._state.pytorch_source = "/fake/source"
+        indexer._state.py_to_cpp_edges = {"aten::add": []}
+        cache = tmp_path / "edges.json"
+        _save_py_cpp_edges_cache(cache)
+
+        monkeypatch.setattr(indexer, "_source_fingerprint", lambda _: "fp_v2")
+        indexer._state.py_to_cpp_edges = {}
+        assert _load_py_cpp_edges_cache(cache, "/fake/source") is False
+
+    def test_load_rejects_old_version(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(indexer, "_source_fingerprint", lambda _: "fp")
+        cache = tmp_path / "edges.json"
+        cache.write_text(
+            json.dumps(
+                {
+                    "version": _PY_CPP_EDGES_CACHE_VERSION + 99,
+                    "fingerprint": "fp",
+                    "edges": {"aten::add": []},
+                }
+            )
+        )
+        assert _load_py_cpp_edges_cache(cache, "/fake/source") is False
 
 
 class TestFuzzyFind:

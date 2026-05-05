@@ -51,6 +51,7 @@ class ServerState:
     py_classes: dict[str, list[Any]] = field(default_factory=dict)
     py_functions: dict[str, list[Any]] = field(default_factory=dict)
     nn_modules: list[Any] = field(default_factory=list)
+    py_to_cpp_edges: dict[str, list[dict]] = field(default_factory=dict)
 
     test_files: dict[str, dict] = field(default_factory=dict)
     test_classes: dict[str, list[dict]] = field(default_factory=dict)
@@ -577,8 +578,74 @@ def _init_python_modules(source: str):
                 f"Loaded {len(all_modules)} Python modules, "
                 f"{len(_state.nn_modules)} nn.Module classes"
             )
+            _init_py_cpp_edges(source)
     except Exception as e:
         log.warning(f"Failed to analyze Python modules: {e}")
+
+
+_PY_CPP_EDGES_CACHE_VERSION = 1
+
+
+def _build_py_to_cpp_edges(modules: dict[str, Any]) -> dict[str, list[dict]]:
+    """Reverse-index PyFunction.cpp_bindings as cpp_symbol → caller sites."""
+    edges: dict[str, list[dict]] = {}
+
+    def record(func, cpp_bindings):
+        for b in cpp_bindings:
+            edges.setdefault(b.cpp_symbol, []).append(
+                {
+                    "caller_qualname": func.qualified_name,
+                    "file": func.file_path,
+                    "line": b.line,
+                }
+            )
+
+    for module in modules.values():
+        for func in module.functions:
+            record(func, func.cpp_bindings)
+        for cls in module.classes:
+            for method in cls.methods:
+                record(method, method.cpp_bindings)
+    return edges
+
+
+def _save_py_cpp_edges_cache(path: Path) -> None:
+    """Persist the py→cpp edge index to JSON, versioned and fingerprinted."""
+    payload = {
+        "version": _PY_CPP_EDGES_CACHE_VERSION,
+        "fingerprint": _source_fingerprint(_state.pytorch_source or ""),
+        "edges": _state.py_to_cpp_edges,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload))
+
+
+def _load_py_cpp_edges_cache(path: Path, source: str) -> bool:
+    """Hydrate edge index from cache. Returns True on success."""
+    try:
+        payload = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return False
+    if payload.get("version") != _PY_CPP_EDGES_CACHE_VERSION:
+        return False
+    if payload.get("fingerprint") != _source_fingerprint(source):
+        return False
+    _state.py_to_cpp_edges = payload.get("edges", {})
+    return True
+
+
+def _init_py_cpp_edges(source: str) -> None:
+    """Build (or load from cache) the cpp_symbol → Python-callsite reverse index."""
+    cache = cache_paths(source)["py_cpp_edges"]
+    if cache.exists() and _load_py_cpp_edges_cache(cache, source):
+        log.info(f"Py→Cpp edges (cached): {len(_state.py_to_cpp_edges)} symbols")
+        return
+    _state.py_to_cpp_edges = _build_py_to_cpp_edges(_state.py_modules)
+    log.info(f"Py→Cpp edges: {len(_state.py_to_cpp_edges)} symbols")
+    try:
+        _save_py_cpp_edges_cache(cache)
+    except OSError as e:
+        log.debug(f"Failed to save py→cpp edges cache: {e}")
 
 
 def _init_from_source(source: str):

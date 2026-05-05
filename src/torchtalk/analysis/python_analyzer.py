@@ -10,6 +10,36 @@ from .helpers import truncate
 log = logging.getLogger(__name__)
 
 
+def resolve_cpp_symbol(call_name: str) -> str | None:
+    """Map a dotted Python call name to its canonical C++ symbol.
+
+    `torch.ops.aten.add` and `torch.ops.aten.add.Tensor` both resolve to
+    `aten::add` (overload tags drop). `torch._C._tensor_op` and `_C.foo`
+    return the bare callable name. Returns None for non-binding calls
+    (e.g. `t.add(1)` — method-call ambiguity).
+    """
+    if not call_name:
+        return None
+    if call_name.startswith("torch.ops."):
+        parts = call_name[len("torch.ops.") :].split(".")
+        if len(parts) >= 2:
+            return f"{parts[0]}::{parts[1]}"
+        return None
+    if call_name.startswith("torch._C."):
+        return call_name[len("torch._C.") :].split(".")[0]
+    if call_name.startswith("_C."):
+        return call_name[len("_C.") :].split(".")[0]
+    return None
+
+
+@dataclass
+class PyBinding:
+    """A reference from Python source to a C++ binding call site."""
+
+    cpp_symbol: str  # e.g., "aten::add" or "_tensor_op"
+    line: int
+
+
 @dataclass
 class PyFunction:
     """Python function or method definition."""
@@ -25,8 +55,8 @@ class PyFunction:
     signature: str | None = None
     # For methods, track the class
     class_name: str | None = None
-    # C++ binding if detected (e.g., calls torch._C.*)
-    cpp_binding: str | None = None
+    # Every C++ binding call site found in the function body.
+    cpp_bindings: list[PyBinding] = field(default_factory=list)
 
 
 @dataclass
@@ -226,7 +256,7 @@ class _ASTVisitor(ast.NodeVisitor):
         sig = self._build_signature(node)
 
         # Check for C++ bindings in function body
-        cpp_binding = self._find_cpp_binding(node)
+        cpp_bindings = self._find_cpp_bindings(node)
 
         if is_method and self._current_class:
             qualified_name = f"{self._current_class.qualified_name}.{node.name}"
@@ -246,7 +276,7 @@ class _ASTVisitor(ast.NodeVisitor):
             docstring=ast.get_docstring(node),
             signature=sig,
             class_name=class_name,
-            cpp_binding=cpp_binding,
+            cpp_bindings=cpp_bindings,
         )
 
         if is_method and self._current_class:
@@ -305,18 +335,22 @@ class _ASTVisitor(ast.NodeVisitor):
 
         return truncate(sig, 100)
 
-    def _find_cpp_binding(self, node: ast.FunctionDef) -> str | None:
-        """Look for C++ binding calls in function body."""
+    def _find_cpp_bindings(self, node: ast.FunctionDef) -> list[PyBinding]:
+        """Capture every C++ binding call in this function's body."""
+        out: list[PyBinding] = []
+        seen: set[tuple[str, int]] = set()
         for child in ast.walk(node):
-            if isinstance(child, ast.Call):
-                func_name = self._get_name(child.func)
-                # Common C++ binding patterns
-                if any(
-                    pattern in func_name
-                    for pattern in ["torch._C", "torch.ops.", "_C.", "torch.ops.aten"]
-                ):
-                    return func_name
-        return None
+            if not isinstance(child, ast.Call):
+                continue
+            cpp = resolve_cpp_symbol(self._get_name(child.func))
+            if cpp is None:
+                continue
+            key = (cpp, child.lineno)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(PyBinding(cpp_symbol=cpp, line=child.lineno))
+        return out
 
 
 def build_module_index(modules: dict[str, PyModule]) -> dict[str, list]:
