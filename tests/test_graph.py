@@ -8,7 +8,13 @@ import pytest
 
 from torchtalk import indexer
 from torchtalk.tools import graph as graph_mod
-from torchtalk.tools.graph import _GRAPH_HARD_DEPTH_CAP, _do_impact, _max_depth
+from torchtalk.tools.graph import (
+    _GRAPH_HARD_DEPTH_CAP,
+    _do_impact,
+    _max_depth,
+    _py_name_to_cpp_symbol,
+    _python_callers_for,
+)
 
 
 class TestMaxDepth:
@@ -93,6 +99,99 @@ class TestImpactFuzzyAllLevels:
         out = asyncio.run(_do_impact("root", depth=3, fuzzy_all_levels=True))
         assert "`mid`" in out
         assert "`fuzzy_only`" in out
+
+
+class TestPyNameToCppSymbol:
+    def test_dotted_two_part(self):
+        assert _py_name_to_cpp_symbol("aten.add") == "aten::add"
+
+    def test_drops_overload_tag(self):
+        assert _py_name_to_cpp_symbol("aten.add.Tensor") == "aten::add"
+
+    def test_bare_passes_through(self):
+        assert _py_name_to_cpp_symbol("foo") == "foo"
+
+
+class TestPythonCallersFor:
+    @pytest.fixture(autouse=True)
+    def reset(self):
+        prior_edges = indexer._state.py_to_cpp_edges
+        prior_by_cpp = indexer._state.by_cpp_name
+        try:
+            yield
+        finally:
+            indexer._state.py_to_cpp_edges = prior_edges
+            indexer._state.by_cpp_name = prior_by_cpp
+
+    def test_no_edges_returns_empty(self):
+        indexer._state.py_to_cpp_edges = {}
+        indexer._state.by_cpp_name = {}
+        assert _python_callers_for("at::native::add") == []
+
+    def test_resolves_via_known_binding(self):
+        indexer._state.by_cpp_name = {"add": [{"python_name": "aten.add"}]}
+        indexer._state.py_to_cpp_edges = {
+            "aten::add": [{"caller_qualname": "torch.x.f", "file": "/x.py", "line": 12}]
+        }
+        result = _python_callers_for("at::native::add")
+        assert result == [{"caller_qualname": "torch.x.f", "file": "/x.py", "line": 12}]
+
+    def test_falls_back_to_aten_prefix(self):
+        # No binding but bare-name + aten:: guess hits.
+        indexer._state.by_cpp_name = {}
+        indexer._state.py_to_cpp_edges = {
+            "aten::relu": [
+                {"caller_qualname": "torch.nn.f", "file": "/nn.py", "line": 5}
+            ]
+        }
+        result = _python_callers_for("at::native::relu")
+        assert len(result) == 1
+        assert result[0]["caller_qualname"] == "torch.nn.f"
+
+
+class TestImpactWalkPython:
+    def test_walk_python_emits_source_callers(self, reset_extractor, monkeypatch):
+        edges = {
+            "add": [{"caller": "outer_fn", "caller_file": "/.cpp", "caller_line": 1}]
+        }
+        indexer._state.cpp_extractor = _FakeExtractor(edges, fuzzy_only=set())
+        indexer._state.by_cpp_name = {"outer_fn": [{"python_name": "aten.add"}]}
+        indexer._state.py_to_cpp_edges = {
+            "aten::add": [
+                {
+                    "caller_qualname": "torch.functional.relu",
+                    "file": "/torch/functional.py",
+                    "line": 42,
+                }
+            ]
+        }
+        monkeypatch.setattr(graph_mod, "_cpp_status", lambda: "")
+        monkeypatch.setattr(graph_mod, "coverage_note", lambda _: "", raising=False)
+
+        out = asyncio.run(_do_impact("add", depth=2, walk_python=True))
+        assert "Python Source Callers" in out
+        assert "torch.functional.relu" in out
+
+    def test_walk_python_off_omits_section(self, reset_extractor, monkeypatch):
+        edges = {
+            "add": [{"caller": "outer_fn", "caller_file": "/.cpp", "caller_line": 1}]
+        }
+        indexer._state.cpp_extractor = _FakeExtractor(edges, fuzzy_only=set())
+        indexer._state.by_cpp_name = {"outer_fn": [{"python_name": "aten.add"}]}
+        indexer._state.py_to_cpp_edges = {
+            "aten::add": [
+                {
+                    "caller_qualname": "torch.functional.relu",
+                    "file": "/torch/functional.py",
+                    "line": 42,
+                }
+            ]
+        }
+        monkeypatch.setattr(graph_mod, "_cpp_status", lambda: "")
+        monkeypatch.setattr(graph_mod, "coverage_note", lambda _: "", raising=False)
+
+        out = asyncio.run(_do_impact("add", depth=2, walk_python=False))
+        assert "Python Source Callers" not in out
 
 
 class TestImpactDepthClamp:

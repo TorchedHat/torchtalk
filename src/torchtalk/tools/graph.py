@@ -24,6 +24,45 @@ def _max_depth() -> int:
         return 5
 
 
+def _py_name_to_cpp_symbol(py_name: str) -> str:
+    """Convert a binding's dotted python_name to py_to_cpp_edges key form.
+
+    `aten.add` → `aten::add`; `aten.add.Tensor` → `aten::add` (overload tag
+    drops). Bare names pass through.
+    """
+    parts = py_name.split(".")
+    if len(parts) >= 2:
+        return f"{parts[0]}::{parts[1]}"
+    return py_name
+
+
+def _python_callers_for(cpp_func: str) -> list[dict]:
+    """Look up Python source callers of `cpp_func` via the M1 edge index.
+
+    Tries known bindings first (binding's python_name → cpp_symbol form),
+    then falls back to bare-name guesses (`aten::<bare>`, `<bare>`).
+    """
+    bare = cpp_func.rsplit("::", 1)[-1]
+    edges = _state.py_to_cpp_edges
+    if not edges:
+        return []
+    seen_keys: set[str] = set()
+    out: list[dict] = []
+    for binding in _state.by_cpp_name.get(bare, []):
+        if py_name := binding.get("python_name"):
+            key = _py_name_to_cpp_symbol(py_name)
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            out.extend(edges.get(key, []))
+    for key in (f"aten::{bare}", bare):
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        out.extend(edges.get(key, []))
+    return out
+
+
 def _rel_path(path: str) -> str:
     return relative_path(path, _state.pytorch_source)
 
@@ -95,6 +134,7 @@ async def _do_impact(
     depth: int = 2,
     focus: str = "callers",
     fuzzy_all_levels: bool = False,
+    walk_python: bool = False,
 ) -> str:
     _ensure_loaded()
     if status := _cpp_status():
@@ -164,6 +204,30 @@ async def _do_impact(
                 md.item(f"`{entry['python']}`{dispatch} → `{entry['cpp']}`")
             if len(python_entries) > 10:
                 md.item(f"*... and {len(python_entries) - 10} more*")
+
+    if walk_python:
+        # Source-level Python callers via the M1 edge index — catches pure-
+        # Python wrappers that don't go through a registered binding.
+        seen_callers: set[tuple[str, str, int]] = set()
+        py_callers: list[dict] = []
+        for cpp in visited:
+            for hit in _python_callers_for(cpp):
+                key = (hit["caller_qualname"], hit["file"], hit["line"])
+                if key in seen_callers:
+                    continue
+                seen_callers.add(key)
+                py_callers.append({**hit, "via": cpp})
+        if py_callers:
+            md.h3(f"Python Source Callers ({len(py_callers)} found)")
+            for hit in py_callers[:15]:
+                path = _rel_path(hit["file"])
+                md.item(
+                    f"`{hit['caller_qualname']}` → "
+                    f"`{path}:{hit['line']}` (via `{hit['via']}`)"
+                )
+            if len(py_callers) > 15:
+                md.item(f"*... and {len(py_callers) - 15} more*")
+            md.blank()
 
     md.text(f"Total impact: {total} functions across {len(callers_by_depth)} levels")
 
