@@ -10,6 +10,7 @@ import pytest
 from torchtalk.analysis.affected import (
     _api_to_source_paths,
     _class_matches_api,
+    _filename_family,
     _tests_mentioning_apis,
     _tests_via_profiling,
     affected_tests,
@@ -691,9 +692,10 @@ class TestAffectedTests:
         assert "cudnn_convolution" in result["python_apis"]
         assert "cudnn_convolution_transpose" in result["python_apis"]
 
-    def test_dir_fallback_aggregates_when_file_has_no_ops(self):
-        # Symbol's file (MHA.cpp) has no registered ops, but the cudnn dir
-        # has bindings in sibling files — directory aggregation picks them up.
+    def test_dir_fallback_aggregates_within_family(self):
+        # Symbol's file (MHA.cpp) has no registered ops, but a sibling file
+        # in the same filename family (MHAUtils.cpp) does. Family-narrowed
+        # aggregation picks up MHA-family ops and skips Conv-family ops.
         ext = MagicMock()
         ext.get_callers.return_value = []
         ext.function_locations = {
@@ -704,6 +706,9 @@ class TestAffectedTests:
         }
         ops_by_file = {
             "/p/aten/src/ATen/native/cudnn/MHA.cpp": set(),  # helper-only
+            "/p/aten/src/ATen/native/cudnn/MHAUtils.cpp": {
+                "_scaled_dot_product_cudnn_attention",
+            },
             "/p/aten/src/ATen/native/cudnn/ConvShared.cpp": {"cudnn_convolution"},
             "/p/aten/src/ATen/native/cudnn/BatchNorm.cpp": {"cudnn_batch_norm"},
         }
@@ -717,8 +722,39 @@ class TestAffectedTests:
             depth=1,
         )
         apis = set(result["python_apis"])
-        assert "cudnn_convolution" in apis
-        assert "cudnn_batch_norm" in apis
+        assert "_scaled_dot_product_cudnn_attention" in apis
+        # Different families — must not leak into the cohort.
+        assert "cudnn_convolution" not in apis
+        assert "cudnn_batch_norm" not in apis
+
+    def test_dir_fallback_skips_unrelated_family(self):
+        # Helper in MHA.cpp must not pull in Conv-family ops even when the
+        # MHA family yields nothing on its own.
+        ext = MagicMock()
+        ext.get_callers.return_value = []
+        ext.function_locations = {
+            "at::native::run_cudnn_SDP_fprop": (
+                "/p/aten/src/ATen/native/cudnn/MHA.cpp",
+                15,
+            ),
+        }
+        ops_by_file = {
+            "/p/aten/src/ATen/native/cudnn/MHA.cpp": set(),
+            "/p/aten/src/ATen/native/cudnn/Conv_v8.cpp": {"cudnn_convolution"},
+            "/p/aten/src/ATen/native/cudnn/ConvShared.cpp": {
+                "cudnn_convolution_relu",
+            },
+        }
+        result = affected_tests(
+            funcs=["run_cudnn_SDP_fprop"],
+            cpp_extractor=ext,
+            by_cpp_name={},
+            test_classes={},
+            test_files={},
+            ops_by_file=ops_by_file,
+            depth=1,
+        )
+        assert result["python_apis"] == []
 
     def test_dir_fallback_skips_non_vendor_paths(self):
         # File outside vendor backend dirs does NOT trigger directory fallback.
@@ -743,7 +779,9 @@ class TestAffectedTests:
         assert result["python_apis"] == []
 
     def test_dir_fallback_respects_dir_cap(self):
-        # Vendor dir aggregates over dir_cap → reject (no expansion).
+        # Family-matching aggregation that exceeds dir_cap → reject. All sibling
+        # files share the seed's `Helper` family so the cap (not family
+        # narrowing) is the gating constraint.
         ext = MagicMock()
         ext.get_callers.return_value = []
         ext.function_locations = {
@@ -754,7 +792,10 @@ class TestAffectedTests:
         }
         ops_by_file = {
             "/p/aten/src/ATen/native/cudnn/Helper.cpp": set(),
-        } | {f"/p/aten/src/ATen/native/cudnn/F{i}.cpp": {f"op_{i}"} for i in range(35)}
+        } | {
+            f"/p/aten/src/ATen/native/cudnn/Helper{i}.cpp": {f"op_{i}"}
+            for i in range(35)
+        }
         result = affected_tests(
             funcs=["helper"],
             cpp_extractor=ext,
@@ -931,6 +972,34 @@ class TestApiSources:
         assert result["python_apis"] == ["foo"]
         assert isinstance(result["python_apis"], list)
         assert all(isinstance(a, str) for a in result["python_apis"])
+
+
+class TestFilenameFamily:
+    def test_all_caps_basename(self):
+        assert _filename_family("/p/aten/native/cudnn/MHA.cpp") == "MHA"
+        assert _filename_family("/p/aten/native/cudnn/RNN.cpp") == "RNN"
+
+    def test_pascal_case_takes_first_word(self):
+        assert _filename_family("/p/cudnn/ConvShared.cpp") == "Conv"
+        assert _filename_family("/p/cudnn/BatchNorm.cpp") == "Batch"
+        assert _filename_family("/p/cudnn/LossCTC.cpp") == "Loss"
+
+    def test_strips_version_suffix(self):
+        # `_v\d+` versioning suffix collapses into the base family.
+        assert _filename_family("/p/cudnn/Conv_v8.cpp") == "Conv"
+        assert _filename_family("/p/cudnn/Conv_v7.cpp") == "Conv"
+
+    def test_handles_cuh_and_cu_extensions(self):
+        assert _filename_family("/p/cuda/Reduce.cu") == "Reduce"
+        assert _filename_family("/p/cuda/Helpers.cuh") == "Helpers"
+
+    def test_lowercase_basename(self):
+        # Pure lowercase falls back to the leading lowercase word.
+        assert _filename_family("/p/native/pooling.cpp") == "pooling"
+
+    def test_single_letter_pascal_prefix(self):
+        # `Helper2.cpp` should still group as `Helper`, not `H`.
+        assert _filename_family("/p/cudnn/Helper2.cpp") == "Helper"
 
 
 class TestApiTier:

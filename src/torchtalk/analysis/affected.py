@@ -133,6 +133,28 @@ def _pascal_kernel_impl_candidates(name: str) -> list[str]:
     return [snake, f"native_{snake}"]
 
 
+_FILE_EXTS = (".cpp", ".cuh", ".cu", ".hpp", ".h")
+_VERSION_SUFFIX_RE = re.compile(r"_v\d+$")
+_FAMILY_RE = re.compile(r"^([A-Z]+(?=[A-Z][a-z])|[A-Z][a-z]+|[A-Z]+|[a-z]+)")
+
+
+def _filename_family(path: str) -> str:
+    """Leading-word stem used to group sibling vendor files.
+
+    `MHA.cpp` → `MHA`; `ConvShared.cpp` → `Conv`; `Conv_v8.cpp` → `Conv`;
+    `BatchNorm.cpp` → `Batch`. Narrows directory aggregation so a helper in
+    `MHA.cpp` no longer pulls in unrelated `Conv*` / `BatchNorm*` op cohorts.
+    """
+    base = path.rsplit("/", 1)[-1]
+    for ext in _FILE_EXTS:
+        if base.endswith(ext):
+            base = base[: -len(ext)]
+            break
+    base = _VERSION_SUFFIX_RE.sub("", base)
+    m = _FAMILY_RE.match(base)
+    return m.group(1) if m else base
+
+
 def _seed_file_op_cohort(
     funcs: list[str],
     cpp_extractor: CppCallGraphExtractor,
@@ -150,7 +172,9 @@ def _seed_file_op_cohort(
          to `symbol_to_file` — the regex-derived index of vendor-dir helpers.
       3. If the resolved file's `ops_by_file` is empty (e.g. MHA.cpp holds
          only helpers, no registered op), aggregate ops from sibling files
-         in the same vendor directory, capped at `dir_cap`.
+         in the same vendor directory **whose filename family matches**
+         (`MHA.cpp` ⇒ `MHA*.cpp` only, not `Conv*.cpp` etc.), capped at
+         `dir_cap`.
     """
     locs = cpp_extractor.function_locations
     extra: set[str] = set()
@@ -163,10 +187,11 @@ def _seed_file_op_cohort(
         siblings = ops_by_file.get(file, set())
         cap = cohort_cap
         if not siblings and is_vendor_path(file):
+            family = _filename_family(file)
             dir_prefix = file.rsplit("/", 1)[0] + "/"
             agg: set[str] = set()
             for fp, ops in ops_by_file.items():
-                if fp.startswith(dir_prefix):
+                if fp.startswith(dir_prefix) and _filename_family(fp) == family:
                     agg |= ops
             siblings = agg
             cap = dir_cap
