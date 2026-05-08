@@ -18,7 +18,13 @@ log = logging.getLogger(__name__)
 
 _DECOMP_FILES = (
     "torch/_decomp/decompositions.py",
+    "torch/_decomp/decompositions_for_jvp.py",
     "torch/_refs/__init__.py",
+    "torch/_refs/_conversions.py",
+    "torch/_refs/fft.py",
+    "torch/_refs/linalg/__init__.py",
+    "torch/_refs/nn/functional/__init__.py",
+    "torch/_refs/special/__init__.py",
 )
 
 

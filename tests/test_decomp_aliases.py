@@ -15,6 +15,13 @@ def _write_refs(tmp_path, body: str) -> None:
     (tmp_path / "torch/_refs/__init__.py").write_text(body)
 
 
+def _write_at(tmp_path, rel: str, body: str) -> None:
+    """Write a Python file at `rel` under tmp_path, creating parent dirs."""
+    target = tmp_path / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(body)
+
+
 class TestExtractDecompAliases:
     def test_single_op_decorator(self, tmp_path):
         _write_decomp(
@@ -103,3 +110,53 @@ class TestExtractDecompAliases:
         _write_decomp(tmp_path, "this is not python {{{")
         out = extract_decomp_aliases(tmp_path)
         assert out == {}
+
+    def test_scans_refs_subdirectories(self, tmp_path):
+        # Decompositions live across `torch/_refs/{fft,linalg,nn,special}` —
+        # not just `_refs/__init__.py`. Each subdir file must be scanned.
+        _write_at(
+            tmp_path,
+            "torch/_refs/fft.py",
+            "@register_decomposition(aten.fft_op)\ndef fft_decomp():\n    pass\n",
+        )
+        _write_at(
+            tmp_path,
+            "torch/_refs/linalg/__init__.py",
+            "@register_decomposition(aten.linalg_op)\ndef linalg_decomp():\n    pass\n",
+        )
+        _write_at(
+            tmp_path,
+            "torch/_refs/nn/functional/__init__.py",
+            "@register_decomposition(aten.nn_op)\ndef nn_decomp():\n    pass\n",
+        )
+        _write_at(
+            tmp_path,
+            "torch/_refs/special/__init__.py",
+            "@register_decomposition(aten.special_op)\n"
+            "def special_decomp():\n    pass\n",
+        )
+        out = extract_decomp_aliases(tmp_path)
+        assert out["fft_op"] == ["fft_decomp"]
+        assert out["linalg_op"] == ["linalg_decomp"]
+        assert out["nn_op"] == ["nn_decomp"]
+        assert out["special_op"] == ["special_decomp"]
+
+    def test_scans_decomp_jvp_file(self, tmp_path):
+        # `torch/_decomp/decompositions_for_jvp.py` carries forward-mode JVP
+        # decompositions and must contribute to the alias map too.
+        _write_at(
+            tmp_path,
+            "torch/_decomp/decompositions_for_jvp.py",
+            "@register_decomposition(aten.jvp_op)\ndef jvp_decomp():\n    pass\n",
+        )
+        out = extract_decomp_aliases(tmp_path)
+        assert out["jvp_op"] == ["jvp_decomp"]
+
+    def test_scans_refs_conversions_file(self, tmp_path):
+        _write_at(
+            tmp_path,
+            "torch/_refs/_conversions.py",
+            "@register_decomposition(aten.conv_op)\ndef conv_decomp():\n    pass\n",
+        )
+        out = extract_decomp_aliases(tmp_path)
+        assert out["conv_op"] == ["conv_decomp"]
