@@ -27,9 +27,7 @@ class TestBuildFunctionAliasMap:
         }
         assert build_function_alias_map(native) == {}
 
-    def test_python_module_namespaced_op_skipped(self):
-        # `linalg_cross` exposes as `torch.linalg.cross` not `torch.linalg_cross`,
-        # so the bare-base alias would be wrong — skip until wrapper analysis.
+    def test_linalg_namespace_strips_prefix(self):
         native = {
             "linalg_cross": {
                 "base_name": "linalg_cross",
@@ -37,7 +35,98 @@ class TestBuildFunctionAliasMap:
                 "python_module": "linalg",
             }
         }
+        assert build_function_alias_map(native) == {
+            "torch.linalg.cross": "aten::linalg_cross",
+        }
+
+    def test_fft_namespace(self):
+        native = {
+            "fft_fft": {
+                "base_name": "fft_fft",
+                "variants": "function",
+                "python_module": "fft",
+            }
+        }
+        assert build_function_alias_map(native) == {
+            "torch.fft.fft": "aten::fft_fft",
+        }
+
+    def test_special_namespace(self):
+        native = {
+            "special_entr": {
+                "base_name": "special_entr",
+                "variants": "function",
+                "python_module": "special",
+            }
+        }
+        assert build_function_alias_map(native) == {
+            "torch.special.entr": "aten::special_entr",
+        }
+
+    def test_nested_namespace(self):
+        native = {
+            "nested_to_padded_tensor": {
+                "base_name": "nested_to_padded_tensor",
+                "variants": "function",
+                "python_module": "nested",
+            }
+        }
+        assert build_function_alias_map(native) == {
+            "torch.nested.to_padded_tensor": "aten::nested_to_padded_tensor",
+        }
+
+    def test_sparse_underscore_prefix_stripped(self):
+        # `_sparse_mm` exposes as `torch.sparse.mm` — leading underscore is
+        # part of the prefix to drop, not the public name.
+        native = {
+            "_sparse_mm": {
+                "base_name": "_sparse_mm",
+                "variants": "function",
+                "python_module": "sparse",
+            }
+        }
+        assert build_function_alias_map(native) == {
+            "torch.sparse.mm": "aten::_sparse_mm",
+        }
+
+    def test_nn_namespace_routes_through_functional(self):
+        # `python_module: nn` exposes via `torch.nn.functional`, not `torch.nn`.
+        native = {
+            "binary_cross_entropy": {
+                "base_name": "binary_cross_entropy",
+                "variants": "function",
+                "python_module": "nn",
+            }
+        }
+        assert build_function_alias_map(native) == {
+            "torch.nn.functional.binary_cross_entropy": "aten::binary_cross_entropy",
+        }
+
+    def test_unknown_python_module_skipped(self):
+        # An unrecognised `python_module:` value is skipped conservatively —
+        # we don't know the exposed call form.
+        native = {
+            "weird_op": {
+                "base_name": "weird_op",
+                "variants": "function",
+                "python_module": "_undocumented_namespace",
+            }
+        }
         assert build_function_alias_map(native) == {}
+
+    def test_namespaced_op_without_prefix_uses_base_directly(self):
+        # `vector_norm` lives under `python_module: linalg` but doesn't carry
+        # a `linalg_` prefix; exposed as `torch.linalg.vector_norm`.
+        native = {
+            "vector_norm": {
+                "base_name": "vector_norm",
+                "variants": "function",
+                "python_module": "linalg",
+            }
+        }
+        assert build_function_alias_map(native) == {
+            "torch.linalg.vector_norm": "aten::vector_norm",
+        }
 
     def test_empty_variants_defaults_to_function(self):
         # torchgen's default when `variants:` is omitted is `function` — factory

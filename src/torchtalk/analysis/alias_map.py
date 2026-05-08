@@ -8,14 +8,39 @@ form invisible to caller analysis.
 
 from __future__ import annotations
 
+# python_module → (Python display path under `torch.`, prefix to strip from base)
+# `linalg_cross` → `torch.linalg.cross`; `fft_fft` → `torch.fft.fft`;
+# `_sparse_mm` → `torch.sparse.mm`. `nn` is a special case: ops with
+# `python_module: nn` expose under `torch.nn.functional`, not `torch.nn`.
+_NAMESPACE_RULES = {
+    "linalg": ("linalg", "linalg_"),
+    "fft": ("fft", "fft_"),
+    "special": ("special", "special_"),
+    "nested": ("nested", "nested_"),
+    "sparse": ("sparse", "sparse_"),
+    "nn": ("nn.functional", ""),
+}
+
+
+def _exposed_name(base: str, strip: str) -> str:
+    """Drop a `<ns>_` or `_<ns>_` prefix from `base`. Falls through if absent."""
+    if not strip:
+        return base
+    if base.startswith(strip):
+        return base[len(strip) :]
+    underscored = f"_{strip}"
+    if base.startswith(underscored):
+        return base[len(underscored) :]
+    return base
+
 
 def build_function_alias_map(native_functions: dict[str, dict]) -> dict[str, str]:
-    """Map `torch.<op>` → `aten::<op>` for default-namespace function variants.
+    """Map Python `torch.<...>` call forms to canonical `aten::<base>` symbols.
 
-    Only ops whose `variants:` field includes `function` AND have no
-    `python_module:` are emitted. Namespaced ops (`torch.linalg.X`,
-    `torch.fft.X`, etc.) require Python-wrapper analysis to resolve their
-    exposed call form and are deliberately skipped here.
+    Default-namespace ops (no `python_module:`) emit `torch.<base>`. Ops with
+    `python_module:` in `_NAMESPACE_RULES` emit a namespaced form (e.g.
+    `torch.linalg.cross`). Method-only ops and ops in unrecognised namespaces
+    are skipped.
     """
     aliases: dict[str, str] = {}
     seen: set[str] = set()
@@ -24,15 +49,25 @@ def build_function_alias_map(native_functions: dict[str, dict]) -> dict[str, str
         if not base or base in seen:
             continue
         seen.add(base)
-        if entry.get("python_module"):
-            continue
-        variants_field = entry.get("variants", "") or ""
-        # torchgen default when `variants:` is omitted is `function` — factory
-        # ops (`zeros`, `cat`, `stack`) routinely rely on this default.
-        if not variants_field.strip():
+
+        # Skip ops without a function variant. torchgen treats an empty
+        # `variants:` as default-`function`, so omitted/blank fields pass.
+        variants_field = (entry.get("variants", "") or "").strip()
+        if variants_field:
+            variant_set = {v.strip() for v in variants_field.split(",") if v.strip()}
+            if "function" not in variant_set:
+                continue
+
+        pm = entry.get("python_module") or ""
+        if not pm:
             aliases[f"torch.{base}"] = f"aten::{base}"
             continue
-        variant_set = {v.strip() for v in variants_field.split(",") if v.strip()}
-        if "function" in variant_set:
-            aliases[f"torch.{base}"] = f"aten::{base}"
+
+        rule = _NAMESPACE_RULES.get(pm)
+        if rule is None:
+            continue
+        display, strip = rule
+        exposed = _exposed_name(base, strip)
+        if exposed:
+            aliases[f"torch.{display}.{exposed}"] = f"aten::{base}"
     return aliases

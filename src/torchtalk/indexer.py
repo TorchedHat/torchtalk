@@ -98,6 +98,11 @@ def _source_fingerprint(source: str) -> str:
     return hashlib.md5("|".join(parts).encode()).hexdigest()[:16]
 
 
+# Bump when the bindings-cache schema changes (e.g. a new field added to
+# `native_functions` entries). v2 introduced `python_module`.
+_BINDINGS_CACHE_FORMAT_VERSION = 2
+
+
 def _cache_valid(cache: Path, source: str) -> bool:
     """Check if cache is valid."""
     if not cache.exists():
@@ -105,9 +110,10 @@ def _cache_valid(cache: Path, source: str) -> bool:
     try:
         with open(cache) as f:
             data = json.load(f)
-        return data.get("metadata", {}).get(
-            "source_fingerprint"
-        ) == _source_fingerprint(source)
+        meta = data.get("metadata", {})
+        if meta.get("format_version") != _BINDINGS_CACHE_FORMAT_VERSION:
+            return False
+        return meta.get("source_fingerprint") == _source_fingerprint(source)
     except Exception:
         return False
 
@@ -389,6 +395,7 @@ def _build_index(source: str) -> dict[str, Any]:
         "metadata": {
             "source_path": source,
             "source_fingerprint": _source_fingerprint(source),
+            "format_version": _BINDINGS_CACHE_FORMAT_VERSION,
         },
     }
 
