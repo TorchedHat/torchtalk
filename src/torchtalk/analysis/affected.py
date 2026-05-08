@@ -182,6 +182,17 @@ def _tag_apis(target: dict[str, set[str]], apis, tag: str) -> None:
         target.setdefault(api, set()).add(tag)
 
 
+# Tags that resolved through a known structural map (binding tables, dispatch
+# indices, schema-derived alias bridges). Other tags spread through heuristics
+# (file cohort, mention scan, opinfo catch-all) and read as `fuzzy`.
+_PRECISE_TAGS = frozenset({"call_graph", "dispatch", "backward_alias", "decomp_alias"})
+
+
+def api_tier(sources: set[str]) -> str:
+    """Tier an API as 'precise' if any contributing tag is structural."""
+    return "precise" if sources & _PRECISE_TAGS else "fuzzy"
+
+
 def _file_cohort_apis(
     matched: list[dict],
     bindings_by_file: dict[str, list[dict]],
@@ -500,6 +511,7 @@ def affected_tests(
         ],
         "python_apis": sorted(apis),
         "api_sources": {api: sorted(tags) for api, tags in sorted(api_sources.items())},
+        "api_tier": {api: api_tier(tags) for api, tags in sorted(api_sources.items())},
         "test_runs": [
             {"file": f, "included_classes": sorted(classes)}
             for f, classes in sorted(by_file.items())

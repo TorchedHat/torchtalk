@@ -14,6 +14,7 @@ from torchtalk.analysis.affected import (
     _tests_via_profiling,
     affected_tests,
     api_attr_variants,
+    api_tier,
     normalize_api,
     symbols_in_file,
 )
@@ -930,6 +931,106 @@ class TestApiSources:
         assert result["python_apis"] == ["foo"]
         assert isinstance(result["python_apis"], list)
         assert all(isinstance(a, str) for a in result["python_apis"])
+
+
+class TestApiTier:
+    def test_call_graph_only_is_precise(self):
+        assert api_tier({"call_graph"}) == "precise"
+
+    def test_dispatch_only_is_precise(self):
+        assert api_tier({"dispatch"}) == "precise"
+
+    def test_backward_alias_is_precise(self):
+        assert api_tier({"backward_alias"}) == "precise"
+
+    def test_decomp_alias_is_precise(self):
+        assert api_tier({"decomp_alias"}) == "precise"
+
+    def test_mention_only_is_fuzzy(self):
+        assert api_tier({"mention"}) == "fuzzy"
+
+    def test_cohort_only_is_fuzzy(self):
+        assert api_tier({"cohort"}) == "fuzzy"
+
+    def test_vendor_only_is_fuzzy(self):
+        assert api_tier({"vendor"}) == "fuzzy"
+
+    def test_opinfo_catchall_is_fuzzy(self):
+        assert api_tier({"opinfo_catchall"}) == "fuzzy"
+
+    def test_mixed_precise_wins(self):
+        # Any precise tag promotes the api regardless of co-occurring fuzzy tags.
+        assert api_tier({"call_graph", "mention"}) == "precise"
+        assert api_tier({"cohort", "dispatch"}) == "precise"
+
+    def test_empty_is_fuzzy(self):
+        assert api_tier(set()) == "fuzzy"
+
+
+class TestApiTierInOutput:
+    @pytest.fixture
+    def extractor(self):
+        ext = MagicMock()
+        ext.get_callers.side_effect = lambda func, fuzzy: []
+        ext.function_locations = {}
+        return ext
+
+    def test_call_graph_match_emits_precise_tier(self, extractor):
+        by_cpp_name = {"foo_kernel": [{"python_name": "aten.foo"}]}
+        result = affected_tests(
+            funcs=["foo_kernel"],
+            cpp_extractor=extractor,
+            by_cpp_name=by_cpp_name,
+            test_classes={},
+            test_files={},
+            depth=1,
+        )
+        assert result["api_tier"] == {"foo": "precise"}
+
+    def test_mention_only_emits_fuzzy_tier(self, extractor):
+        # Reach an api purely via the attr-index mention path.
+        by_cpp_name = {"foo_kernel": [{"python_name": "aten.foo"}]}
+        attr_index = {
+            "foo": [
+                {"file": "test/test_torch.py", "class": "TestTorch", "function": "t"}
+            ]
+        }
+        result = affected_tests(
+            funcs=["foo_kernel"],
+            cpp_extractor=extractor,
+            by_cpp_name=by_cpp_name,
+            test_classes={},
+            test_files={"test/test_torch.py": {}},
+            test_attr_index=attr_index,
+            depth=1,
+        )
+        # `foo` is precise (call_graph), `mention` is an additional tag on it.
+        assert result["api_tier"]["foo"] == "precise"
+
+    def test_cohort_only_api_is_fuzzy(self, extractor):
+        # `helper` is added solely via the file-cohort path → fuzzy tier.
+        binding = {
+            "python_name": "aten.foo",
+            "cpp_name": "foo",
+            "file_path": "/p/Foo.cpp",
+        }
+        bindings_by_file = {
+            "/p/Foo.cpp": [
+                binding,
+                {"python_name": "aten.helper", "file_path": "/p/Foo.cpp"},
+            ]
+        }
+        result = affected_tests(
+            funcs=["foo"],
+            cpp_extractor=extractor,
+            by_cpp_name={"foo": [binding]},
+            test_classes={},
+            test_files={},
+            bindings_by_file=bindings_by_file,
+            depth=1,
+        )
+        assert result["api_tier"]["foo"] == "precise"
+        assert result["api_tier"]["helper"] == "fuzzy"
 
 
 class TestMentionCapUnbounded:
