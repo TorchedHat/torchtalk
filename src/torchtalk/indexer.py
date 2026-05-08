@@ -52,6 +52,7 @@ class ServerState:
     py_functions: dict[str, list[Any]] = field(default_factory=dict)
     nn_modules: list[Any] = field(default_factory=list)
     py_to_cpp_edges: dict[str, list[dict]] = field(default_factory=dict)
+    alias_map: dict[str, str] = field(default_factory=dict)
 
     test_files: dict[str, dict] = field(default_factory=dict)
     test_classes: dict[str, list[dict]] = field(default_factory=dict)
@@ -153,6 +154,7 @@ def _parse_native_functions(source: str) -> tuple[dict, dict]:
                     "signature": sig,
                     "dispatch": dispatch,
                     "variants": entry.get("variants", ""),
+                    "python_module": entry.get("python_module", "") or "",
                     "structured": entry.get("structured", False),
                     "structured_delegate": entry.get("structured_delegate"),
                     "tags": tags,
@@ -550,9 +552,13 @@ def _init_python_modules(source: str):
     global _state
 
     try:
+        from .analysis.alias_map import build_function_alias_map
         from .analysis.python_analyzer import PythonAnalyzer, build_module_index
 
-        analyzer = PythonAnalyzer()
+        _state.alias_map = build_function_alias_map(_state.native_functions)
+        log.info(f"Alias map: {len(_state.alias_map)} torch.<op> aliases")
+
+        analyzer = PythonAnalyzer(alias_map=_state.alias_map)
         src = Path(source)
 
         # Use configured Python search directories
@@ -583,7 +589,9 @@ def _init_python_modules(source: str):
         log.warning(f"Failed to analyze Python modules: {e}")
 
 
-_PY_CPP_EDGES_CACHE_VERSION = 1
+# v2: edges now include `torch.<op>` aliases resolved through native_functions
+# (Phase 3 alias map). Bump invalidates pre-alias caches so they get rebuilt.
+_PY_CPP_EDGES_CACHE_VERSION = 2
 
 
 def _build_py_to_cpp_edges(modules: dict[str, Any]) -> dict[str, list[dict]]:

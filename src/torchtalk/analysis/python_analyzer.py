@@ -10,13 +10,17 @@ from .helpers import truncate
 log = logging.getLogger(__name__)
 
 
-def resolve_cpp_symbol(call_name: str) -> str | None:
+def resolve_cpp_symbol(
+    call_name: str, alias_map: dict[str, str] | None = None
+) -> str | None:
     """Map a dotted Python call name to its canonical C++ symbol.
 
     `torch.ops.aten.add` and `torch.ops.aten.add.Tensor` both resolve to
     `aten::add` (overload tags drop). `torch._C._tensor_op` and `_C.foo`
-    return the bare callable name. Returns None for non-binding calls
-    (e.g. `t.add(1)` — method-call ambiguity).
+    return the bare callable name. When `alias_map` is provided, plain
+    `torch.<op>` forms resolve through it (e.g. `torch.add` → `aten::add`).
+    Returns None for non-binding calls (e.g. `t.add(1)` — method-call
+    ambiguity).
     """
     if not call_name:
         return None
@@ -29,6 +33,8 @@ def resolve_cpp_symbol(call_name: str) -> str | None:
         return call_name[len("torch._C.") :].split(".")[0]
     if call_name.startswith("_C."):
         return call_name[len("_C.") :].split(".")[0]
+    if alias_map and (resolved := alias_map.get(call_name)):
+        return resolved
     return None
 
 
@@ -101,8 +107,9 @@ class PyModule:
 class PythonAnalyzer:
     """Analyzes Python source code using AST."""
 
-    def __init__(self):
+    def __init__(self, alias_map: dict[str, str] | None = None):
         self._module_cache: dict[str, PyModule] = {}
+        self._alias_map = alias_map
 
     def analyze_file(self, file_path: str) -> PyModule | None:
         """Analyze a single Python file."""
@@ -123,7 +130,7 @@ class PythonAnalyzer:
         module = PyModule(name=module_name, file_path=str(path))
 
         # Extract components
-        visitor = _ASTVisitor(module, content)
+        visitor = _ASTVisitor(module, content, alias_map=self._alias_map)
         visitor.visit(tree)
 
         self._module_cache[module_name] = module
@@ -177,9 +184,15 @@ class PythonAnalyzer:
 class _ASTVisitor(ast.NodeVisitor):
     """AST visitor to extract module components."""
 
-    def __init__(self, module: PyModule, content: str):
+    def __init__(
+        self,
+        module: PyModule,
+        content: str,
+        alias_map: dict[str, str] | None = None,
+    ):
         self.module = module
         self.content = content
+        self.alias_map = alias_map
         self._current_class: PyClass | None = None
 
     def visit_Import(self, node: ast.Import):
@@ -342,7 +355,7 @@ class _ASTVisitor(ast.NodeVisitor):
         for child in ast.walk(node):
             if not isinstance(child, ast.Call):
                 continue
-            cpp = resolve_cpp_symbol(self._get_name(child.func))
+            cpp = resolve_cpp_symbol(self._get_name(child.func), self.alias_map)
             if cpp is None:
                 continue
             key = (cpp, child.lineno)
