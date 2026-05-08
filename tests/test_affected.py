@@ -1552,3 +1552,66 @@ class TestAffectedTool:
         # `" a , b "` should parse to ["a", "b"] not [" a ", " b "].
         result = asyncio.run(_do_affected(" foo , bar "))
         assert "`foo, bar`" in result
+
+    def test_formatter_shows_tier_breakdown(self, stubbed_state, monkeypatch):
+        # Wire a binding so a `precise` api is produced, plus a cohort sibling
+        # so a `fuzzy` api shows up in the same response.
+        from torchtalk import indexer
+
+        binding = {
+            "python_name": "aten.foo",
+            "cpp_name": "foo_kernel",
+            "file_path": "/p/F.cpp",
+        }
+        monkeypatch.setattr(indexer._state, "by_cpp_name", {"foo_kernel": [binding]})
+        monkeypatch.setattr(
+            indexer._state,
+            "bindings_by_file",
+            {
+                "/p/F.cpp": [
+                    binding,
+                    {"python_name": "aten.helper", "file_path": "/p/F.cpp"},
+                ]
+            },
+        )
+        result = asyncio.run(_do_affected("foo_kernel"))
+        # Header + per-tier breakdown lines.
+        assert "Python APIs: 2 total (1 precise, 1 fuzzy)" in result
+        assert "Precise: foo" in result
+        assert "Fuzzy: helper" in result
+
+    def test_formatter_no_apis_renders_none(self, stubbed_state):
+        # No bindings, no fallback paths — apis come back empty.
+        result = asyncio.run(_do_affected("nonexistent_kernel"))
+        assert "Python APIs: (none)" in result
+
+    def test_formatter_omits_empty_tier_lines(self, stubbed_state, monkeypatch):
+        # Only one tier present — the other tier's bullet must not render.
+        from torchtalk import indexer
+
+        monkeypatch.setattr(
+            indexer._state,
+            "by_cpp_name",
+            {"foo_kernel": [{"python_name": "aten.foo"}]},
+        )
+        result = asyncio.run(_do_affected("foo_kernel"))
+        assert "Precise: foo" in result
+        assert "Fuzzy:" not in result
+
+    def test_formatter_caps_long_tier_lists(self, stubbed_state, monkeypatch):
+        # >10 fuzzy apis → preview cap applies.
+        from torchtalk import indexer
+
+        binding = {
+            "python_name": "aten.foo",
+            "cpp_name": "foo_kernel",
+            "file_path": "/p/F.cpp",
+        }
+        monkeypatch.setattr(indexer._state, "by_cpp_name", {"foo_kernel": [binding]})
+        siblings = [binding] + [
+            {"python_name": f"aten.h{i}", "file_path": "/p/F.cpp"} for i in range(12)
+        ]
+        monkeypatch.setattr(indexer._state, "bindings_by_file", {"/p/F.cpp": siblings})
+        result = asyncio.run(_do_affected("foo_kernel"))
+        # 12 fuzzy helpers -> preview shows 10 with `+2 more`.
+        assert "+2 more" in result

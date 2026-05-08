@@ -43,8 +43,26 @@ async def _do_affected(funcs: str, depth: int = 3) -> str:
     md.h2(f"Affected tests for: `{', '.join(func_list)}`")
     md.item(f"Callers walked: {result['callers_walked']}")
     md.item(f"Bindings matched: {len(result['bindings_matched'])}")
-    apis = ", ".join(result["python_apis"]) or "(none)"
-    md.item(f"Python APIs: {apis}")
+
+    apis = result["python_apis"]
+    tiers = result.get("api_tier", {})
+    if not apis:
+        md.item("Python APIs: (none)")
+    else:
+        precise = sorted(a for a in apis if tiers.get(a) == "precise")
+        fuzzy = sorted(a for a in apis if tiers.get(a) == "fuzzy")
+        md.item(
+            f"Python APIs: {len(apis)} total "
+            f"({len(precise)} precise, {len(fuzzy)} fuzzy)"
+        )
+        if precise:
+            preview = ", ".join(precise[:10])
+            suffix = f" *+{len(precise) - 10} more*" if len(precise) > 10 else ""
+            md.item(f"Precise: {preview}{suffix}", 1)
+        if fuzzy:
+            preview = ", ".join(fuzzy[:10])
+            suffix = f" *+{len(fuzzy) - 10} more*" if len(fuzzy) > 10 else ""
+            md.item(f"Fuzzy: {preview}{suffix}", 1)
     md.blank()
 
     runs = result["test_runs"]
