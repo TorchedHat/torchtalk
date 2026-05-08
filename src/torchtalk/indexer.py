@@ -596,9 +596,10 @@ def _init_python_modules(source: str):
         log.warning(f"Failed to analyze Python modules: {e}")
 
 
-# v2: edges now include `torch.<op>` aliases resolved through native_functions
-# (Phase 3 alias map). Bump invalidates pre-alias caches so they get rebuilt.
-_PY_CPP_EDGES_CACHE_VERSION = 2
+# v3: edges now include import-aware resolution (`linalg.cross(...)` →
+# `aten::linalg_cross` after `from torch import linalg`) and namespaced
+# aliases. Bump invalidates v2 caches built before import tracking.
+_PY_CPP_EDGES_CACHE_VERSION = 3
 
 
 def _build_py_to_cpp_edges(modules: dict[str, Any]) -> dict[str, list[dict]]:

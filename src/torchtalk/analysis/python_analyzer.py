@@ -11,7 +11,9 @@ log = logging.getLogger(__name__)
 
 
 def resolve_cpp_symbol(
-    call_name: str, alias_map: dict[str, str] | None = None
+    call_name: str,
+    alias_map: dict[str, str] | None = None,
+    import_aliases: dict[str, str] | None = None,
 ) -> str | None:
     """Map a dotted Python call name to its canonical C++ symbol.
 
@@ -19,8 +21,11 @@ def resolve_cpp_symbol(
     `aten::add` (overload tags drop). `torch._C._tensor_op` and `_C.foo`
     return the bare callable name. When `alias_map` is provided, plain
     `torch.<op>` forms resolve through it (e.g. `torch.add` → `aten::add`).
-    Returns None for non-binding calls (e.g. `t.add(1)` — method-call
-    ambiguity).
+    When `import_aliases` is provided, the leading segment of `call_name` is
+    rewritten through it before the alias-map lookup, letting forms like
+    `linalg.cross(...)` (after `from torch import linalg`) or `F.linear(...)`
+    (after `from torch.nn import functional as F`) resolve. Returns None for
+    non-binding calls (e.g. `t.add(1)` — method-call ambiguity).
     """
     if not call_name:
         return None
@@ -35,6 +40,12 @@ def resolve_cpp_symbol(
         return call_name[len("_C.") :].split(".")[0]
     if alias_map and (resolved := alias_map.get(call_name)):
         return resolved
+    if alias_map and import_aliases:
+        first, dot, rest = call_name.partition(".")
+        if (expansion := import_aliases.get(first)) is not None:
+            expanded = f"{expansion}.{rest}" if dot else expansion
+            if (resolved := alias_map.get(expanded)) is not None:
+                return resolved
     return None
 
 
@@ -129,8 +140,11 @@ class PythonAnalyzer:
 
         module = PyModule(name=module_name, file_path=str(path))
 
-        # Extract components
+        # Pre-scan imports so call-name resolution can rewrite local names
+        # (`linalg.cross(...)` → `torch.linalg.cross`) regardless of where the
+        # function lives relative to the import statements in the file.
         visitor = _ASTVisitor(module, content, alias_map=self._alias_map)
+        visitor.collect_imports(tree)
         visitor.visit(tree)
 
         self._module_cache[module_name] = module
@@ -193,7 +207,33 @@ class _ASTVisitor(ast.NodeVisitor):
         self.module = module
         self.content = content
         self.alias_map = alias_map
+        # Local-name → fully-qualified dotted path. Populated by
+        # `collect_imports` before `visit` runs so functions can be analysed
+        # in any source order relative to imports.
+        self.import_aliases: dict[str, str] = {}
         self._current_class: PyClass | None = None
+
+    def collect_imports(self, tree: ast.AST) -> None:
+        """Walk the tree once to seed `import_aliases` from Import nodes."""
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                # `import torch.linalg as L` binds L; bare `import torch.linalg`
+                # binds `torch` (and the call site uses the full dotted form,
+                # which already matches the alias map without rewriting).
+                for alias in node.names:
+                    if alias.asname:
+                        self.import_aliases[alias.asname] = alias.name
+            elif isinstance(node, ast.ImportFrom):
+                # Only absolute imports map cleanly back to a `torch.<...>`
+                # form; relative imports (`from . import X`) depend on package
+                # location and are skipped.
+                if node.level or not node.module:
+                    continue
+                for alias in node.names:
+                    if alias.name == "*":
+                        continue
+                    local = alias.asname or alias.name
+                    self.import_aliases[local] = f"{node.module}.{alias.name}"
 
     def visit_Import(self, node: ast.Import):
         """Handle: import x, import x as y"""
@@ -355,7 +395,9 @@ class _ASTVisitor(ast.NodeVisitor):
         for child in ast.walk(node):
             if not isinstance(child, ast.Call):
                 continue
-            cpp = resolve_cpp_symbol(self._get_name(child.func), self.alias_map)
+            cpp = resolve_cpp_symbol(
+                self._get_name(child.func), self.alias_map, self.import_aliases
+            )
             if cpp is None:
                 continue
             key = (cpp, child.lineno)
