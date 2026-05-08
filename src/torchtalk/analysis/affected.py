@@ -218,6 +218,28 @@ def api_tier(sources: set[str]) -> str:
     return "precise" if sources & _PRECISE_TAGS else "fuzzy"
 
 
+def _split_alias_expansion(
+    api_sources: dict[str, set[str]],
+    alias_map: dict[str, list[str] | tuple[str, ...]],
+) -> tuple[set[str], set[str]]:
+    """Partition alias-map targets by source-api tier.
+
+    Returns (precise_targets, fuzzy_targets). A target is `precise_targets`
+    if ANY of its source apis was already precise; otherwise it lands in
+    `fuzzy_targets`. Lets callers tag with structural-or-fuzzy variants so
+    expanding a fuzzy-only api never elevates its alias to precise.
+    """
+    precise: set[str] = set()
+    fuzzy: set[str] = set()
+    for api, tags in api_sources.items():
+        targets = alias_map.get(api)
+        if not targets:
+            continue
+        bucket = precise if tags & _PRECISE_TAGS else fuzzy
+        bucket.update(targets)
+    return precise, fuzzy
+
+
 def _file_cohort_apis(
     matched: list[dict],
     bindings_by_file: dict[str, list[dict]],
@@ -472,21 +494,22 @@ def affected_tests(
 
     # Backward kernels are tested via gradcheck on the forward op's TestCase,
     # so any `*_backward` API expands to its forward op name(s) before the
-    # downstream test-class / OpInfo lookups run.
+    # downstream test-class / OpInfo lookups run. Tier propagates: an
+    # expansion from a fuzzy-only source stays fuzzy.
     if backward_to_forward:
-        expanded: set[str] = set()
-        for api in list(api_sources):
-            expanded.update(backward_to_forward.get(api, ()))
-        _tag_apis(api_sources, expanded, "backward_alias")
+        precise_exp, fuzzy_exp = _split_alias_expansion(
+            api_sources, backward_to_forward
+        )
+        _tag_apis(api_sources, precise_exp, "backward_alias")
+        _tag_apis(api_sources, fuzzy_exp - precise_exp, "backward_alias_fuzzy")
 
     # Bridge internal aten names to user-facing python ops via the decomp/refs
     # registry (e.g. convolution_overrideable → conv2d) so downstream lookups
     # find the test classes / OpInfo entries that actually exist.
     if decomp_alias_map:
-        expanded = set()
-        for api in list(api_sources):
-            expanded.update(decomp_alias_map.get(api, ()))
-        _tag_apis(api_sources, expanded, "decomp_alias")
+        precise_exp, fuzzy_exp = _split_alias_expansion(api_sources, decomp_alias_map)
+        _tag_apis(api_sources, precise_exp, "decomp_alias")
+        _tag_apis(api_sources, fuzzy_exp - precise_exp, "decomp_alias_fuzzy")
 
     apis: set[str] = set(api_sources)
     by_file = _tests_for_apis(apis, test_classes, test_files)

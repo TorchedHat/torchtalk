@@ -1102,6 +1102,142 @@ class TestApiTierInOutput:
         assert result["api_tier"]["helper"] == "fuzzy"
 
 
+class TestTierPropagation:
+    @pytest.fixture
+    def extractor(self):
+        ext = MagicMock()
+        ext.get_callers.side_effect = lambda func, fuzzy: []
+        ext.function_locations = {}
+        return ext
+
+    def test_backward_alias_from_precise_source_is_precise(self, extractor):
+        # `foo_backward` resolves precisely via call_graph; its forward expansion
+        # `foo` should inherit precise tier (via `backward_alias` tag).
+        by_cpp_name = {"foo_backward_kernel": [{"python_name": "aten.foo_backward"}]}
+        result = affected_tests(
+            funcs=["foo_backward_kernel"],
+            cpp_extractor=extractor,
+            by_cpp_name=by_cpp_name,
+            test_classes={},
+            test_files={},
+            backward_to_forward={"foo_backward": ["foo"]},
+            depth=1,
+        )
+        assert "backward_alias" in result["api_sources"]["foo"]
+        assert result["api_tier"]["foo"] == "precise"
+
+    def test_backward_alias_from_fuzzy_source_stays_fuzzy(self, extractor):
+        # Source api `foo_backward` arrives only via the cohort path (fuzzy).
+        # Its expansion `foo` must stay fuzzy — not be elevated to precise.
+        binding = {
+            "python_name": "aten.unrelated",
+            "cpp_name": "x",
+            "file_path": "/p/F.cpp",
+        }
+        bindings_by_file = {
+            "/p/F.cpp": [
+                binding,
+                {"python_name": "aten.foo_backward", "file_path": "/p/F.cpp"},
+            ]
+        }
+        result = affected_tests(
+            funcs=["x"],
+            cpp_extractor=extractor,
+            by_cpp_name={"x": [binding]},
+            test_classes={},
+            test_files={},
+            bindings_by_file=bindings_by_file,
+            backward_to_forward={"foo_backward": ["foo"]},
+            depth=1,
+        )
+        # `foo_backward` arrived only via cohort -> fuzzy.
+        assert result["api_tier"]["foo_backward"] == "fuzzy"
+        # Its forward expansion is tagged with the fuzzy alias variant.
+        assert "backward_alias_fuzzy" in result["api_sources"]["foo"]
+        assert "backward_alias" not in result["api_sources"]["foo"]
+        assert result["api_tier"]["foo"] == "fuzzy"
+
+    def test_decomp_alias_from_precise_source_is_precise(self, extractor):
+        by_cpp_name = {"foo_kernel": [{"python_name": "aten.convolution_overrideable"}]}
+        result = affected_tests(
+            funcs=["foo_kernel"],
+            cpp_extractor=extractor,
+            by_cpp_name=by_cpp_name,
+            test_classes={},
+            test_files={},
+            decomp_alias_map={"convolution_overrideable": ["conv2d"]},
+            depth=1,
+        )
+        assert "decomp_alias" in result["api_sources"]["conv2d"]
+        assert result["api_tier"]["conv2d"] == "precise"
+
+    def test_decomp_alias_from_fuzzy_source_stays_fuzzy(self, extractor):
+        binding = {
+            "python_name": "aten.x",
+            "cpp_name": "x",
+            "file_path": "/p/F.cpp",
+        }
+        bindings_by_file = {
+            "/p/F.cpp": [
+                binding,
+                {
+                    "python_name": "aten.convolution_overrideable",
+                    "file_path": "/p/F.cpp",
+                },
+            ]
+        }
+        result = affected_tests(
+            funcs=["x"],
+            cpp_extractor=extractor,
+            by_cpp_name={"x": [binding]},
+            test_classes={},
+            test_files={},
+            bindings_by_file=bindings_by_file,
+            decomp_alias_map={"convolution_overrideable": ["conv2d"]},
+            depth=1,
+        )
+        assert result["api_tier"]["convolution_overrideable"] == "fuzzy"
+        assert "decomp_alias_fuzzy" in result["api_sources"]["conv2d"]
+        assert "decomp_alias" not in result["api_sources"]["conv2d"]
+        assert result["api_tier"]["conv2d"] == "fuzzy"
+
+    def test_mixed_source_precise_wins_for_alias(self, extractor):
+        # A target reached via BOTH a precise source (call_graph) and a fuzzy
+        # source (cohort) should keep the precise alias tag.
+        binding_precise = {"python_name": "aten.foo_backward"}
+        binding_fuzzy = {
+            "python_name": "aten.x",
+            "cpp_name": "x",
+            "file_path": "/p/F.cpp",
+        }
+        bindings_by_file = {
+            "/p/F.cpp": [
+                binding_fuzzy,
+                {"python_name": "aten.bar_backward", "file_path": "/p/F.cpp"},
+            ]
+        }
+        result = affected_tests(
+            funcs=["foo_backward_kernel", "x"],
+            cpp_extractor=extractor,
+            by_cpp_name={
+                "foo_backward_kernel": [binding_precise],
+                "x": [binding_fuzzy],
+            },
+            test_classes={},
+            test_files={},
+            bindings_by_file=bindings_by_file,
+            # Both backward apis collide on the same forward target `shared`.
+            backward_to_forward={
+                "foo_backward": ["shared"],
+                "bar_backward": ["shared"],
+            },
+            depth=1,
+        )
+        # Precise tag wins over fuzzy when both contributed.
+        assert "backward_alias" in result["api_sources"]["shared"]
+        assert result["api_tier"]["shared"] == "precise"
+
+
 class TestMentionCapUnbounded:
     def test_unbounded_keeps_high_volume_api(self):
         # 100 hits on the same api would normally exceed default cap=50.
