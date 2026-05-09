@@ -37,11 +37,13 @@ torchtalk cursor-add -C /path/to/your/project -p /path/to/pytorch
 
 | Tool | Description |
 |------|-------------|
+| `get_status()` | TorchTalk readiness summary across bindings, call graph, modules, tests |
 | `trace(func, focus?)` | Trace any PyTorch op: Python → YAML → C++ → file:line |
 | `search(query, mode?, backend?)` | mode="bindings": dispatch registrations. mode="kernels": CUDA kernel launches |
-| `graph(func, mode?, depth?)` | mode="callers": inbound. mode="calls": outbound. mode="impact": transitive callers |
-| `modules(name, mode?)` | mode="trace": class details. mode="list": browse by category ("nn", "optim", "all") |
-| `tests(query, mode?)` | mode="find": search tests. mode="utils": list utilities. mode="file_info": test file details |
+| `graph(func, mode?, depth?, walk_python?)` | mode="callers": inbound. mode="calls": outbound. mode="impact": transitive callers (depth/walk_python apply to impact only) |
+| `modules(name, mode?, focus?)` | mode="trace": class details (focus="full" adds bases/docstring). mode="list": browse by category ("nn", "optim", "all") |
+| `tests(query?, mode?)` | mode="find": search tests. mode="utils": list utilities (query ignored). mode="file_info": test file details |
+| `affected(funcs, depth?)` | Map changed C++ functions (comma-separated) to impacted Python test files |
 
 ## CLI Commands
 
@@ -124,15 +126,16 @@ torchtalk snapshot diff nightly/latest current --json \
 ```
 torchtalk/
 ├── src/torchtalk/
-│   ├── server.py              # MCP server (6 consolidated tools)
+│   ├── server.py              # MCP server (get_status + 6 query tools)
 │   ├── indexer.py             # Data loading, caching, initialization
 │   ├── cli.py                 # CLI (torchtalk mcp-serve)
 │   ├── formatting.py          # Response formatting (CompactText/Markdown)
 │   ├── tools/
-│   │   ├── ops.py             # trace, search, cuda_kernels
-│   │   ├── graph.py           # calls, called_by, impact
-│   │   ├── modules.py         # trace_module, list_modules
-│   │   └── tests.py           # find_similar_tests, list_test_utils, test_file_info
+│   │   ├── ops.py             # `trace` and `search` mode handlers
+│   │   ├── graph.py           # `graph` mode handlers (callers/calls/impact)
+│   │   ├── modules.py         # `modules` mode handlers (trace/list)
+│   │   ├── tests.py           # `tests` mode handlers (find/utils/file_info)
+│   │   └── affected.py        # `affected` test-impact mapper
 │   └── analysis/
 │       ├── binding_detector.py    # pybind11/TORCH_LIBRARY detection (tree-sitter)
 │       ├── cpp_call_graph.py      # C++ call graph extraction (libclang)
