@@ -1577,8 +1577,11 @@ class TestAffectedTool:
         result = asyncio.run(_do_affected("foo_kernel"))
         # Header + per-tier breakdown lines.
         assert "Python APIs: 2 total (1 precise, 1 fuzzy)" in result
-        assert "Precise: foo" in result
+        # Precise apis carry inline source tags so callers can see provenance.
+        assert "Precise: foo [call_graph,cohort]" in result
         assert "Fuzzy: helper" in result
+        # Fuzzy line is intentionally tag-free to keep large lists compact.
+        assert "helper [" not in result
 
     def test_formatter_no_apis_renders_none(self, stubbed_state):
         # No bindings, no fallback paths — apis come back empty.
@@ -1595,7 +1598,7 @@ class TestAffectedTool:
             {"foo_kernel": [{"python_name": "aten.foo"}]},
         )
         result = asyncio.run(_do_affected("foo_kernel"))
-        assert "Precise: foo" in result
+        assert "Precise: foo [call_graph]" in result
         assert "Fuzzy:" not in result
 
     def test_formatter_caps_long_tier_lists(self, stubbed_state, monkeypatch):

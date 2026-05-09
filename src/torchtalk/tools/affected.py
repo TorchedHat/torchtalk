@@ -46,6 +46,7 @@ async def _do_affected(funcs: str, depth: int = 3) -> str:
 
     apis = result["python_apis"]
     tiers = result.get("api_tier", {})
+    sources = result.get("api_sources", {})
     if not apis:
         md.item("Python APIs: (none)")
     else:
@@ -56,10 +57,15 @@ async def _do_affected(funcs: str, depth: int = 3) -> str:
             f"({len(precise)} precise, {len(fuzzy)} fuzzy)"
         )
         if precise:
-            preview = ", ".join(precise[:10])
+            # Inline source tags — diagnoses *why* each precise api is trusted
+            # (call_graph vs dispatch vs alias bridge).
+            tagged = [f"{a} [{','.join(sources.get(a, []))}]" for a in precise[:10]]
+            preview = ", ".join(tagged)
             suffix = f" *+{len(precise) - 10} more*" if len(precise) > 10 else ""
             md.item(f"Precise: {preview}{suffix}", 1)
         if fuzzy:
+            # Fuzzy tags are usually `cohort`/`mention`/`vendor` and add noise
+            # at scale; keep the list compact and skip per-api tags here.
             preview = ", ".join(fuzzy[:10])
             suffix = f" *+{len(fuzzy) - 10} more*" if len(fuzzy) > 10 else ""
             md.item(f"Fuzzy: {preview}{suffix}", 1)
