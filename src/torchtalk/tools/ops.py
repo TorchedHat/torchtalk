@@ -211,7 +211,7 @@ async def trace(
     return _with_note(md.build())
 
 
-async def _do_cuda_kernels(query: str = "") -> str:
+async def _do_cuda_kernels(query: str = "", limit: int = 15) -> str:
     _ensure_loaded()
 
     md = create_formatter()
@@ -230,7 +230,7 @@ async def _do_cuda_kernels(query: str = "") -> str:
 
     md.text(f"Found {len(kernels)} kernel(s)\n")
 
-    for kernel in kernels[:15]:
+    for kernel in kernels[:limit]:
         name = kernel.get("name", "unnamed")
         path = _rel_path(kernel.get("file_path", ""))
         line = kernel.get("line_number", "")
@@ -240,8 +240,8 @@ async def _do_cuda_kernels(query: str = "") -> str:
         if callers:
             md.item(f"Called by: {', '.join(f'`{c}`' for c in callers[:3])}", 1)
 
-    if len(kernels) > 15:
-        md.text(f"\n*Showing 15 of {len(kernels)} kernels*")
+    if len(kernels) > limit:
+        md.text(f"\n*Showing {limit} of {len(kernels)} kernels*")
 
     return _with_note(md.build())
 

@@ -149,19 +149,22 @@ def create_formatter() -> ResponseFormatter:
 
 
 def relative_path(full_path: str, base: str | None = None) -> str:
-    """Convert absolute path to relative, stripping common prefixes."""
+    """Convert absolute path to relative, stripping the indexed `base` prefix.
+
+    Falls back to a leading `pytorch/` strip for paths that arrive already
+    half-relativised (e.g. from generated headers in `build/aten/...`).
+    """
     if not full_path:
         return ""
 
-    path = full_path
-    prefixes = ["/myworkspace/pytorch/", "pytorch/"]
+    prefixes = ["pytorch/"]
     if base:
         prefixes.insert(0, base.rstrip("/") + "/")
 
     for prefix in prefixes:
-        if path.startswith(prefix):
-            return path[len(prefix) :]
-    return path
+        if full_path.startswith(prefix):
+            return full_path[len(prefix) :]
+    return full_path
 
 
 def coverage_note(extractor) -> str:

@@ -78,7 +78,13 @@ async def get_status() -> str:
         md.bold("Status", "Not available")
         if _state.pytorch_source:
             src = Path(_state.pytorch_source)
-            if not (src / "compile_commands.json").exists():
+            # PyTorch's `python setup.py develop` lands compile_commands.json
+            # in `build/`; some checkouts have it at the root. Check both,
+            # matching cli.py / indexer.py / cpp_call_graph.py.
+            if not (
+                (src / "compile_commands.json").exists()
+                or (src / "build" / "compile_commands.json").exists()
+            ):
                 md.item("Missing compile_commands.json", 1)
                 md.item(
                     "Fix: Build PyTorch with `python setup.py develop`",
@@ -180,11 +186,12 @@ async def search(
 ) -> str:
     """Search PyTorch bindings or CUDA kernels by name.
 
-    mode='bindings' for dispatch registrations,
-    mode='kernels' for GPU kernel launches.
+    mode='bindings' for dispatch registrations (filterable by `backend`),
+    mode='kernels' for GPU kernel launches (`backend` is ignored — kernels
+    have no dispatch key).
     """
     if mode == "kernels":
-        return await _do_cuda_kernels(query)
+        return await _do_cuda_kernels(query, limit=limit)
     return await _do_search_bindings(query, backend=backend, limit=limit)
 
 
@@ -195,12 +202,14 @@ async def graph(
     depth: int = 2,
     fuzzy_all_levels: bool = False,
     walk_python: bool = False,
+    focus: Literal["callers", "full"] = "callers",
 ) -> str:
     """Query the C++ call graph.
 
-    mode='callers' for inbound, 'calls' for outbound,
-    'impact' for transitive callers. `depth`, `fuzzy_all_levels`, and
-    `walk_python` apply to mode='impact' only and are ignored otherwise.
+    mode='callers' for inbound, 'calls' for outbound, 'impact' for transitive
+    callers. `depth`, `fuzzy_all_levels`, `walk_python`, and `focus` apply to
+    mode='impact' only and are ignored otherwise. `focus='full'` adds a
+    Python Entry Points section listing each walked C++ symbol's binding.
     """
     if mode == "calls":
         return await _do_calls(function_name)
@@ -208,6 +217,7 @@ async def graph(
         return await _do_impact(
             function_name,
             depth=depth,
+            focus=focus,
             fuzzy_all_levels=fuzzy_all_levels,
             walk_python=walk_python,
         )
@@ -236,18 +246,20 @@ async def tests(
     query: str = "",
     mode: Literal["find", "utils", "file_info"] = "find",
     limit: int = 10,
+    focus: Literal["all", "functions", "classes", "files"] = "all",
 ) -> str:
     """Query PyTorch test infrastructure.
 
-    mode='find' to search tests by `query`. mode='utils' lists test utility
-    modules (`query` is ignored). mode='file_info' returns details for test
-    files matching `query` as a substring.
+    mode='find' to search tests by `query`; `focus` narrows results to a
+    single category. mode='utils' lists test utility modules (`query` and
+    `focus` are ignored). mode='file_info' returns details for test files
+    matching `query` as a substring.
     """
     if mode == "utils":
         return await _do_list_test_utils()
     elif mode == "file_info":
         return await _do_test_file_info(query)
-    return await _do_find_similar_tests(query, limit=limit)
+    return await _do_find_similar_tests(query, limit=limit, focus=focus)
 
 
 @mcp.tool()
