@@ -211,21 +211,21 @@ async def trace(
     return _with_note(md.build())
 
 
-async def _do_cuda_kernels(function_name: str = "") -> str:
+async def _do_cuda_kernels(query: str = "") -> str:
     _ensure_loaded()
 
     md = create_formatter()
-    title = f"CUDA Kernels: '{function_name}'" if function_name else "CUDA Kernels"
+    title = f"CUDA Kernels: '{query}'" if query else "CUDA Kernels"
     md.h2(title)
 
     kernels = _state.cuda_kernels
-    if function_name:
-        name_lower = function_name.lower()
-        kernels = [k for k in kernels if name_lower in (k.get("name") or "").lower()]
+    if query:
+        needle = query.lower()
+        kernels = [k for k in kernels if needle in (k.get("name") or "").lower()]
 
     if not kernels:
-        if function_name:
-            return _with_note(f"No CUDA kernels found matching '{function_name}'.")
+        if query:
+            return _with_note(f"No CUDA kernels found matching '{query}'.")
         return _with_note("No CUDA kernels found.")
 
     md.text(f"Found {len(kernels)} kernel(s)\n")

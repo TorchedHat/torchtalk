@@ -199,7 +199,8 @@ async def graph(
     """Query the C++ call graph.
 
     mode='callers' for inbound, 'calls' for outbound,
-    'impact' for transitive callers.
+    'impact' for transitive callers. `depth`, `fuzzy_all_levels`, and
+    `walk_python` apply to mode='impact' only and are ignored otherwise.
     """
     if mode == "calls":
         return await _do_calls(function_name)
@@ -217,27 +218,30 @@ async def graph(
 async def modules(
     name: str,
     mode: Literal["trace", "list"] = "trace",
+    focus: Literal["methods", "full"] = "methods",
 ) -> str:
     """Query Python modules.
 
-    mode='trace' for class details,
-    mode='list' for browsing by category ('nn', 'optim', 'all').
+    mode='trace' for class details (focus='full' also surfaces bases, type,
+    and docstring). mode='list' for browsing by category ('nn', 'optim',
+    'all'); `focus` is ignored in list mode.
     """
     if mode == "list":
         return await _do_list_modules(category=name)
-    return await _do_trace_module(module_name=name)
+    return await _do_trace_module(module_name=name, focus=focus)
 
 
 @mcp.tool()
 async def tests(
-    query: str,
+    query: str = "",
     mode: Literal["find", "utils", "file_info"] = "find",
     limit: int = 10,
 ) -> str:
     """Query PyTorch test infrastructure.
 
-    mode='find' to search tests, 'utils' for utilities,
-    'file_info' for details on a test file.
+    mode='find' to search tests by `query`. mode='utils' lists test utility
+    modules (`query` is ignored). mode='file_info' returns details for test
+    files matching `query` as a substring.
     """
     if mode == "utils":
         return await _do_list_test_utils()

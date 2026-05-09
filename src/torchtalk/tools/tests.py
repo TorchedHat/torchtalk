@@ -130,7 +130,7 @@ async def _do_find_similar_tests(
     return md.build()
 
 
-async def _do_list_test_utils(category: str = "all") -> str:
+async def _do_list_test_utils() -> str:
     _ensure_loaded("test")
 
     md = create_formatter()
@@ -231,17 +231,17 @@ async def _do_list_test_utils(category: str = "all") -> str:
     return md.build()
 
 
-async def _do_test_file_info(file_path: str) -> str:
+async def _do_test_file_info(query: str) -> str:
     _ensure_loaded("test")
 
-    query = file_path.lower()
+    needle = query.lower()
     matches = []
     for path, info in _state.test_files.items():
-        if query in path.lower():
+        if needle in path.lower():
             matches.append((path, info))
 
     if not matches:
-        return f"No test file found matching `{file_path}`."
+        return f"No test file found matching `{query}`."
 
     md = create_formatter()
 
