@@ -258,7 +258,8 @@ async def modules(
 
     mode='trace' for class details (focus='full' also surfaces bases, type,
     and docstring). mode='list' for browsing by category ('nn', 'optim',
-    'all'); `focus` is ignored in list mode.
+    'all'); any other `name` value is treated as a substring search across
+    all class names. `focus` is ignored in list mode.
     """
     if mode == "list":
         return await _do_list_modules(category=name)
