@@ -119,6 +119,30 @@ async def get_status() -> str:
         md.bold("Status", "Not loaded")
     md.blank()
 
+    # Auxiliary indices — populated as side-effects of the major loaders
+    # above. Listed so callers can verify the data backing `affected` and
+    # `graph(walk_python=True)` is actually present.
+    aux = [
+        ("alias_map", _state.alias_map),
+        ("py_to_cpp_edges", _state.py_to_cpp_edges),
+        ("decomp_alias_map", _state.decomp_alias_map),
+        ("backward_to_forward", _state.backward_to_forward),
+        ("kernel_impl_to_op", _state.kernel_impl_to_op),
+        ("dispatch_to_op", _state.dispatch_to_op),
+        ("opinfo_alias_map", _state.opinfo_alias_map),
+        ("test_attr_index", _state.test_attr_index),
+        ("python_profiling", _state.python_profiling),
+        ("bindings_by_file", _state.bindings_by_file),
+        ("ops_by_file", _state.ops_by_file),
+        ("symbol_to_file", _state.symbol_to_file),
+    ]
+    populated = [(name, m) for name, m in aux if m]
+    if populated:
+        md.h3("Cross-language Indices")
+        for name, m in populated:
+            md.item(f"{name}: {len(m):,} entries", 1)
+        md.blank()
+
     ready = "Ready" if _state.bindings else "Not ready"
     cpp_ready = (
         "Ready"
