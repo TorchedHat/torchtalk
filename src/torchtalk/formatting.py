@@ -149,16 +149,40 @@ def create_formatter() -> ResponseFormatter:
 
 
 def relative_path(full_path: str, base: str | None = None) -> str:
-    """Convert absolute path to relative, stripping common prefixes."""
+    """Convert absolute path to relative, stripping the indexed `base` prefix.
+
+    Falls back to a leading `pytorch/` strip for paths that arrive already
+    half-relativised (e.g. from generated headers in `build/aten/...`).
+    """
     if not full_path:
         return ""
 
-    path = full_path
-    prefixes = ["/myworkspace/pytorch/", "pytorch/"]
+    prefixes = ["pytorch/"]
     if base:
         prefixes.insert(0, base.rstrip("/") + "/")
 
     for prefix in prefixes:
-        if path.startswith(prefix):
-            return path[len(prefix) :]
-    return path
+        if full_path.startswith(prefix):
+            return full_path[len(prefix) :]
+    return full_path
+
+
+def coverage_note(extractor) -> str:
+    """Return a one-line C++ TU coverage summary, or '' when empty."""
+    cov = extractor.coverage_summary()
+    if not cov:
+        return ""
+    ok = cov.get("ok", 0)
+    unsupported = cov.get("unsupported_language", 0)
+    parse_failed = cov.get("parse_failed", 0)
+    filtered = cov.get("filtered", 0)
+    total = ok + unsupported + parse_failed + filtered
+    if total == 0:
+        return ""
+    bits = []
+    if unsupported:
+        bits.append(f"{unsupported:,} CUDA/.mm/.cc")
+    if parse_failed:
+        bits.append(f"{parse_failed:,} parse-failed")
+    unindexed = f"; unindexed: {', '.join(bits)}" if bits else ""
+    return f"Coverage: {ok:,} of {total:,} C++ TUs indexed{unindexed}."

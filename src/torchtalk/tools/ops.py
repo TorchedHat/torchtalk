@@ -5,8 +5,13 @@ from __future__ import annotations
 from typing import Literal
 
 from ..analysis.helpers import safe_sort_key, truncate
-from ..formatting import create_formatter, relative_path
-from ..indexer import _ensure_loaded, _fuzzy_find, _state
+from ..formatting import coverage_note, create_formatter, relative_path
+from ..indexer import _ensure_loaded, _fuzzy_find, _impls_from_extractor, _state
+
+
+def _with_note(text: str) -> str:
+    note = coverage_note(_state.cpp_extractor)
+    return f"{text}\n\n{note}" if note else text
 
 
 def _rel_path(path: str) -> str:
@@ -155,6 +160,21 @@ async def trace(
                 if impl_name in _state.native_implementations:
                     impls.extend(_state.native_implementations[impl_name])
 
+        # Hybrid: augment with libclang locations the regex missed.
+        impl_keys = {(i["function_name"], i.get("file_path")) for i in impls}
+        targets = [base_name]
+        if native:
+            targets.extend(native.get("dispatch", {}).values())
+        for target in targets:
+            if not target:
+                continue
+            for impl in _impls_from_extractor(target):
+                key = (impl["function_name"], impl["file_path"])
+                if key in impl_keys:
+                    continue
+                impl_keys.add(key)
+                impls.append(impl)
+
         if impls:
             md.h3("C++ Implementations")
             seen = set()
@@ -188,29 +208,29 @@ async def trace(
         else:
             md.text(f"Function `{function_name}` not found in PyTorch bindings.")
 
-    return md.build()
+    return _with_note(md.build())
 
 
-async def _do_cuda_kernels(function_name: str = "") -> str:
+async def _do_cuda_kernels(query: str = "", limit: int = 15) -> str:
     _ensure_loaded()
 
     md = create_formatter()
-    title = f"CUDA Kernels: '{function_name}'" if function_name else "CUDA Kernels"
+    title = f"CUDA Kernels: '{query}'" if query else "CUDA Kernels"
     md.h2(title)
 
     kernels = _state.cuda_kernels
-    if function_name:
-        name_lower = function_name.lower()
-        kernels = [k for k in kernels if name_lower in (k.get("name") or "").lower()]
+    if query:
+        needle = query.lower()
+        kernels = [k for k in kernels if needle in (k.get("name") or "").lower()]
 
     if not kernels:
-        if function_name:
-            return f"No CUDA kernels found matching '{function_name}'."
-        return "No CUDA kernels found."
+        if query:
+            return _with_note(f"No CUDA kernels found matching '{query}'.")
+        return _with_note("No CUDA kernels found.")
 
     md.text(f"Found {len(kernels)} kernel(s)\n")
 
-    for kernel in kernels[:15]:
+    for kernel in kernels[:limit]:
         name = kernel.get("name", "unnamed")
         path = _rel_path(kernel.get("file_path", ""))
         line = kernel.get("line_number", "")
@@ -220,10 +240,10 @@ async def _do_cuda_kernels(function_name: str = "") -> str:
         if callers:
             md.item(f"Called by: {', '.join(f'`{c}`' for c in callers[:3])}", 1)
 
-    if len(kernels) > 15:
-        md.text(f"\n*Showing 15 of {len(kernels)} kernels*")
+    if len(kernels) > limit:
+        md.text(f"\n*Showing {limit} of {len(kernels)} kernels*")
 
-    return md.build()
+    return _with_note(md.build())
 
 
 async def _do_search_bindings(query: str, backend: str = "", limit: int = 10) -> str:

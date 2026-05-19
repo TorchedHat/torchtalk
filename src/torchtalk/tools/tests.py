@@ -31,6 +31,11 @@ async def _do_find_similar_tests(
 ) -> str:
     _ensure_loaded("test")
 
+    # Without a query, the file branch's naked-substring match (`q in path`)
+    # would match every indexed file — refuse rather than dump 1k+ paths.
+    if not query.strip():
+        return "Provide a query string to search tests."
+
     query_lower = query.lower()
     md = create_formatter()
     md.h2(f"Tests matching: `{query}`")
@@ -130,7 +135,7 @@ async def _do_find_similar_tests(
     return md.build()
 
 
-async def _do_list_test_utils(category: str = "all") -> str:
+async def _do_list_test_utils() -> str:
     _ensure_loaded("test")
 
     md = create_formatter()
@@ -186,10 +191,13 @@ async def _do_list_test_utils(category: str = "all") -> str:
 
     md.h3("Core Utilities")
     for path, info in utility_info.items():
-        exists = (
-            path in _state.test_utilities or Path(_state.pytorch_source or "") / path
-        )
-        status = "✓" if exists else "?"
+        if path in _state.test_utilities:
+            exists = True
+        elif _state.pytorch_source:
+            exists = (Path(_state.pytorch_source) / path).exists()
+        else:
+            exists = False
+        status = "[ok]" if exists else "[missing]"
         md.item(f"**{info['name']}** {status}")
         md.item(f"*{info['description']}*", 1)
         md.item(f"Key: `{', '.join(info['key_items'][:4])}`", 1)
@@ -228,17 +236,17 @@ async def _do_list_test_utils(category: str = "all") -> str:
     return md.build()
 
 
-async def _do_test_file_info(file_path: str) -> str:
+async def _do_test_file_info(query: str) -> str:
     _ensure_loaded("test")
 
-    query = file_path.lower()
+    needle = query.lower()
     matches = []
     for path, info in _state.test_files.items():
-        if query in path.lower():
+        if needle in path.lower():
             matches.append((path, info))
 
     if not matches:
-        return f"No test file found matching `{file_path}`."
+        return f"No test file found matching `{query}`."
 
     md = create_formatter()
 

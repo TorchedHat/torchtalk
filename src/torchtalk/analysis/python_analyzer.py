@@ -10,6 +10,53 @@ from .helpers import truncate
 log = logging.getLogger(__name__)
 
 
+def resolve_cpp_symbol(
+    call_name: str,
+    alias_map: dict[str, str] | None = None,
+    import_aliases: dict[str, str] | None = None,
+) -> str | None:
+    """Map a dotted Python call name to its canonical C++ symbol.
+
+    `torch.ops.aten.add` and `torch.ops.aten.add.Tensor` both resolve to
+    `aten::add` (overload tags drop). `torch._C._tensor_op` and `_C.foo`
+    return the bare callable name. When `alias_map` is provided, plain
+    `torch.<op>` forms resolve through it (e.g. `torch.add` → `aten::add`).
+    When `import_aliases` is provided, the leading segment of `call_name` is
+    rewritten through it before the alias-map lookup, letting forms like
+    `linalg.cross(...)` (after `from torch import linalg`) or `F.linear(...)`
+    (after `from torch.nn import functional as F`) resolve. Returns None for
+    non-binding calls (e.g. `t.add(1)` — method-call ambiguity).
+    """
+    if not call_name:
+        return None
+    if call_name.startswith("torch.ops."):
+        parts = call_name[len("torch.ops.") :].split(".")
+        if len(parts) >= 2:
+            return f"{parts[0]}::{parts[1]}"
+        return None
+    if call_name.startswith("torch._C."):
+        return call_name[len("torch._C.") :].split(".")[0]
+    if call_name.startswith("_C."):
+        return call_name[len("_C.") :].split(".")[0]
+    if alias_map and (resolved := alias_map.get(call_name)):
+        return resolved
+    if alias_map and import_aliases:
+        first, dot, rest = call_name.partition(".")
+        if (expansion := import_aliases.get(first)) is not None:
+            expanded = f"{expansion}.{rest}" if dot else expansion
+            if (resolved := alias_map.get(expanded)) is not None:
+                return resolved
+    return None
+
+
+@dataclass
+class PyBinding:
+    """A reference from Python source to a C++ binding call site."""
+
+    cpp_symbol: str  # e.g., "aten::add" or "_tensor_op"
+    line: int
+
+
 @dataclass
 class PyFunction:
     """Python function or method definition."""
@@ -25,8 +72,8 @@ class PyFunction:
     signature: str | None = None
     # For methods, track the class
     class_name: str | None = None
-    # C++ binding if detected (e.g., calls torch._C.*)
-    cpp_binding: str | None = None
+    # Every C++ binding call site found in the function body.
+    cpp_bindings: list[PyBinding] = field(default_factory=list)
 
 
 @dataclass
@@ -71,8 +118,9 @@ class PyModule:
 class PythonAnalyzer:
     """Analyzes Python source code using AST."""
 
-    def __init__(self):
+    def __init__(self, alias_map: dict[str, str] | None = None):
         self._module_cache: dict[str, PyModule] = {}
+        self._alias_map = alias_map
 
     def analyze_file(self, file_path: str) -> PyModule | None:
         """Analyze a single Python file."""
@@ -92,8 +140,11 @@ class PythonAnalyzer:
 
         module = PyModule(name=module_name, file_path=str(path))
 
-        # Extract components
-        visitor = _ASTVisitor(module, content)
+        # Pre-scan imports so call-name resolution can rewrite local names
+        # (`linalg.cross(...)` → `torch.linalg.cross`) regardless of where the
+        # function lives relative to the import statements in the file.
+        visitor = _ASTVisitor(module, content, alias_map=self._alias_map)
+        visitor.collect_imports(tree)
         visitor.visit(tree)
 
         self._module_cache[module_name] = module
@@ -147,10 +198,42 @@ class PythonAnalyzer:
 class _ASTVisitor(ast.NodeVisitor):
     """AST visitor to extract module components."""
 
-    def __init__(self, module: PyModule, content: str):
+    def __init__(
+        self,
+        module: PyModule,
+        content: str,
+        alias_map: dict[str, str] | None = None,
+    ):
         self.module = module
         self.content = content
+        self.alias_map = alias_map
+        # Local-name → fully-qualified dotted path. Populated by
+        # `collect_imports` before `visit` runs so functions can be analysed
+        # in any source order relative to imports.
+        self.import_aliases: dict[str, str] = {}
         self._current_class: PyClass | None = None
+
+    def collect_imports(self, tree: ast.AST) -> None:
+        """Walk the tree once to seed `import_aliases` from Import nodes."""
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                # `import torch.linalg as L` binds L; bare `import torch.linalg`
+                # binds `torch` (and the call site uses the full dotted form,
+                # which already matches the alias map without rewriting).
+                for alias in node.names:
+                    if alias.asname:
+                        self.import_aliases[alias.asname] = alias.name
+            elif isinstance(node, ast.ImportFrom):
+                # Only absolute imports map cleanly back to a `torch.<...>`
+                # form; relative imports (`from . import X`) depend on package
+                # location and are skipped.
+                if node.level or not node.module:
+                    continue
+                for alias in node.names:
+                    if alias.name == "*":
+                        continue
+                    local = alias.asname or alias.name
+                    self.import_aliases[local] = f"{node.module}.{alias.name}"
 
     def visit_Import(self, node: ast.Import):
         """Handle: import x, import x as y"""
@@ -226,7 +309,7 @@ class _ASTVisitor(ast.NodeVisitor):
         sig = self._build_signature(node)
 
         # Check for C++ bindings in function body
-        cpp_binding = self._find_cpp_binding(node)
+        cpp_bindings = self._find_cpp_bindings(node)
 
         if is_method and self._current_class:
             qualified_name = f"{self._current_class.qualified_name}.{node.name}"
@@ -246,7 +329,7 @@ class _ASTVisitor(ast.NodeVisitor):
             docstring=ast.get_docstring(node),
             signature=sig,
             class_name=class_name,
-            cpp_binding=cpp_binding,
+            cpp_bindings=cpp_bindings,
         )
 
         if is_method and self._current_class:
@@ -305,18 +388,24 @@ class _ASTVisitor(ast.NodeVisitor):
 
         return truncate(sig, 100)
 
-    def _find_cpp_binding(self, node: ast.FunctionDef) -> str | None:
-        """Look for C++ binding calls in function body."""
+    def _find_cpp_bindings(self, node: ast.FunctionDef) -> list[PyBinding]:
+        """Capture every C++ binding call in this function's body."""
+        out: list[PyBinding] = []
+        seen: set[tuple[str, int]] = set()
         for child in ast.walk(node):
-            if isinstance(child, ast.Call):
-                func_name = self._get_name(child.func)
-                # Common C++ binding patterns
-                if any(
-                    pattern in func_name
-                    for pattern in ["torch._C", "torch.ops.", "_C.", "torch.ops.aten"]
-                ):
-                    return func_name
-        return None
+            if not isinstance(child, ast.Call):
+                continue
+            cpp = resolve_cpp_symbol(
+                self._get_name(child.func), self.alias_map, self.import_aliases
+            )
+            if cpp is None:
+                continue
+            key = (cpp, child.lineno)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(PyBinding(cpp_symbol=cpp, line=child.lineno))
+        return out
 
 
 def build_module_index(modules: dict[str, PyModule]) -> dict[str, list]:

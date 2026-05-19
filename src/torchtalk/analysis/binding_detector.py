@@ -23,6 +23,7 @@ class BindingType(Enum):
     TORCH_LIBRARY_IMPL = "torch_library_impl"  # TORCH_LIBRARY_IMPL(ns, dispatch_key, m)
     TORCH_OP = "torch_op"  # m.def("op", ...)
     CUDA_KERNEL = "cuda_kernel"  # __global__ void kernel(...)
+    CUDA_DEVICE_FUNC = "cuda_device_func"  # __device__ helper (callee-from-kernel)
     CUDA_WRAPPER = "cuda_wrapper"  # C++ function that calls CUDA kernel
     AT_DISPATCH = "at_dispatch"  # AT_DISPATCH_FLOATING_TYPES(...)
 
@@ -81,6 +82,69 @@ class BindingGraph:
         self.cuda_kernels.append(kernel)
 
 
+_IMPL_WRAPPERS = ("TORCH_FN_BOXED", "TORCH_FN")
+_NO_IMPL_MARKERS = ("makeFallthrough", "makeNamedNotSupported")
+
+# `__global__` kernel definition. Allows leading `template <...>`,
+# `static`/`inline`, and `__launch_bounds__`/`C10_LAUNCH_BOUNDS_*` attributes
+# in either order around the keyword.
+_KERNEL_PATTERN = re.compile(
+    r"(?:template\s*<[^>]+>\s*)?"
+    r"(?:(?:static|inline|__forceinline__)\s+)*"
+    r"(?:(?:__launch_bounds__|C10_LAUNCH_BOUNDS_\d+)\s*\([^)]*\)\s*)*"
+    r"__global__\s+"
+    r"(?:(?:static|inline|__forceinline__)\s+)*"
+    r"void\s+(\w+)(?:<([^>]+)>)?\s*\(([^)]*)\)"
+)
+
+# `__device__` helper. CUDA helpers commonly stack `__host__ __device__`
+# `__forceinline__` in arbitrary order, so anchor on the keyword and
+# absorb up to ~200 chars of return-type + remaining modifiers before
+# the `name(args) {` definition.
+_DEVICE_PATTERN = re.compile(
+    r"\b__device__\b[^;{}]{0,200}?"
+    r"\b(\w+)\s*\(([^)]*)\)\s*(?:const\s*)?\{"
+)
+
+
+def _clean_impl_target(raw: str, op_name: str = "") -> str:
+    """Extract a usable cpp_name from `m.impl("op", <raw>)`.
+
+    Returns `op_name` as a fallback when `raw` is a no-real-impl marker
+    (`CppFunction::makeFallthrough()`), a lambda, or a broken capture
+    (`static_cast<...>` whose inner `()` truncates the regex match). This
+    preserves the python_name → cpp_name link by keying the binding under the
+    op name itself, so the walker can still resolve it via `by_cpp_name`.
+    """
+    raw = raw.strip()
+    if not raw:
+        return op_name
+
+    if raw.startswith("[") or raw.startswith("static_cast"):
+        return op_name
+    if any(m in raw for m in _NO_IMPL_MARKERS):
+        return op_name
+
+    if "makeFromBoxedFunction" in raw:
+        if m := re.search(r"<\s*&?\s*([\w:]+)", raw):
+            return m.group(1).rsplit("::", 1)[-1]
+        return op_name
+
+    for wrapper in _IMPL_WRAPPERS:
+        prefix = wrapper + "("
+        if raw.startswith(prefix):
+            raw = raw[len(prefix) :]
+            if raw.endswith(")"):
+                raw = raw[:-1]
+            raw = raw.strip()
+            break
+
+    raw = raw.lstrip("&").strip()
+    if "::" in raw:
+        raw = raw.rsplit("::", 1)[-1]
+    return raw or op_name
+
+
 class BindingDetector:
     """Detects pybind11, TORCH_LIBRARY, and CUDA binding patterns."""
 
@@ -110,6 +174,7 @@ class BindingDetector:
 
         if is_cuda:
             self._detect_cuda_kernels(content, file_path, graph)
+            self._detect_cuda_device_funcs(content, file_path, graph)
 
         self._detect_at_dispatch(content, file_path, graph)
 
@@ -405,11 +470,18 @@ class BindingDetector:
                     )
                     graph.add_binding(binding)
 
-        # m.impl("op_name", function_ptr)
-        impl_pattern = r'm\.impl\s*\(\s*"([^"]+)"\s*,\s*([^\s,)]+)'
+        # m.impl("op_name", function_ptr) — function_ptr may be wrapped in
+        # TORCH_FN(...), TORCH_FN_BOXED(...), prefixed with `&`, or namespaced
+        # (`at::native::foo`). Capture the full target then strip wrappers.
+        impl_pattern = r'm\.impl\s*\(\s*"([^"]+)"\s*,\s*([^,;]+?)\s*(?:[,)]|;)'
         for match in re.finditer(impl_pattern, block_content):
             op_name = match.group(1)
-            cpp_func = match.group(2)
+            # Strip overload suffix (`abs.out` → `abs`) so cpp_name is searchable
+            # via the bare op name when raw target is a no-impl marker.
+            bare_op = op_name.split(".", 1)[0]
+            cpp_func = _clean_impl_target(match.group(2), op_name=bare_op)
+            if not cpp_func:
+                continue
             line_offset = block_content[: match.start()].count("\n")
 
             binding = Binding(
@@ -424,9 +496,7 @@ class BindingDetector:
             graph.add_binding(binding)
 
     def _detect_cuda_kernels(self, content: str, file_path: str, graph: BindingGraph):
-        kernel_pattern = r"__global__\s+void\s+(\w+)(?:<([^>]+)>)?\s*\(([^)]*)\)"
-
-        for match in re.finditer(kernel_pattern, content):
+        for match in _KERNEL_PATTERN.finditer(content):
             kernel_name = match.group(1)
             template_params = match.group(2)
             parameters = match.group(3)
@@ -457,6 +527,24 @@ class BindingDetector:
                 python_name=kernel_name,  # Kernels typically have internal names
                 cpp_name=kernel_name,
                 binding_type=BindingType.CUDA_KERNEL.value,
+                file_path=file_path,
+                line_number=line_number,
+                dispatch_key="CUDA",
+                signature=parameters,
+            )
+            graph.add_binding(binding)
+
+    def _detect_cuda_device_funcs(
+        self, content: str, file_path: str, graph: BindingGraph
+    ):
+        for match in _DEVICE_PATTERN.finditer(content):
+            name = match.group(1)
+            parameters = match.group(2)
+            line_number = content[: match.start()].count("\n") + 1
+            binding = Binding(
+                python_name=name,
+                cpp_name=name,
+                binding_type=BindingType.CUDA_DEVICE_FUNC.value,
                 file_path=file_path,
                 line_number=line_number,
                 dispatch_key="CUDA",

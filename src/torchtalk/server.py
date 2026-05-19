@@ -15,6 +15,7 @@ from .indexer import (
     _load_from_json,
     _state,
 )
+from .tools.affected import _do_affected
 from .tools.graph import _do_called_by, _do_calls, _do_impact
 from .tools.modules import _do_list_modules, _do_trace_module
 from .tools.ops import (
@@ -77,7 +78,13 @@ async def get_status() -> str:
         md.bold("Status", "Not available")
         if _state.pytorch_source:
             src = Path(_state.pytorch_source)
-            if not (src / "compile_commands.json").exists():
+            # PyTorch's `python setup.py develop` lands compile_commands.json
+            # in `build/`; some checkouts have it at the root. Check both,
+            # matching cli.py / indexer.py / cpp_call_graph.py.
+            if not (
+                (src / "compile_commands.json").exists()
+                or (src / "build" / "compile_commands.json").exists()
+            ):
                 md.item("Missing compile_commands.json", 1)
                 md.item(
                     "Fix: Build PyTorch with `python setup.py develop`",
@@ -111,6 +118,30 @@ async def get_status() -> str:
     else:
         md.bold("Status", "Not loaded")
     md.blank()
+
+    # Auxiliary indices — populated as side-effects of the major loaders
+    # above. Listed so callers can verify the data backing `affected` and
+    # `graph(walk_python=True)` is actually present.
+    aux = [
+        ("alias_map", _state.alias_map),
+        ("py_to_cpp_edges", _state.py_to_cpp_edges),
+        ("decomp_alias_map", _state.decomp_alias_map),
+        ("backward_to_forward", _state.backward_to_forward),
+        ("kernel_impl_to_op", _state.kernel_impl_to_op),
+        ("dispatch_to_op", _state.dispatch_to_op),
+        ("opinfo_alias_map", _state.opinfo_alias_map),
+        ("test_attr_index", _state.test_attr_index),
+        ("python_profiling", _state.python_profiling),
+        ("bindings_by_file", _state.bindings_by_file),
+        ("ops_by_file", _state.ops_by_file),
+        ("symbol_to_file", _state.symbol_to_file),
+    ]
+    populated = [(name, m) for name, m in aux if m]
+    if populated:
+        md.h3("Cross-language Indices")
+        for name, m in populated:
+            md.item(f"{name}: {len(m):,} entries", 1)
+        md.blank()
 
     ready = "Ready" if _state.bindings else "Not ready"
     cpp_ready = (
@@ -150,6 +181,11 @@ async def get_status() -> str:
                 test_ready,
                 "Find tests, list utils, or get test file details",
             ],
+            [
+                "`affected`",
+                cpp_ready,
+                "Map changed C++ functions to impacted Python tests",
+            ],
         ],
     )
 
@@ -174,11 +210,12 @@ async def search(
 ) -> str:
     """Search PyTorch bindings or CUDA kernels by name.
 
-    mode='bindings' for dispatch registrations,
-    mode='kernels' for GPU kernel launches.
+    mode='bindings' for dispatch registrations (filterable by `backend`),
+    mode='kernels' for GPU kernel launches (`backend` is ignored — kernels
+    have no dispatch key).
     """
     if mode == "kernels":
-        return await _do_cuda_kernels(query)
+        return await _do_cuda_kernels(query, limit=limit)
     return await _do_search_bindings(query, backend=backend, limit=limit)
 
 
@@ -187,16 +224,27 @@ async def graph(
     function_name: str,
     mode: Literal["calls", "callers", "impact"] = "callers",
     depth: int = 2,
+    fuzzy_all_levels: bool = False,
+    walk_python: bool = False,
+    focus: Literal["callers", "full"] = "callers",
 ) -> str:
     """Query the C++ call graph.
 
-    mode='callers' for inbound, 'calls' for outbound,
-    'impact' for transitive callers.
+    mode='callers' for inbound, 'calls' for outbound, 'impact' for transitive
+    callers. `depth`, `fuzzy_all_levels`, `walk_python`, and `focus` apply to
+    mode='impact' only and are ignored otherwise. `focus='full'` adds a
+    Python Entry Points section listing each walked C++ symbol's binding.
     """
     if mode == "calls":
         return await _do_calls(function_name)
     elif mode == "impact":
-        return await _do_impact(function_name, depth=depth)
+        return await _do_impact(
+            function_name,
+            depth=depth,
+            focus=focus,
+            fuzzy_all_levels=fuzzy_all_levels,
+            walk_python=walk_python,
+        )
     return await _do_called_by(function_name)
 
 
@@ -204,33 +252,45 @@ async def graph(
 async def modules(
     name: str,
     mode: Literal["trace", "list"] = "trace",
+    focus: Literal["methods", "full"] = "methods",
 ) -> str:
     """Query Python modules.
 
-    mode='trace' for class details,
-    mode='list' for browsing by category ('nn', 'optim', 'all').
+    mode='trace' for class details (focus='full' also surfaces bases, type,
+    and docstring). mode='list' for browsing by category ('nn', 'optim',
+    'all'); any other `name` value is treated as a substring search across
+    all class names. `focus` is ignored in list mode.
     """
     if mode == "list":
         return await _do_list_modules(category=name)
-    return await _do_trace_module(module_name=name)
+    return await _do_trace_module(module_name=name, focus=focus)
 
 
 @mcp.tool()
 async def tests(
-    query: str,
+    query: str = "",
     mode: Literal["find", "utils", "file_info"] = "find",
     limit: int = 10,
+    focus: Literal["all", "functions", "classes", "files"] = "all",
 ) -> str:
     """Query PyTorch test infrastructure.
 
-    mode='find' to search tests, 'utils' for utilities,
-    'file_info' for details on a test file.
+    mode='find' to search tests by `query`; `focus` narrows results to a
+    single category. mode='utils' lists test utility modules (`query` and
+    `focus` are ignored). mode='file_info' returns details for test files
+    matching `query` as a substring.
     """
     if mode == "utils":
         return await _do_list_test_utils()
     elif mode == "file_info":
         return await _do_test_file_info(query)
-    return await _do_find_similar_tests(query, limit=limit)
+    return await _do_find_similar_tests(query, limit=limit, focus=focus)
+
+
+@mcp.tool()
+async def affected(funcs: str, depth: int = 3) -> str:
+    """Map changed C++ functions (comma-separated) to impacted Python test files."""
+    return await _do_affected(funcs, depth)
 
 
 def run_server(
@@ -238,17 +298,28 @@ def run_server(
     index_path: str | None = None,
     transport: str = "stdio",
 ):
-    """Start MCP server."""
+    """Start MCP server. Heavy init runs in background so the MCP client's
+    initialize handshake completes immediately; tools return a 'not loaded'
+    error via `_ensure_loaded` until the data is ready."""
+    import threading
+
     source = pytorch_source or _auto_detect_pytorch()
-    if source:
-        _init_from_source(source)
-    elif index_path:
-        _load_from_json(index_path)
-    else:
-        log.warning(
-            "No PyTorch source specified. "
-            "Tools will return errors until data is loaded."
-        )
+
+    def _bg_init():
+        try:
+            if source:
+                _init_from_source(source)
+            elif index_path:
+                _load_from_json(index_path)
+            else:
+                log.warning(
+                    "No PyTorch source specified. "
+                    "Tools will return errors until data is loaded."
+                )
+        except Exception:
+            log.exception("Background init failed")
+
+    threading.Thread(target=_bg_init, daemon=True).start()
 
     log.info("Starting TorchTalk MCP server...")
     mcp.run(transport=transport)

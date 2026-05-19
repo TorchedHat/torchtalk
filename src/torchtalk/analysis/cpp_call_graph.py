@@ -24,6 +24,160 @@ except ImportError:
     log.warning("libclang not available - C++ call graph extraction disabled")
 
 
+def _rel_to_root(path: str, source_root: str) -> str | None:
+    """Return path relative to source_root, or None if outside the tree."""
+    if not path:
+        return None
+    try:
+        resolved = os.path.realpath(path)
+        root = os.path.realpath(source_root)
+    except OSError:
+        return None
+    if resolved == root or resolved.startswith(root + os.sep):
+        return os.path.relpath(resolved, root)
+    return None
+
+
+def _collect_include_dirs(compile_db: list[dict], source_root: str) -> list[str]:
+    """Union of `-I` dirs under source_root, repo-relative, sorted.
+
+    Handles both `-Ipath` and `-I path`. External / absolute-not-under-root
+    entries are dropped. Output feeds diagnostics only — does not invalidate.
+    """
+    dirs: set[str] = set()
+    for entry in compile_db:
+        cmd = entry.get("command", "")
+        args = cmd.split() if cmd else entry.get("arguments", [])
+        i = 0
+        while i < len(args):
+            a = args[i]
+            if a == "-I" and i + 1 < len(args):
+                candidate = args[i + 1]
+                i += 2
+            elif a.startswith("-I") and len(a) > 2:
+                candidate = a[2:]
+                i += 1
+            else:
+                i += 1
+                continue
+            if not candidate:
+                continue
+            rel = _rel_to_root(candidate, source_root)
+            if rel is not None:
+                dirs.add(rel)
+    return sorted(dirs)
+
+
+def _discover_cuda_env() -> dict | None:
+    """Return CUDA parsing env dict, or None if libclang CUDA parsing unavailable."""
+    import subprocess
+
+    try:
+        resource = subprocess.run(
+            ["clang", "-print-resource-dir"],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=5,
+        ).stdout.strip()
+    except (
+        FileNotFoundError,
+        subprocess.CalledProcessError,
+        subprocess.TimeoutExpired,
+    ):
+        return None
+    if not resource or not os.path.isdir(resource):
+        return None
+
+    cuda_path = os.environ.get("CUDA_HOME") or "/usr/local/cuda"
+    if not os.path.isfile(os.path.join(cuda_path, "include", "cuda_runtime.h")):
+        return None
+
+    extra_isystem: list[str] = []
+    import glob
+
+    for pattern in (
+        "/usr/local/lib/python*/dist-packages/nvidia/cuda_runtime/include",
+        "/usr/lib/python*/dist-packages/nvidia/cuda_runtime/include",
+    ):
+        for p in glob.glob(pattern):
+            if os.path.isdir(p):
+                extra_isystem.append(p)
+                break
+        if extra_isystem:
+            break
+
+    cccl = os.path.join(cuda_path, "include", "cccl")
+    if os.path.isdir(cccl):
+        extra_isystem.append(cccl)
+
+    return {
+        "clang_resource_dir": resource,
+        "cuda_path": cuda_path,
+        "gpu_arch": os.environ.get("TORCHTALK_CUDA_ARCH", "sm_80"),
+        "extra_isystem": extra_isystem,
+    }
+
+
+def _cu_args(compile_args: list[str], cuda_env: dict) -> list[str]:
+    """Translate an nvcc compile-command tail into libclang CUDA args."""
+    keep = [a for a in compile_args if a.startswith(("-I", "-D", "-std"))]
+    out = [
+        "-x",
+        "cuda",
+        f"--cuda-path={cuda_env['cuda_path']}",
+        f"--cuda-gpu-arch={cuda_env['gpu_arch']}",
+        "--cuda-host-only",
+        f"-resource-dir={cuda_env['clang_resource_dir']}",
+    ]
+    for inc in cuda_env.get("extra_isystem", []):
+        out.extend(["-isystem", inc])
+    return out + keep
+
+
+def _translate_args(
+    file_path: str, compile_args: list[str], cuda_env: dict | None
+) -> list[str]:
+    """Pick the libclang arg set for a TU based on extension and CUDA availability."""
+    if file_path.endswith(".cu") and cuda_env:
+        return _cu_args(compile_args, cuda_env)
+    return [a for a in compile_args if a.startswith(("-I", "-D", "-std"))]
+
+
+def _synthesize_missing_cu_entries(
+    source: Path,
+    include_dirs: list[str],
+    covered_files: set[str],
+    template_args: list[str],
+    cuda_env: dict,
+) -> list[tuple[str, list[str]]]:
+    """Glob .cu files under include_dirs and synthesize entries for ones missing
+    from compile_commands.json.
+
+    PyTorch's compile_commands.json can list fewer .cu TUs than exist on disk
+    (e.g. CUDA build off, partial targets). Reusing a kept entry's raw args is
+    safe because `_translate_args` strips everything except `-I/-D/-std` for
+    `.cu`, then `_cu_args` adds the CUDA-specific flags.
+    """
+    extra: list[tuple[str, list[str]]] = []
+    seen: set[str] = set()
+    for inc in include_dirs:
+        root = source / inc
+        if not root.exists():
+            continue
+        for cu in root.rglob("*.cu"):
+            file_path = str(cu)
+            if file_path in covered_files or file_path in seen:
+                continue
+            if should_exclude(file_path):
+                continue
+            seen.add(file_path)
+            extra.append(
+                (file_path, _translate_args(file_path, template_args, cuda_env))
+            )
+    return extra
+
+
 def _parse_single_file(args: tuple[str, list[str]]) -> dict[str, Any]:
     """Parse a single file and extract call graph data (runs in subprocess)."""
     file_path, compile_args = args
@@ -32,6 +186,7 @@ def _parse_single_file(args: tuple[str, list[str]]) -> dict[str, Any]:
         "callees": {},
         "callers": {},
         "function_locations": {},
+        "includes": [],
         "success": False,
         "error": None,
     }
@@ -40,9 +195,8 @@ def _parse_single_file(args: tuple[str, list[str]]) -> dict[str, Any]:
         from clang.cindex import CursorKind, Index, TranslationUnit
 
         index = Index.create()
-        filtered_args = [a for a in compile_args if a.startswith(("-I", "-D", "-std"))]
         tu = index.parse(
-            file_path, args=filtered_args, options=TranslationUnit.PARSE_INCOMPLETE
+            file_path, args=compile_args, options=TranslationUnit.PARSE_INCOMPLETE
         )
 
         if tu is None:
@@ -85,9 +239,22 @@ def _parse_single_file(args: tuple[str, list[str]]) -> dict[str, Any]:
                 extract_calls(child, current_function)
 
         extract_calls(tu.cursor)
+
+        includes = []
+        seen = set()
+        for fi in tu.get_includes():
+            inc_file = fi.include
+            if inc_file is None:
+                continue
+            name = str(inc_file.name)
+            if name and name not in seen:
+                seen.add(name)
+                includes.append(name)
+
         result["callees"] = {k: list(v) for k, v in callees.items()}
         result["callers"] = {k: list(v) for k, v in callers.items()}
         result["function_locations"] = function_locations
+        result["includes"] = includes
         result["success"] = True
     except Exception as e:
         result["error"] = str(e)
@@ -113,6 +280,23 @@ class CppCallGraphExtractor:
         self.callers: dict[str, set[str]] = defaultdict(set)
         self.function_locations: dict[str, tuple[str, int]] = {}
         self.processed_files: set[str] = set()
+
+        # Per-file attribution. Lets incremental updates evict contributions
+        # from one file without losing edges still supplied by another.
+        self.file_records: dict[str, dict] = {}
+
+        # Per-TU include sets (repo-relative paths). Powers cross-TU
+        # invalidation when a header changes: find every TU whose includes
+        # intersect the changed header set, and re-parse those TUs.
+        # Keys are repo-relative TU paths (for checkout portability).
+        self.tu_includes: dict[str, list[str]] = {}
+
+        # Repo-relative TU path → one of:
+        # ok | parse_failed | unsupported_language | filtered
+        self.tu_status: dict[str, str] = {}
+
+        # Union of -I dirs seen in compile_commands.json, repo-relative, sorted.
+        self.include_dirs: list[str] = []
 
     def extract_from_pytorch_parallel(
         self,
@@ -147,69 +331,83 @@ class CppCallGraphExtractor:
         with open(compile_commands) as f:
             compile_db = json.load(f)
 
+        self.include_dirs = _collect_include_dirs(compile_db, str(source))
+
+        cuda_env = _discover_cuda_env()
+        supported_exts = (".cpp", ".cu") if cuda_env else (".cpp",)
+
         # Filter to relevant files using configurable patterns
         entries = []
-        skipped_excluded = 0
+        covered_files: set[str] = set()
+        template_raw_args: list[str] | None = None
         for entry in compile_db:
             file_path = entry.get("file", "")
-
-            # Must be a C++ file
-            if not file_path.endswith(".cpp"):
-                continue
-
-            # Check inclusion based on directory patterns
-            if not should_include_dir(file_path, include_dirs):
-                continue
-
-            # Apply exclusion patterns (tests, third_party, etc.)
-            if should_exclude(file_path):
-                skipped_excluded += 1
-                continue
-
-            command = entry.get("command", "")
             directory = entry.get("directory", "")
-
-            args = command.split()[1:] if command else entry.get("arguments", [])[1:]
-
             if not os.path.isabs(file_path) and directory:
                 file_path = os.path.join(directory, file_path)
 
-            entries.append((file_path, args))
+            tu_rel = _rel_to_root(file_path, str(source))
+            if tu_rel is None:
+                continue
 
+            if not file_path.endswith(supported_exts):
+                self.tu_status[tu_rel] = "unsupported_language"
+                continue
+            if not should_include_dir(file_path, include_dirs):
+                self.tu_status[tu_rel] = "filtered"
+                continue
+            if should_exclude(file_path):
+                self.tu_status[tu_rel] = "filtered"
+                continue
+
+            command = entry.get("command", "")
+            args = command.split()[1:] if command else entry.get("arguments", [])[1:]
+            entries.append((file_path, _translate_args(file_path, args, cuda_env)))
+            covered_files.add(file_path)
+            if template_raw_args is None:
+                template_raw_args = args
+
+        if cuda_env and template_raw_args is not None:
+            synthesized = _synthesize_missing_cu_entries(
+                source, include_dirs, covered_files, template_raw_args, cuda_env
+            )
+            if synthesized:
+                log.info(
+                    f"Synthesized {len(synthesized)} .cu entries missing from "
+                    f"compile_commands.json"
+                )
+                entries.extend(synthesized)
+
+        filtered_count = sum(1 for s in self.tu_status.values() if s == "filtered")
         log.info(
             f"Filtered to {len(entries)} files "
-            f"(excluded {skipped_excluded} test/third_party)"
+            f"(excluded {filtered_count} test/third_party)"
         )
 
         log.info(f"Processing {len(entries)} C++ files with parallel libclang...")
 
-        # Determine number of workers
         if num_workers is None:
             num_workers = max(1, int(cpu_count() * 0.8))
-
         log.info(f"Using {num_workers} parallel workers")
 
-        # Process files in parallel
         with Pool(processes=num_workers) as pool:
             results = pool.map(_parse_single_file, entries)
 
-        # Merge results
+        # Merge results, attributing each record to the file where the
+        # function (or caller) is defined — not the TU that observed it.
+        # Without this, inline defs in headers get duplicated once per TU.
         success_count = 0
         for result in results:
+            tu_rel = _rel_to_root(result.get("file", ""), str(source))
             if result["success"]:
                 success_count += 1
+                if tu_rel:
+                    self.tu_status[tu_rel] = "ok"
+                self._merge_parse_result(result, source_root=str(source))
+            elif tu_rel:
+                self.tu_status[tu_rel] = "parse_failed"
 
-                # Merge callees
-                for func, called in result["callees"].items():
-                    self.callees[func].update(called)
-
-                # Merge callers
-                for func, callers_list in result["callers"].items():
-                    self.callers[func].update(callers_list)
-
-                # Merge function locations
-                self.function_locations.update(result["function_locations"])
-                self.processed_files.add(result["file"])
+        self._rebuild_aggregates()
 
         log.info(f"Completed: {success_count}/{len(entries)} files succeeded")
         log.info(
@@ -220,16 +418,236 @@ class CppCallGraphExtractor:
         return self.get_call_graph_data()
 
     def get_call_graph_data(self) -> dict[str, Any]:
+        # Intern tu_includes paths: PyTorch has ~8k unique headers but ~2M
+        # TU→header references. Storing indices into a shared path list cuts
+        # the cache from ~120 MB to ~15 MB on PyTorch.
+        path_to_idx: dict[str, int] = {}
+        paths_list: list[str] = []
+        tu_includes_idx: dict[str, list[int]] = {}
+        for tu, includes in self.tu_includes.items():
+            indices = []
+            for p in includes:
+                idx = path_to_idx.get(p)
+                if idx is None:
+                    idx = len(paths_list)
+                    path_to_idx[p] = idx
+                    paths_list.append(p)
+                indices.append(idx)
+            tu_includes_idx[tu] = indices
+
         return {
             "callees": {k: list(v) for k, v in self.callees.items()},
             "callers": {k: list(v) for k, v in self.callers.items()},
             "function_locations": self.function_locations,
+            "file_records": self.file_records,
+            "tu_includes_paths": paths_list,
+            "tu_includes_idx": tu_includes_idx,
+            "tu_status": dict(self.tu_status),
+            "include_dirs": list(self.include_dirs),
             "stats": {
                 "total_functions": len(self.function_locations),
                 "total_call_edges": sum(len(v) for v in self.callees.values()),
                 "files_processed": len(self.processed_files),
+                "coverage": self.coverage_summary(),
+                "include_dirs_count": len(self.include_dirs),
             },
         }
+
+    def _record_for(self, owner_file: str) -> dict[str, Any]:
+        """Get or create the file_records entry for a defining file."""
+        return self.file_records.setdefault(
+            owner_file,
+            {"callees": {}, "callers": {}, "function_locations": {}},
+        )
+
+    def _merge_parse_result(
+        self, result: dict[str, Any], source_root: str | None = None
+    ) -> None:
+        """Attribute a TU's parse output to the file where each function is defined.
+
+        Each edge (caller → callee) lives in the record of the file that
+        DEFINES the caller. Function locations live in their own defining
+        file's record. This keeps file_records evictable per-file without
+        duplicating header inline definitions across every TU that includes
+        them.
+
+        When source_root is given, the TU's include set is stored (repo-relative)
+        so a later header change can invalidate this TU.
+        """
+        locations = result.get("function_locations", {})
+        callees = result.get("callees", {})
+
+        for func, loc in locations.items():
+            if not loc:
+                continue
+            loc_tuple = tuple(loc) if isinstance(loc, list) else loc
+            owner = loc_tuple[0]
+            self._record_for(owner)["function_locations"][func] = loc_tuple
+
+        for caller, callee_list in callees.items():
+            loc = locations.get(caller)
+            if not loc:
+                continue
+            owner = loc[0]
+            rec = self._record_for(owner)
+
+            out = rec["callees"].setdefault(caller, [])
+            out_set = set(out)
+            for c in callee_list:
+                if c not in out_set:
+                    out.append(c)
+                    out_set.add(c)
+
+            for c in callee_list:
+                inc = rec["callers"].setdefault(c, [])
+                if caller not in inc:
+                    inc.append(caller)
+
+        if source_root:
+            tu_rel = _rel_to_root(result.get("file", ""), source_root)
+            if tu_rel is not None:
+                self.tu_includes[tu_rel] = sorted(
+                    {
+                        rel
+                        for h in result.get("includes", [])
+                        if (rel := _rel_to_root(h, source_root)) is not None
+                    }
+                )
+
+    def _rebuild_aggregates(self) -> None:
+        """Rebuild aggregates and processed_files from file_records."""
+        self.callees = defaultdict(set)
+        self.callers = defaultdict(set)
+        self.function_locations = {}
+        self.processed_files = set()
+
+        for file_path, rec in self.file_records.items():
+            for func, called in rec.get("callees", {}).items():
+                self.callees[func].update(called)
+            for func, callers_list in rec.get("callers", {}).items():
+                self.callers[func].update(callers_list)
+            self.function_locations.update(rec.get("function_locations", {}))
+            self.processed_files.add(file_path)
+
+    def update_files(
+        self,
+        entries: list[tuple[str, list[str]]],
+        removed: list[str] | None = None,
+        num_workers: int | None = None,
+        source_root: str | None = None,
+    ) -> dict[str, int]:
+        """Re-parse the given files and evict stale per-file contributions.
+
+        entries: (file_path, compile_args) tuples for files to re-parse.
+        removed: absolute paths whose contributions should be evicted with no
+                 re-parse (for deleted files).
+        source_root: if given, per-TU include sets are updated for the re-parsed
+                 TUs so subsequent header changes can invalidate them.
+
+        Raises RuntimeError if the extractor has no per-file attribution
+        (loaded from a legacy cache) — caller should fall back to a full build.
+        """
+        if self.file_records is None or (
+            not self.file_records and self.function_locations
+        ):
+            raise RuntimeError(
+                "Call graph has no per-file attribution (legacy cache). "
+                "Rebuild with 'torchtalk index build'."
+            )
+
+        for f in removed or []:
+            self.file_records.pop(f, None)
+            if source_root and (rel := _rel_to_root(f, source_root)):
+                self.tu_includes.pop(rel, None)
+                self.tu_status.pop(rel, None)
+
+        for file, _ in entries:
+            self.file_records.pop(file, None)
+            if source_root and (rel := _rel_to_root(file, source_root)):
+                self.tu_includes.pop(rel, None)
+
+        results: list[dict[str, Any]] = []
+        if entries:
+            cuda_env = _discover_cuda_env()
+            translated = [(fp, _translate_args(fp, a, cuda_env)) for fp, a in entries]
+            if num_workers is None:
+                num_workers = max(1, int(cpu_count() * 0.8))
+            if len(translated) > 1 and num_workers > 1:
+                with Pool(processes=num_workers) as pool:
+                    results = pool.map(_parse_single_file, translated)
+            else:
+                results = [_parse_single_file(e) for e in translated]
+
+            for result in results:
+                rel = (
+                    _rel_to_root(result.get("file", ""), source_root)
+                    if source_root
+                    else None
+                )
+                if result["success"]:
+                    if rel:
+                        self.tu_status[rel] = "ok"
+                    self._merge_parse_result(result, source_root=source_root)
+                elif rel:
+                    self.tu_status[rel] = "parse_failed"
+
+        self._rebuild_aggregates()
+
+        return {
+            "files_updated": sum(1 for r in results if r["success"]),
+            "files_failed": sum(1 for r in results if not r["success"]),
+            "files_removed": len(removed or []),
+            "total_functions": len(self.function_locations),
+        }
+
+    def find_affected_tus(self, changed_files: set[str]) -> set[str]:
+        """Return repo-relative TU paths whose include set intersects changed_files.
+
+        changed_files must be repo-relative paths. Returns TU paths whose
+        recorded include set contains any of them. Use this to pick TUs to
+        re-parse when a header file changes.
+        """
+        if not changed_files:
+            return set()
+        affected: set[str] = set()
+        for tu_rel, includes in self.tu_includes.items():
+            if any(h in changed_files for h in includes):
+                affected.add(tu_rel)
+        return affected
+
+    def known_headers(self) -> set[str]:
+        """Return every header path present in any TU's recorded include set.
+
+        Used to detect incomplete baseline coverage: a changed header outside
+        this set can't be resolved to an affected TU, which may indicate a
+        baseline parse failure, a generated header added since baseline, or a
+        truly unused header.
+        """
+        result: set[str] = set()
+        for v in self.tu_includes.values():
+            result.update(v)
+        return result
+
+    def coverage_summary(self) -> dict[str, int]:
+        """Count TUs per status bucket from tu_status."""
+        summary: dict[str, int] = defaultdict(int)
+        for status in self.tu_status.values():
+            summary[status] += 1
+        return dict(summary)
+
+    def load_from_path(self, cache_path: Path) -> bool:
+        """Load a call graph JSON from an arbitrary path (not in cache_dir)."""
+        if not cache_path.exists():
+            return False
+        try:
+            with open(cache_path) as f:
+                data = json.load(f)
+            self._apply_loaded_data(data)
+            log.info(f"Loaded call graph from {cache_path}")
+            return True
+        except Exception as e:
+            log.warning(f"Failed to load call graph from {cache_path}: {e}")
+            return False
 
     def _get_relations(
         self, function_name: str, direction: str, fuzzy: bool = True
@@ -355,24 +773,51 @@ class CppCallGraphExtractor:
         cache_path = self.cache_dir / f"{cache_key}.json"
         if not cache_path.exists():
             return False
-
         try:
             with open(cache_path) as f:
                 data = json.load(f)
-
-            self.callees = defaultdict(
-                set, {k: set(v) for k, v in data.get("callees", {}).items()}
-            )
-            self.callers = defaultdict(
-                set, {k: set(v) for k, v in data.get("callers", {}).items()}
-            )
-            self.function_locations = data.get("function_locations", {})
-            self.function_locations = {
-                k: tuple(v) if isinstance(v, list) else v
-                for k, v in self.function_locations.items()
-            }
+            self._apply_loaded_data(data)
             log.info(f"Loaded call graph cache from {cache_path}")
             return True
         except Exception as e:
             log.warning(f"Failed to load cache: {e}")
             return False
+
+    def _apply_loaded_data(self, data: dict[str, Any]) -> None:
+        """Populate aggregates + file_records from a loaded JSON payload."""
+        self.callees = defaultdict(
+            set, {k: set(v) for k, v in data.get("callees", {}).items()}
+        )
+        self.callers = defaultdict(
+            set, {k: set(v) for k, v in data.get("callers", {}).items()}
+        )
+        self.function_locations = {
+            k: tuple(v) if isinstance(v, list) else v
+            for k, v in data.get("function_locations", {}).items()
+        }
+        raw_records = data.get("file_records") or {}
+        self.file_records = {
+            path: {
+                "callees": rec.get("callees", {}),
+                "callers": rec.get("callers", {}),
+                "function_locations": {
+                    k: tuple(v) if isinstance(v, list) else v
+                    for k, v in rec.get("function_locations", {}).items()
+                },
+            }
+            for path, rec in raw_records.items()
+        }
+        # Prefer interned form (current); fall back to flat list (early caches).
+        paths_list = data.get("tu_includes_paths")
+        idx_map = data.get("tu_includes_idx")
+        if paths_list is not None and idx_map is not None:
+            self.tu_includes = {
+                tu: [paths_list[i] for i in indices] for tu, indices in idx_map.items()
+            }
+        else:
+            self.tu_includes = {
+                k: list(v) for k, v in (data.get("tu_includes") or {}).items()
+            }
+        self.tu_status = dict(data.get("tu_status") or {})
+        self.include_dirs = list(data.get("include_dirs") or [])
+        self.processed_files = set(self.file_records)

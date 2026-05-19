@@ -17,6 +17,7 @@ from .analysis.patterns import (
     PYTHON_SEARCH_DIRS,
     TEST_SEARCH_DIRS,
     TEST_UTILITY_MODULES,
+    is_vendor_path,
 )
 from .analysis.patterns import (
     has_test_patterns as _has_test_patterns,
@@ -38,21 +39,34 @@ class ServerState:
     native_functions: dict[str, dict] = field(default_factory=dict)
     derivatives: dict[str, dict] = field(default_factory=dict)
     native_implementations: dict[str, list[dict]] = field(default_factory=dict)
+    symbol_to_file: dict[str, str] = field(default_factory=dict)
 
     by_python_name: dict[str, list[dict]] = field(default_factory=dict)
     by_cpp_name: dict[str, list[dict]] = field(default_factory=dict)
     by_dispatch_key: dict[str, list[dict]] = field(default_factory=dict)
+    bindings_by_file: dict[str, list[dict]] = field(default_factory=dict)
+    ops_by_file: dict[str, set[str]] = field(default_factory=dict)
 
     py_modules: dict[str, Any] = field(default_factory=dict)
     py_classes: dict[str, list[Any]] = field(default_factory=dict)
     py_functions: dict[str, list[Any]] = field(default_factory=dict)
     nn_modules: list[Any] = field(default_factory=list)
+    py_to_cpp_edges: dict[str, list[dict]] = field(default_factory=dict)
+    alias_map: dict[str, str] = field(default_factory=dict)
 
     test_files: dict[str, dict] = field(default_factory=dict)
     test_classes: dict[str, list[dict]] = field(default_factory=dict)
     test_functions: dict[str, list[dict]] = field(default_factory=dict)
     test_utilities: dict[str, dict] = field(default_factory=dict)
     opinfo_registry: dict[str, dict] = field(default_factory=dict)
+    opinfo_alias_map: dict[str, list[dict]] = field(default_factory=dict)
+    opinfo_test_files: set[str] = field(default_factory=set)
+    test_attr_index: dict[str, list[dict]] = field(default_factory=dict)
+    python_profiling: dict[str, dict[str, float]] = field(default_factory=dict)
+    decomp_alias_map: dict[str, list[str]] = field(default_factory=dict)
+    backward_to_forward: dict[str, list[str]] = field(default_factory=dict)
+    kernel_impl_to_op: dict[str, str] = field(default_factory=dict)
+    dispatch_to_op: dict[str, str] = field(default_factory=dict)
 
     pytorch_source: str | None = None
     cpp_extractor: Any = None
@@ -84,6 +98,11 @@ def _source_fingerprint(source: str) -> str:
     return hashlib.md5("|".join(parts).encode()).hexdigest()[:16]
 
 
+# Bump when the bindings-cache schema changes (e.g. a new field added to
+# `native_functions` entries). v2 introduced `python_module`.
+_BINDINGS_CACHE_FORMAT_VERSION = 2
+
+
 def _cache_valid(cache: Path, source: str) -> bool:
     """Check if cache is valid."""
     if not cache.exists():
@@ -91,9 +110,10 @@ def _cache_valid(cache: Path, source: str) -> bool:
     try:
         with open(cache) as f:
             data = json.load(f)
-        return data.get("metadata", {}).get(
-            "source_fingerprint"
-        ) == _source_fingerprint(source)
+        meta = data.get("metadata", {})
+        if meta.get("format_version") != _BINDINGS_CACHE_FORMAT_VERSION:
+            return False
+        return meta.get("source_fingerprint") == _source_fingerprint(source)
     except Exception:
         return False
 
@@ -127,15 +147,23 @@ def _parse_native_functions(source: str) -> tuple[dict, dict]:
                         for k in key.split(","):
                             dispatch[k.strip()] = impl
 
+                # YAML emits single-tag entries as a bare string, multi-tag
+                # entries as a list. Downstream code iterates `tags` element-
+                # wise — normalize so a single tag never iterates as chars.
+                tags = entry.get("tags") or []
+                if isinstance(tags, str):
+                    tags = [tags]
+
                 func = {
                     "name": name,
                     "base_name": base,
                     "signature": sig,
                     "dispatch": dispatch,
                     "variants": entry.get("variants", ""),
+                    "python_module": entry.get("python_module", "") or "",
                     "structured": entry.get("structured", False),
                     "structured_delegate": entry.get("structured_delegate"),
-                    "tags": entry.get("tags", []),
+                    "tags": tags,
                 }
                 functions[name] = func
                 if name != base and base not in functions:
@@ -178,8 +206,68 @@ def _parse_native_functions(source: str) -> tuple[dict, dict]:
     return functions, derivatives
 
 
-def _find_implementations(source: str, functions: dict) -> dict[str, list[dict]]:
-    """Find C++ implementations in source using configured search directories."""
+# Identifier with optional namespace, optional template args (one nesting
+# level), optional ptr/ref qualifier. Conservative — anything beyond two
+# levels of nesting falls back to the libclang lookup below.
+_TYPE_TOKEN = (
+    r"[\w:]+"
+    r"(?:\s*<[^<>]*(?:<[^<>]*>[^<>]*)*>)?"
+    r"(?:\s*[*&]+)?"
+)
+_MODIFIERS = (
+    r"(?:(?:static|inline|constexpr|TORCH_API|"
+    r"C10_HOST_DEVICE|C10_HOST|C10_DEVICE|C10_API|"
+    r"__forceinline__|virtual|explicit)\s+)*"
+)
+_TEMPLATE_PREFIX = r"(?:template\s*<[^>]+>\s*)?"
+_FREE_FUNC_RE = re.compile(
+    rf"^{_TEMPLATE_PREFIX}{_MODIFIERS}{_TYPE_TOKEN}\s+"
+    rf"(\w+)\s*\([^;]*\)\s*(?:const\s*)?\{{",
+    re.MULTILINE,
+)
+_METHOD_FUNC_RE = re.compile(
+    rf"^{_TEMPLATE_PREFIX}{_MODIFIERS}{_TYPE_TOKEN}\s+"
+    rf"(?:\w+::)+(\w+)\s*\([^;]*\)\s*(?:const\s*)?\{{",
+    re.MULTILINE,
+)
+
+
+def _impls_from_extractor(target: str) -> list[dict]:
+    """Look up `target` in the libclang call graph by bare-name suffix.
+
+    Hybrid path: catches definitions the regex pre-filter misses (deeply
+    templated returns, signatures whose layout the regex can't span).
+    Returns [] when the extractor isn't ready.
+    """
+    extractor = _state.cpp_extractor
+    if not extractor:
+        return []
+    out: list[dict] = []
+    for qname, (file, line) in extractor.function_locations.items():
+        if qname.rsplit("::", 1)[-1] != target:
+            continue
+        out.append(
+            {
+                "function_name": target,
+                "file_path": file,
+                "line_number": line,
+                "signature": qname,
+            }
+        )
+    return out
+
+
+def _find_implementations(
+    source: str, functions: dict
+) -> tuple[dict[str, list[dict]], dict[str, str]]:
+    """Find C++ implementations in source using configured search directories.
+
+    Returns (impls, symbol_to_file). `impls` is YAML-targets-filtered as before.
+    `symbol_to_file` indexes ALL function definitions found in vendor backend
+    dirs (cudnn/miopen/mkldnn/...), bypassing the targets filter — needed for
+    helper functions like `run_cudnn_SDP_fprop` that aren't YAML ops but still
+    need a file-cohort bridge for test selection.
+    """
     src = Path(source)
 
     search_dirs = [src / d for d in CPP_SEARCH_DIRS]
@@ -194,19 +282,10 @@ def _find_implementations(source: str, functions: dict) -> dict[str, list[dict]]
         f"in {len(search_dirs)} directories..."
     )
 
-    patterns = [
-        re.compile(
-            r"^(?:static\s+)?(?:inline\s+)?(?:TORCH_API\s+)?"
-            r"(?:Tensor&?|void|bool|int64_t|double|std::tuple<[^>]+>|at::Tensor)\s+"
-            r"(\w+)\s*\([^;]*\)\s*(?:const\s*)?{",
-            re.MULTILINE,
-        ),
-        re.compile(
-            r"^(?:Tensor&?|void)\s+(?:\w+::)+(\w+)\s*\([^;]*\)\s*{", re.MULTILINE
-        ),
-    ]
+    patterns = [_FREE_FUNC_RE, _METHOD_FUNC_RE]
 
     impls: dict[str, list[dict]] = {}
+    symbol_to_file: dict[str, str] = {}
     file_count = 0
 
     for search_dir in search_dirs:
@@ -225,10 +304,14 @@ def _find_implementations(source: str, functions: dict) -> dict[str, list[dict]]
             except Exception:
                 continue
 
+            in_vendor = is_vendor_path(file_str)
+
             file_count += 1
             for pattern in patterns:
                 for match in pattern.finditer(content):
                     func_name = match.group(1)
+                    if in_vendor:
+                        symbol_to_file.setdefault(func_name, file_str)
                     if func_name not in targets:
                         continue
 
@@ -248,9 +331,10 @@ def _find_implementations(source: str, functions: dict) -> dict[str, list[dict]]
 
     log.info(
         f"Found {sum(len(v) for v in impls.values())} "
-        f"implementations in {file_count} files"
+        f"implementations in {file_count} files; "
+        f"{len(symbol_to_file)} vendor-helper symbols indexed"
     )
-    return impls
+    return impls, symbol_to_file
 
 
 def _fuzzy_find(name: str, data: dict[str, Any]) -> list[Any] | None:
@@ -296,7 +380,7 @@ def _build_index(source: str) -> dict[str, Any]:
 
     functions, derivatives = _parse_native_functions(source)
 
-    implementations = _find_implementations(source, functions)
+    implementations, symbol_to_file = _find_implementations(source, functions)
 
     detector = BindingDetector()
     graph = detector.detect_bindings_in_directory(source)
@@ -307,9 +391,11 @@ def _build_index(source: str) -> dict[str, Any]:
         "native_functions": functions,
         "derivatives": derivatives,
         "native_implementations": implementations,
+        "symbol_to_file": symbol_to_file,
         "metadata": {
             "source_path": source,
             "source_fingerprint": _source_fingerprint(source),
+            "format_version": _BINDINGS_CACHE_FORMAT_VERSION,
         },
     }
 
@@ -322,7 +408,12 @@ def _build_index(source: str) -> dict[str, Any]:
 
 
 def _build_indexes(state: ServerState):
-    """Build lookup indexes."""
+    """Build lookup indexes. Clears prior contents so reloads don't duplicate."""
+    state.by_python_name.clear()
+    state.by_cpp_name.clear()
+    state.by_dispatch_key.clear()
+    state.bindings_by_file.clear()
+    state.dispatch_to_op.clear()
     for binding in state.bindings:
         if py_name := binding.get("python_name"):
             state.by_python_name.setdefault(py_name, []).append(binding)
@@ -330,6 +421,24 @@ def _build_indexes(state: ServerState):
             state.by_cpp_name.setdefault(cpp_name, []).append(binding)
         if dispatch := binding.get("dispatch_key"):
             state.by_dispatch_key.setdefault(dispatch, []).append(binding)
+        if file_path := binding.get("file_path"):
+            state.bindings_by_file.setdefault(file_path, []).append(binding)
+    # Reverse index: vendor-backend impl symbol → parent ATen op. Captures the
+    # `dispatch: { CUDA: cudnn_convolution_forward }` shape so a walk that lands
+    # on `cudnn_convolution_forward` resolves to `cudnn_convolution`.
+    for op_name, entry in state.native_functions.items():
+        for impl in entry.get("dispatch", {}).values():
+            if impl and impl != op_name:
+                state.dispatch_to_op.setdefault(impl, op_name)
+    # File → ops defined in it, derived from `native_implementations`. Used to
+    # bridge inner vendor-backend helpers (`raw_cudnn_convolution_forward_out`)
+    # to the registered op family in the same file (`cudnn_convolution`,
+    # `cudnn_convolution_transpose`, ...) when the call graph lacks edges.
+    state.ops_by_file.clear()
+    for op_name, impls in state.native_implementations.items():
+        for impl in impls:
+            if fp := impl.get("file_path"):
+                state.ops_by_file.setdefault(fp, set()).add(op_name)
 
 
 def _load_from_json(path: str):
@@ -345,6 +454,7 @@ def _load_from_json(path: str):
     _state.native_functions = data.get("native_functions", {})
     _state.derivatives = data.get("derivatives", {})
     _state.native_implementations = data.get("native_implementations", {})
+    _state.symbol_to_file = data.get("symbol_to_file", {})
 
     _build_indexes(_state)
 
@@ -449,9 +559,13 @@ def _init_python_modules(source: str):
     global _state
 
     try:
+        from .analysis.alias_map import build_function_alias_map
         from .analysis.python_analyzer import PythonAnalyzer, build_module_index
 
-        analyzer = PythonAnalyzer()
+        _state.alias_map = build_function_alias_map(_state.native_functions)
+        log.info(f"Alias map: {len(_state.alias_map)} torch.<op> aliases")
+
+        analyzer = PythonAnalyzer(alias_map=_state.alias_map)
         src = Path(source)
 
         # Use configured Python search directories
@@ -477,8 +591,77 @@ def _init_python_modules(source: str):
                 f"Loaded {len(all_modules)} Python modules, "
                 f"{len(_state.nn_modules)} nn.Module classes"
             )
+            _init_py_cpp_edges(source)
     except Exception as e:
         log.warning(f"Failed to analyze Python modules: {e}")
+
+
+# v3: edges now include import-aware resolution (`linalg.cross(...)` →
+# `aten::linalg_cross` after `from torch import linalg`) and namespaced
+# aliases. Bump invalidates v2 caches built before import tracking.
+_PY_CPP_EDGES_CACHE_VERSION = 3
+
+
+def _build_py_to_cpp_edges(modules: dict[str, Any]) -> dict[str, list[dict]]:
+    """Reverse-index PyFunction.cpp_bindings as cpp_symbol → caller sites."""
+    edges: dict[str, list[dict]] = {}
+
+    def record(func, cpp_bindings):
+        for b in cpp_bindings:
+            edges.setdefault(b.cpp_symbol, []).append(
+                {
+                    "caller_qualname": func.qualified_name,
+                    "file": func.file_path,
+                    "line": b.line,
+                }
+            )
+
+    for module in modules.values():
+        for func in module.functions:
+            record(func, func.cpp_bindings)
+        for cls in module.classes:
+            for method in cls.methods:
+                record(method, method.cpp_bindings)
+    return edges
+
+
+def _save_py_cpp_edges_cache(path: Path) -> None:
+    """Persist the py→cpp edge index to JSON, versioned and fingerprinted."""
+    payload = {
+        "version": _PY_CPP_EDGES_CACHE_VERSION,
+        "fingerprint": _source_fingerprint(_state.pytorch_source or ""),
+        "edges": _state.py_to_cpp_edges,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload))
+
+
+def _load_py_cpp_edges_cache(path: Path, source: str) -> bool:
+    """Hydrate edge index from cache. Returns True on success."""
+    try:
+        payload = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return False
+    if payload.get("version") != _PY_CPP_EDGES_CACHE_VERSION:
+        return False
+    if payload.get("fingerprint") != _source_fingerprint(source):
+        return False
+    _state.py_to_cpp_edges = payload.get("edges", {})
+    return True
+
+
+def _init_py_cpp_edges(source: str) -> None:
+    """Build (or load from cache) the cpp_symbol → Python-callsite reverse index."""
+    cache = cache_paths(source)["py_cpp_edges"]
+    if cache.exists() and _load_py_cpp_edges_cache(cache, source):
+        log.info(f"Py→Cpp edges (cached): {len(_state.py_to_cpp_edges)} symbols")
+        return
+    _state.py_to_cpp_edges = _build_py_to_cpp_edges(_state.py_modules)
+    log.info(f"Py→Cpp edges: {len(_state.py_to_cpp_edges)} symbols")
+    try:
+        _save_py_cpp_edges_cache(cache)
+    except OSError as e:
+        log.debug(f"Failed to save py→cpp edges cache: {e}")
 
 
 def _init_from_source(source: str):
@@ -500,24 +683,124 @@ def _init_from_source(source: str):
         _state.native_functions = data.get("native_functions", {})
         _state.derivatives = data.get("derivatives", {})
         _state.native_implementations = data.get("native_implementations", {})
+        _state.symbol_to_file = data.get("symbol_to_file", {})
         _build_indexes(_state)
 
     _state.pytorch_source = str(src)
+    _init_decomp_aliases(str(src))
+    _init_backward_bridge()
+    _init_dispatch_stubs(str(src))
     _init_cpp_call_graph(str(src))
     _init_python_modules(str(src))
     _init_test_infrastructure(str(src))
 
 
+def _init_decomp_aliases(source: str):
+    """Build aten ↔ python-fn alias map from decomp/refs decorators."""
+    from .analysis.decomp_aliases import extract_decomp_aliases
+
+    _state.decomp_alias_map = extract_decomp_aliases(Path(source))
+    log.info(f"Decomp aliases: {len(_state.decomp_alias_map)} entries")
+
+
+def _init_backward_bridge():
+    """Build backward → forward op map by scanning derivatives.yaml formulas."""
+    from .analysis.backward_bridge import extract_backward_to_forward
+
+    _state.backward_to_forward = extract_backward_to_forward(_state.derivatives)
+    log.info(f"Backward bridge: {len(_state.backward_to_forward)} entries")
+
+
+def _init_dispatch_stubs(source: str):
+    """Build kernel-impl → ATen op map from REGISTER_DISPATCH macros."""
+    from .analysis.dispatch_stub_map import extract_kernel_impl_to_op
+
+    _state.kernel_impl_to_op = extract_kernel_impl_to_op(
+        Path(source), _state.native_functions
+    )
+    log.info(f"Dispatch stub map: {len(_state.kernel_impl_to_op)} kernel impls")
+
+
+def load_python_profiling(path: str) -> int:
+    """Load PyTorch's `td_heuristic_profiling.json` into state. Returns entry count.
+
+    Download: https://raw.githubusercontent.com/pytorch/test-infra/generated-stats/stats/td_heuristic_profiling.json
+    """
+    data = json.loads(Path(path).read_text())
+    _state.python_profiling = data
+    log.info(f"Python profiling: {len(data)} source files")
+    return len(data)
+
+
+_TEST_INFRA_CACHE_VERSION = 1
+
+
+def _save_test_infra_cache(path: Path) -> None:
+    """Persist test infrastructure state to JSON. Sets become sorted lists."""
+    payload = {
+        "version": _TEST_INFRA_CACHE_VERSION,
+        "fingerprint": _source_fingerprint(_state.pytorch_source or ""),
+        "test_files": _state.test_files,
+        "test_classes": _state.test_classes,
+        "test_functions": _state.test_functions,
+        "test_utilities": _state.test_utilities,
+        "opinfo_registry": _state.opinfo_registry,
+        "opinfo_alias_map": _state.opinfo_alias_map,
+        "opinfo_test_files": sorted(_state.opinfo_test_files),
+        "test_attr_index": _state.test_attr_index,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload))
+
+
+def _load_test_infra_cache(path: Path, source: str) -> bool:
+    """Hydrate state from a test-infra cache file. Returns True on success."""
+    try:
+        payload = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return False
+    if payload.get("version") != _TEST_INFRA_CACHE_VERSION:
+        return False
+    if payload.get("fingerprint") != _source_fingerprint(source):
+        return False
+    _state.test_files = payload["test_files"]
+    _state.test_classes = payload["test_classes"]
+    _state.test_functions = payload["test_functions"]
+    _state.test_utilities = payload["test_utilities"]
+    _state.opinfo_registry = payload["opinfo_registry"]
+    _state.opinfo_alias_map = payload["opinfo_alias_map"]
+    _state.opinfo_test_files = set(payload["opinfo_test_files"])
+    _state.test_attr_index = payload["test_attr_index"]
+    return True
+
+
 def _init_test_infrastructure(source: str):
-    """Initialize test infrastructure analysis."""
+    """Initialize test infrastructure analysis (cache-first)."""
     global _state
+
+    cache = cache_paths(source)["test_infra"]
+    if cache.exists() and _load_test_infra_cache(cache, source):
+        log.info(
+            f"Test infrastructure (cached): {len(_state.test_files)} files, "
+            f"{len(_state.test_classes)} test classes, "
+            f"{len(_state.test_functions)} test functions"
+        )
+        return
 
     try:
         import ast
 
+        from .analysis.affected import api_attr_variants, normalize_api
+
         src = Path(source)
 
         log.info("Analyzing test infrastructure...")
+
+        # Bound the attr index by only recording mentions of names that
+        # could plausibly resolve to a known binding's API.
+        interesting_attrs: set[str] = set()
+        for py_name in _state.by_python_name:
+            interesting_attrs.update(api_attr_variants(normalize_api(py_name)))
 
         # Scan test directories
         for test_dir in TEST_SEARCH_DIRS:
@@ -558,6 +841,9 @@ def _init_test_infrastructure(source: str):
                         "imports": [],
                     }
 
+                    if _has_ops_decorator(tree):
+                        _state.opinfo_test_files.add(rel_path)
+
                     for node in ast.walk(tree):
                         # Extract test classes
                         if isinstance(node, ast.ClassDef):
@@ -594,6 +880,14 @@ def _init_test_infrastructure(source: str):
                                     _state.test_functions.setdefault(
                                         item.name, []
                                     ).append(func_info)
+                                    if interesting_attrs:
+                                        _collect_test_attr_hits(
+                                            item,
+                                            rel_path,
+                                            node.name,
+                                            interesting_attrs,
+                                            _state.test_attr_index,
+                                        )
 
                         # Extract standalone test functions
                         elif isinstance(node, ast.FunctionDef) and node.name.startswith(
@@ -610,6 +904,14 @@ def _init_test_infrastructure(source: str):
                                 _state.test_functions.setdefault(node.name, []).append(
                                     func_info
                                 )
+                                if interesting_attrs:
+                                    _collect_test_attr_hits(
+                                        node,
+                                        rel_path,
+                                        None,
+                                        interesting_attrs,
+                                        _state.test_attr_index,
+                                    )
 
                     _state.test_files[rel_path] = file_info
 
@@ -626,7 +928,8 @@ def _init_test_infrastructure(source: str):
                     "exists": True,
                 }
 
-        # Parse OpInfo registry - scan all opinfo definition files
+        # Parse OpInfo registry - scan opinfo definition files plus the main
+        # op_db source (`common_methods_invocations.py`).
         opinfo_dirs = [
             src / "torch/testing/_internal/opinfo",
             src / "torch/testing/_internal/opinfo/definitions",
@@ -635,15 +938,118 @@ def _init_test_infrastructure(source: str):
             if opinfo_dir.exists():
                 for opinfo_file in opinfo_dir.glob("*.py"):
                     _parse_opinfo_registry(str(opinfo_file))
+        op_db_main = src / "torch/testing/_internal/common_methods_invocations.py"
+        if op_db_main.exists():
+            _parse_opinfo_registry(str(op_db_main))
 
         log.info(
             f"Test infrastructure: {len(_state.test_files)} files, "
             f"{len(_state.test_classes)} test classes, "
             f"{len(_state.test_functions)} test functions"
         )
+        try:
+            _save_test_infra_cache(cache)
+        except OSError as e:
+            log.debug(f"Failed to save test infra cache: {e}")
 
     except Exception as e:
         log.warning(f"Failed to analyze test infrastructure: {e}")
+
+
+_TORCH_MODULE_NAMES = {"torch", "F"}
+
+
+def _classify_rhs(node) -> str | None:
+    """Best-effort type tag for an assignment RHS."""
+    if isinstance(node, ast.Dict):
+        return "dict"
+    if isinstance(node, ast.List):
+        return "list"
+    if isinstance(node, ast.Set):
+        return "set"
+    if isinstance(node, ast.Tuple):
+        return "tuple"
+    if isinstance(node, ast.Constant):
+        v = node.value
+        if isinstance(v, bool):
+            return "bool"
+        if isinstance(v, str):
+            return "str"
+        if isinstance(v, (int, float)):
+            return "number"
+    if isinstance(node, ast.Call):
+        func = node.func
+        if (
+            isinstance(func, ast.Attribute)
+            and isinstance(func.value, ast.Name)
+            and func.value.id in _TORCH_MODULE_NAMES
+        ):
+            return "tensor"
+    return None
+
+
+def _infer_local_types(func_node) -> dict[str, str]:
+    """Map local var name → inferred type within `func_node` body."""
+    types: dict[str, str] = {}
+    for sub in ast.walk(func_node):
+        if not isinstance(sub, ast.Assign):
+            continue
+        rhs_type = _classify_rhs(sub.value)
+        if rhs_type is None:
+            continue
+        for target in sub.targets:
+            if isinstance(target, ast.Name):
+                types[target.id] = rhs_type
+    return types
+
+
+def _collect_test_attr_hits(
+    func_node,
+    file: str,
+    class_name: str | None,
+    interesting_attrs: set[str],
+    index: dict[str, list[dict]],
+) -> None:
+    """Record API-variant Attribute/Name accesses inside a `test_*` method."""
+    local_types = _infer_local_types(func_node)
+    for sub in ast.walk(func_node):
+        name: str | None = None
+        receiver_type: str | None = None
+        if isinstance(sub, ast.Attribute):
+            name = sub.attr
+            if isinstance(sub.value, ast.Name):
+                receiver_type = local_types.get(sub.value.id)
+        elif isinstance(sub, ast.Name):
+            name = sub.id
+        if name and name in interesting_attrs:
+            index.setdefault(name, []).append(
+                {
+                    "file": file,
+                    "class": class_name,
+                    "function": func_node.name,
+                    "receiver_type": receiver_type,
+                }
+            )
+
+
+def _has_ops_decorator(tree) -> bool:
+    """True if any class/function in `tree` is decorated with `@ops(...)`.
+
+    Marks files that consume `op_db` via `instantiate_device_type_tests` and
+    `@ops`, the standard PyTorch OpInfo-driven test pattern.
+    """
+    import ast
+
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.ClassDef, ast.FunctionDef)):
+            continue
+        for dec in node.decorator_list:
+            target = dec.func if isinstance(dec, ast.Call) else dec
+            if isinstance(target, ast.Name) and target.id == "ops":
+                return True
+            if isinstance(target, ast.Attribute) and target.attr == "ops":
+                return True
+    return False
 
 
 def _get_ast_name(node) -> str:
@@ -665,20 +1071,55 @@ def _get_ast_name(node) -> str:
     return ""
 
 
+_OPINFO_CLASSES = {"OpInfo", "BinaryUfuncInfo", "UnaryUfuncInfo", "ShapeFuncInfo"}
+
+
+def _is_opinfo_call(node) -> bool:
+    """True if `node` is an `OpInfo(...)` / `BinaryUfuncInfo(...)` / etc. call."""
+    if not isinstance(node, ast.Call):
+        return False
+    func = node.func
+    if isinstance(func, ast.Name):
+        return func.id in _OPINFO_CLASSES
+    if isinstance(func, ast.Attribute):
+        return func.attr in _OPINFO_CLASSES
+    return False
+
+
+def _opinfo_string_kw(node, kwarg: str) -> str | None:
+    """Extract a string kwarg from an OpInfo call, e.g. `aten_name='conv2d'`."""
+    for kw in node.keywords:
+        if kw.arg == kwarg and isinstance(kw.value, ast.Constant):
+            v = kw.value.value
+            if isinstance(v, str):
+                return v
+    return None
+
+
+def _opinfo_string_tuple_kw(node, kwarg: str) -> list[str]:
+    """Extract a string tuple/list kwarg, e.g. `aliases=('conv2d', 'conv2d_v2')`."""
+    out: list[str] = []
+    for kw in node.keywords:
+        if kw.arg != kwarg or not isinstance(kw.value, (ast.Tuple, ast.List)):
+            continue
+        for elt in kw.value.elts:
+            if isinstance(elt, ast.Constant) and isinstance(elt.value, str):
+                out.append(elt.value)
+    return out
+
+
 def _parse_opinfo_registry(opinfo_path: str):
-    """Parse OpInfo definitions to map operators to their test info."""
+    """Parse OpInfo definitions for op name + aliases + aten_name."""
     global _state
 
     try:
         path = Path(opinfo_path)
         content = path.read_text()
+        try:
+            tree = ast.parse(content, filename=opinfo_path)
+        except SyntaxError:
+            return
 
-        # Find OpInfo definitions - pattern: OpInfo('op_name', ...)
-        import re
-
-        pattern = r"OpInfo\s*\(\s*['\"]([^'\"]+)['\"]"
-
-        # Get relative path for display
         if _state.pytorch_source:
             try:
                 rel_path = str(path.relative_to(_state.pytorch_source))
@@ -688,21 +1129,37 @@ def _parse_opinfo_registry(opinfo_path: str):
             rel_path = str(path)
 
         count = 0
-        for match in re.finditer(pattern, content):
-            op_name = match.group(1)
-            line = content[: match.start()].count("\n") + 1
-            _state.opinfo_registry[op_name] = {
+        for node in ast.walk(tree):
+            if not _is_opinfo_call(node):
+                continue
+            if not node.args or not isinstance(node.args[0], ast.Constant):
+                continue
+            op_name = node.args[0].value
+            if not isinstance(op_name, str):
+                continue
+
+            aliases = _opinfo_string_tuple_kw(node, "aliases")
+            aten_name = _opinfo_string_kw(node, "aten_name")
+
+            entry = {
                 "name": op_name,
                 "file": rel_path,
-                "line": line,
+                "line": node.lineno,
+                "aliases": aliases,
+                "aten_name": aten_name,
             }
+            _state.opinfo_registry[op_name] = entry
+            for alias in aliases:
+                _state.opinfo_alias_map.setdefault(alias, []).append(entry)
+            if aten_name:
+                _state.opinfo_alias_map.setdefault(aten_name, []).append(entry)
             count += 1
 
         if count > 0:
             log.debug(f"Found {count} OpInfo definitions in {path.name}")
 
-    except Exception as e:
-        log.debug(f"Failed to parse OpInfo from {opinfo_path}: {e}")
+    except OSError as e:
+        log.debug(f"Failed to read OpInfo file {opinfo_path}: {e}")
 
 
 def _auto_detect_pytorch() -> str | None:
@@ -712,3 +1169,327 @@ def _auto_detect_pytorch() -> str | None:
     CLI flag is handled upstream in run_server().
     """
     return resolve_pytorch_source()
+
+
+def update_index(source: str, since: str, on_uncovered: str = "warn") -> dict:
+    """Incrementally refresh the bindings index using a prior snapshot as baseline.
+
+    Re-detects only C++/CUDA files that changed in git between the snapshot's
+    recorded commit and current HEAD. YAML files are re-parsed when they change.
+    The C++ call graph is NOT incrementally updated and may be stale; run
+    `torchtalk index build` to rebuild it.
+
+    `on_uncovered` selects the policy for changed headers not in the baseline's
+    recorded include graph: warn (default), fail (flag in stats), or widen
+    (textually grep compile-DB TUs and add to the reparse set).
+    """
+    import subprocess
+    from dataclasses import asdict
+
+    from .analysis.binding_detector import BindingDetector
+    from .snapshots import _relpath, _snapshot_dir, read_manifest
+
+    manifest = read_manifest(since)
+    if not manifest.git_commit:
+        raise ValueError(
+            f"Snapshot '{since}' has no git_commit; cannot diff against HEAD"
+        )
+
+    snap_dir = _snapshot_dir(since)
+    prior = json.loads((snap_dir / "bindings.json").read_text())
+
+    try:
+        diff_out = subprocess.run(
+            [
+                "git",
+                "-C",
+                source,
+                "diff",
+                "--name-status",
+                f"{manifest.git_commit}..HEAD",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=30,
+        ).stdout
+    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        raise RuntimeError(f"git diff failed: {e}") from e
+
+    cpp_exts = (".cpp", ".cc", ".cxx", ".cu", ".cuh")
+    header_exts = (".h", ".hpp", ".hxx", ".hh", ".inc")
+    yaml_files = {
+        "aten/src/ATen/native/native_functions.yaml",
+        "tools/autograd/derivatives.yaml",
+    }
+
+    changed_cpp: set[str] = set()
+    removed_cpp: set[str] = set()
+    changed_headers: set[str] = set()
+    yaml_changed = False
+    for line in diff_out.splitlines():
+        parts = line.split("\t")
+        if len(parts) < 2:
+            continue
+        status, path = parts[0], parts[-1]
+        if path in yaml_files:
+            yaml_changed = True
+        if path.endswith(header_exts):
+            changed_headers.add(path)
+            continue
+        if not path.endswith(cpp_exts):
+            continue
+        (removed_cpp if status.startswith("D") else changed_cpp).add(path)
+
+    dirty = changed_cpp | removed_cpp
+    prior_source = manifest.pytorch_source
+    new_bindings = [
+        b
+        for b in prior.get("bindings", [])
+        if _relpath(b.get("file_path", ""), prior_source) not in dirty
+    ]
+    new_kernels = [
+        k
+        for k in prior.get("cuda_kernels", [])
+        if _relpath(k.get("file_path", ""), prior_source) not in dirty
+    ]
+
+    detector = BindingDetector()
+    src = Path(source)
+    for rel in changed_cpp:
+        full = src / rel
+        if not full.exists():
+            continue
+        try:
+            content = full.read_text(errors="ignore")
+        except OSError:
+            continue
+        g = detector.detect_bindings(str(full), content)
+        new_bindings.extend(b.to_dict() for b in g.bindings)
+        new_kernels.extend(asdict(k) for k in g.cuda_kernels)
+
+    if yaml_changed:
+        functions, derivatives = _parse_native_functions(source)
+        implementations, symbol_to_file = _find_implementations(source, functions)
+    else:
+        functions = prior.get("native_functions", {})
+        derivatives = prior.get("derivatives", {})
+        implementations = prior.get("native_implementations", {})
+        symbol_to_file = prior.get("symbol_to_file", {})
+
+    data = {
+        "bindings": new_bindings,
+        "cuda_kernels": new_kernels,
+        "native_functions": functions,
+        "derivatives": derivatives,
+        "native_implementations": implementations,
+        "symbol_to_file": symbol_to_file,
+        "metadata": {
+            "source_path": source,
+            "source_fingerprint": _source_fingerprint(source),
+            "updated_since": since,
+            "updated_commit": manifest.git_commit,
+        },
+    }
+
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    cache = _cache_path(source)
+    with open(cache, "w") as f:
+        json.dump(data, f)
+
+    cg_stats = _update_call_graph(
+        source, since, changed_cpp, removed_cpp, changed_headers, on_uncovered
+    )
+
+    return {
+        "cpp_files_changed": len(changed_cpp),
+        "cpp_files_removed": len(removed_cpp),
+        "headers_changed": len(changed_headers),
+        "yaml_changed": yaml_changed,
+        "bindings_total": len(new_bindings),
+        "cuda_kernels_total": len(new_kernels),
+        "baseline_snapshot": since,
+        "baseline_commit": manifest.git_commit,
+        "call_graph": cg_stats,
+    }
+
+
+def _widen_reparse_set(
+    source: Path, uncovered: set[str], cc_index: dict[str, dict]
+) -> set[str]:
+    """Return repo-relative TUs that textually #include any uncovered header.
+
+    Basename match is deliberately conservative: a header `ops.h` matches every
+    `#include ".../ops.h"`, including unrelated same-named files. Over-reparsing
+    is preferable to missing a real edge under the `widen` policy.
+    """
+    import os
+    import re
+    import subprocess
+
+    compiled_rel: set[str] = set()
+    for fp in cc_index:
+        try:
+            rel = os.path.relpath(fp, str(source))
+        except ValueError:
+            continue
+        if not rel.startswith(".."):
+            compiled_rel.add(rel)
+
+    extra: set[str] = set()
+    for hdr in uncovered:
+        basename = os.path.basename(hdr)
+        if not basename:
+            continue
+        pattern = rf'^\s*#include\s*[<"][^<"]*{re.escape(basename)}[>"]'
+        try:
+            result = subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(source),
+                    "grep",
+                    "-l",
+                    "-E",
+                    pattern,
+                    "--",
+                    "*.cpp",
+                    "*.cu",
+                    "*.mm",
+                    "*.cc",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            continue
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if line and line in compiled_rel:
+                extra.add(line)
+    return extra
+
+
+def _update_call_graph(
+    source: str,
+    since: str,
+    changed_cpp: set[str],
+    removed_cpp: set[str],
+    changed_headers: set[str],
+    on_uncovered: str = "warn",
+) -> dict[str, Any]:
+    """Incrementally refresh the C++ call graph using a snapshot as baseline.
+
+    Loads the baseline call graph, computes which TUs a header change affects
+    via recorded per-TU include sets, evicts per-file records for the union of
+    changed cpp + header-affected TUs + removed files, re-parses the dirty
+    TUs, and writes the result to the active cache.
+    """
+    import os
+
+    from .analysis.cpp_call_graph import LIBCLANG_AVAILABLE, CppCallGraphExtractor
+    from .snapshots import _snapshot_dir
+
+    if not LIBCLANG_AVAILABLE:
+        return {"skipped": "libclang not available"}
+
+    snap_cg = _snapshot_dir(since) / "callgraph.json"
+    if not snap_cg.exists():
+        return {"skipped": "baseline snapshot has no call graph"}
+
+    cg_cache_dir = CACHE_DIR / "call_graph"
+    cache_key = f"pytorch_callgraph_parallel_{source_hash(source)}"
+
+    extractor = CppCallGraphExtractor(cache_dir=cg_cache_dir)
+    if not extractor.load_from_path(snap_cg):
+        return {"skipped": "failed to load baseline call graph"}
+
+    header_affected = extractor.find_affected_tus(changed_headers)
+    tus_to_reparse = set(changed_cpp) | header_affected
+
+    uncovered = changed_headers - extractor.known_headers()
+
+    src = Path(source)
+    compile_commands = src / "compile_commands.json"
+    if not compile_commands.exists():
+        compile_commands = src / "build" / "compile_commands.json"
+
+    cc_index: dict[str, dict] = {}
+    need_db = tus_to_reparse or (uncovered and on_uncovered == "widen")
+    if compile_commands.exists() and need_db:
+        with open(compile_commands) as f:
+            compile_db = json.load(f)
+        for entry in compile_db:
+            fp = entry.get("file", "")
+            directory = entry.get("directory", "")
+            if not os.path.isabs(fp) and directory:
+                fp = os.path.join(directory, fp)
+            cc_index[fp] = entry
+
+    widened_net: set[str] = set()
+    if uncovered and on_uncovered == "widen" and cc_index:
+        widened = _widen_reparse_set(src, uncovered, cc_index)
+        widened_net = widened - tus_to_reparse
+        tus_to_reparse |= widened
+
+    entries: list[tuple[str, list[str]]] = []
+    for rel in tus_to_reparse:
+        full = str(src / rel)
+        entry = cc_index.get(full)
+        if entry is None:
+            continue
+        command = entry.get("command", "")
+        args = command.split()[1:] if command else entry.get("arguments", [])[1:]
+        entries.append((full, args))
+
+    removed_abs = [str(src / r) for r in removed_cpp]
+
+    try:
+        stats = extractor.update_files(entries, removed=removed_abs, source_root=source)
+    except RuntimeError as e:
+        return {"skipped": str(e)}
+
+    stats["header_affected_tus"] = len(header_affected)
+    stats["uncovered_headers"] = len(uncovered)
+    stats["uncovered_sample"] = sorted(uncovered)[:5]
+    stats["on_uncovered"] = on_uncovered
+    if widened_net:
+        stats["widened_tus"] = len(widened_net)
+    if uncovered and on_uncovered == "fail":
+        stats["uncovered_fail"] = True
+
+    extractor.save_cache(cache_key)
+    return stats
+
+
+def build_index(source: str, wait_for_cpp: bool = True) -> dict:
+    """Build or refresh the index for a PyTorch source and return stats.
+
+    Headless equivalent of `mcp-serve` startup. Blocks on the C++ call graph
+    when wait_for_cpp is True; otherwise returns while it builds in the
+    background.
+    """
+    _init_from_source(source)
+
+    if wait_for_cpp and _state.cpp_thread is not None and _state.cpp_thread.is_alive():
+        log.info("Waiting for C++ call graph build to finish...")
+        _state.cpp_thread.join()
+
+    cg_functions = 0
+    if _state.cpp_extractor is not None:
+        cg_functions = len(_state.cpp_extractor.function_locations)
+
+    return {
+        "bindings": len(_state.bindings),
+        "cuda_kernels": len(_state.cuda_kernels),
+        "native_functions": len(_state.native_functions),
+        "derivatives": len(_state.derivatives),
+        "call_graph_functions": cg_functions,
+        "call_graph_building": _state.cpp_building,
+        "python_modules": len(_state.py_modules),
+        "nn_modules": len(_state.nn_modules),
+        "test_files": len(_state.test_files),
+        "test_functions": len(_state.test_functions),
+    }
