@@ -163,8 +163,14 @@ class BindingDetector:
         parser = self.cuda_parser if is_cuda else self.cpp_parser
 
         try:
-            tree = parser.parse(bytes(content, "utf8"))
-            root_node = tree.root_node
+            # tree-sitter-language-pack has shipped parser wrappers that expect
+            # either `str` or UTF-8 `bytes`, depending on version. Support both
+            # so local dev env changes do not break binding detection tests.
+            try:
+                tree = parser.parse(content)
+            except TypeError:
+                tree = parser.parse(bytes(content, "utf8"))
+            root_node = tree.root_node() if callable(tree.root_node) else tree.root_node
         except Exception as e:
             log.warning(f"Parse error for {file_path}: {e}")
             return graph
@@ -195,14 +201,14 @@ class BindingDetector:
     def _find_pybind11_modules(self, node, content: str) -> list[tuple[str, Any]]:
         modules = []
 
-        if node.type == "function_definition":
+        if self._node_kind(node) == "function_definition":
             text = self._get_node_text(node, content)
             match = re.search(r"PYBIND11_MODULE\s*\(\s*(\w+)\s*,", text)
             if match:
                 module_name = match.group(1)
                 modules.append((module_name, node))
 
-        for child in node.children:
+        for child in self._node_children(node):
             modules.extend(self._find_pybind11_modules(child, content))
 
         return modules
@@ -216,8 +222,8 @@ class BindingDetector:
         graph: BindingGraph,
     ):
         body = None
-        for child in module_node.children:
-            if child.type == "compound_statement":
+        for child in self._node_children(module_node):
+            if self._node_kind(child) == "compound_statement":
                 body = child
                 break
 
@@ -225,7 +231,7 @@ class BindingDetector:
             return
 
         body_text = self._get_node_text(body, content)
-        body_start_line = body.start_point[0] + 1
+        body_start_line = self._node_start_line(body)
 
         self._extract_function_bindings(
             body_text, body_start_line, file_path, module_name, graph
@@ -600,7 +606,32 @@ class BindingDetector:
         return None
 
     def _get_node_text(self, node, content: str) -> str:
-        return content[node.start_byte : node.end_byte]
+        start_byte = self._call_or_value(node.start_byte)
+        end_byte = self._call_or_value(node.end_byte)
+        return content[start_byte:end_byte]
+
+    def _node_kind(self, node) -> str:
+        node_type = getattr(node, "type", None)
+        if node_type is not None:
+            return self._call_or_value(node_type)
+        return self._call_or_value(node.kind)
+
+    def _node_children(self, node) -> list[Any]:
+        children = getattr(node, "children", None)
+        if children is not None:
+            return list(self._call_or_value(children))
+        child_count = self._call_or_value(node.child_count)
+        child_fn = node.child
+        return [child_fn(i) for i in range(child_count)]
+
+    def _node_start_line(self, node) -> int:
+        start_point = getattr(node, "start_point", None)
+        if start_point is not None:
+            return self._call_or_value(start_point)[0] + 1
+        return self._call_or_value(node.start_position)[0] + 1
+
+    def _call_or_value(self, value):
+        return value() if callable(value) else value
 
     def detect_bindings_in_directory(self, directory: str) -> BindingGraph:
         """Scan a directory for cross-language bindings."""

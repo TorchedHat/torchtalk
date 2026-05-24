@@ -13,10 +13,13 @@ import argparse
 import json
 import logging
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
 log = logging.getLogger(__name__)
+
+_DEFAULT_LINT_PATHS = ["src/torchtalk", "tests"]
 
 
 def cmd_init(args):
@@ -174,6 +177,40 @@ def cmd_status(args):
     lines.append("")
     lines.append("Status: Ready")
     print("\n".join(lines))
+
+
+def cmd_lint(args):
+    """Run Ruff lint checks for the TorchTalk repo."""
+
+    ruff = shutil.which("ruff")
+    if not ruff:
+        log.error(
+            "ruff is not installed. Install with 'pip install -e \".[dev]\"' or "
+            "'pip install ruff'."
+        )
+        return 1
+
+    paths = args.paths or _DEFAULT_LINT_PATHS
+    commands = []
+
+    check_cmd = [ruff, "check"]
+    if args.fix:
+        check_cmd.append("--fix")
+    check_cmd.extend(paths)
+    commands.append(check_cmd)
+
+    if args.format:
+        format_cmd = [ruff, "format"]
+        if not args.fix:
+            format_cmd.append("--check")
+        format_cmd.extend(paths)
+        commands.append(format_cmd)
+
+    for command in commands:
+        result = subprocess.run(command)
+        if result.returncode != 0:
+            return result.returncode
+    return 0
 
 
 def cmd_mcp_serve(args):
@@ -572,6 +609,28 @@ Example:
         "status",
         help="Show configuration and cache status",
     ).set_defaults(func=cmd_status)
+
+    # lint command
+    parser_lint = subparsers.add_parser(
+        "lint",
+        help="Run Ruff lint checks for TorchTalk",
+    )
+    parser_lint.add_argument(
+        "paths",
+        nargs="*",
+        help="Paths to lint (default: src/torchtalk tests)",
+    )
+    parser_lint.add_argument(
+        "--fix",
+        action="store_true",
+        help="Apply Ruff auto-fixes where possible",
+    )
+    parser_lint.add_argument(
+        "--format",
+        action="store_true",
+        help="Also run Ruff format (check-only unless --fix is set)",
+    )
+    parser_lint.set_defaults(func=cmd_lint)
 
     # index command: headless build-and-exit
     parser_index = subparsers.add_parser(

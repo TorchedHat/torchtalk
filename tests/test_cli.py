@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
+from argparse import Namespace
+from types import SimpleNamespace
 
 from torchtalk.cli import (
     _format_coverage,
     _read_cache_stats,
     _read_coverage_from_cache,
+    cmd_lint,
 )
 
 
@@ -143,3 +146,47 @@ class TestReadCacheStats:
         path = tmp_path / "cg.json"
         path.write_text("not json")
         assert _read_cache_stats(path) is None
+
+
+class TestLintCommand:
+    def test_returns_one_when_ruff_missing(self, monkeypatch):
+        import torchtalk.cli as cli_mod
+
+        monkeypatch.setattr(cli_mod.shutil, "which", lambda _cmd: None)
+        args = Namespace(paths=[], fix=False, format=False)
+        assert cmd_lint(args) == 1
+
+    def test_uses_default_paths(self, monkeypatch):
+        import torchtalk.cli as cli_mod
+
+        seen: list[list[str]] = []
+        monkeypatch.setattr(cli_mod.shutil, "which", lambda _cmd: "/usr/bin/ruff")
+
+        def fake_run(command):
+            seen.append(command)
+            return SimpleNamespace(returncode=0)
+
+        monkeypatch.setattr(cli_mod.subprocess, "run", fake_run)
+        args = Namespace(paths=[], fix=False, format=False)
+
+        assert cmd_lint(args) == 0
+        assert seen == [["/usr/bin/ruff", "check", "src/torchtalk", "tests"]]
+
+    def test_fix_and_format_issue_expected_commands(self, monkeypatch):
+        import torchtalk.cli as cli_mod
+
+        seen: list[list[str]] = []
+        monkeypatch.setattr(cli_mod.shutil, "which", lambda _cmd: "/usr/bin/ruff")
+
+        def fake_run(command):
+            seen.append(command)
+            return SimpleNamespace(returncode=0)
+
+        monkeypatch.setattr(cli_mod.subprocess, "run", fake_run)
+        args = Namespace(paths=["src/torchtalk"], fix=True, format=True)
+
+        assert cmd_lint(args) == 0
+        assert seen == [
+            ["/usr/bin/ruff", "check", "--fix", "src/torchtalk"],
+            ["/usr/bin/ruff", "format", "src/torchtalk"],
+        ]

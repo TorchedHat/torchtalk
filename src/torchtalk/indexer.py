@@ -11,6 +11,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .adapters.base import DEFAULT_FRAMEWORK
+from .adapters.registry import get_adapter
 from .analysis.helpers import levenshtein_distance, truncate
 from .analysis.patterns import (
     CPP_SEARCH_DIRS,
@@ -34,6 +36,8 @@ log = logging.getLogger(__name__)
 class ServerState:
     """Server state container."""
 
+    framework: str = DEFAULT_FRAMEWORK
+    source_root: str | None = None
     bindings: list[dict] = field(default_factory=list)
     cuda_kernels: list[dict] = field(default_factory=list)
     native_functions: dict[str, dict] = field(default_factory=dict)
@@ -75,6 +79,7 @@ class ServerState:
 
 
 _state = ServerState()
+_active_adapter_id: str = DEFAULT_FRAMEWORK
 
 
 def _cache_path(source: str) -> Path:
@@ -393,6 +398,7 @@ def _build_index(source: str) -> dict[str, Any]:
         "native_implementations": implementations,
         "symbol_to_file": symbol_to_file,
         "metadata": {
+            "framework": _state.framework or DEFAULT_FRAMEWORK,
             "source_path": source,
             "source_fingerprint": _source_fingerprint(source),
             "format_version": _BINDINGS_CACHE_FORMAT_VERSION,
@@ -441,13 +447,18 @@ def _build_indexes(state: ServerState):
                 state.ops_by_file.setdefault(fp, set()).add(op_name)
 
 
-def _load_from_json(path: str):
+def _load_from_json(
+    path: str,
+    *,
+    framework: str = DEFAULT_FRAMEWORK,
+):
     """Load bindings from JSON file."""
     global _state
 
     log.info(f"Loading bindings from {path}...")
     with open(path) as f:
         data = json.load(f)
+    metadata = data.get("metadata", {})
 
     _state.bindings = data.get("bindings", [])
     _state.cuda_kernels = data.get("cuda_kernels", [])
@@ -455,6 +466,11 @@ def _load_from_json(path: str):
     _state.derivatives = data.get("derivatives", {})
     _state.native_implementations = data.get("native_implementations", {})
     _state.symbol_to_file = data.get("symbol_to_file", {})
+    _state.framework = metadata.get("framework", framework)
+    source_root = metadata.get("source_path")
+    _state.source_root = str(Path(source_root).resolve()) if source_root else None
+    if _state.framework == "pytorch":
+        _state.pytorch_source = _state.source_root
 
     _build_indexes(_state)
 
@@ -664,7 +680,11 @@ def _init_py_cpp_edges(source: str) -> None:
         log.debug(f"Failed to save py→cpp edges cache: {e}")
 
 
-def _init_from_source(source: str):
+def _init_from_source(
+    source: str,
+    *,
+    framework: str = DEFAULT_FRAMEWORK,
+):
     """Initialize from PyTorch source."""
     global _state
 
@@ -672,12 +692,18 @@ def _init_from_source(source: str):
     if not src.exists():
         raise FileNotFoundError(f"Source not found: {source}")
 
-    cache = _cache_path(str(src))
-    if _cache_valid(cache, str(src)):
+    resolved_source = str(src)
+    _state.framework = framework
+    _state.source_root = resolved_source
+    if framework == "pytorch":
+        _state.pytorch_source = resolved_source
+
+    cache = _cache_path(resolved_source)
+    if _cache_valid(cache, resolved_source):
         log.info(f"Using cached index from {cache}")
-        _load_from_json(str(cache))
+        _load_from_json(str(cache), framework=framework)
     else:
-        data = _build_index(str(src))
+        data = _build_index(resolved_source)
         _state.bindings = data.get("bindings", [])
         _state.cuda_kernels = data.get("cuda_kernels", [])
         _state.native_functions = data.get("native_functions", {})
@@ -686,13 +712,45 @@ def _init_from_source(source: str):
         _state.symbol_to_file = data.get("symbol_to_file", {})
         _build_indexes(_state)
 
-    _state.pytorch_source = str(src)
-    _init_decomp_aliases(str(src))
+    _state.pytorch_source = resolved_source
+    _state.source_root = resolved_source
+    _init_decomp_aliases(resolved_source)
     _init_backward_bridge()
-    _init_dispatch_stubs(str(src))
-    _init_cpp_call_graph(str(src))
-    _init_python_modules(str(src))
-    _init_test_infrastructure(str(src))
+    _init_dispatch_stubs(resolved_source)
+    _init_cpp_call_graph(resolved_source)
+    _init_python_modules(resolved_source)
+    _init_test_infrastructure(resolved_source)
+
+
+def init_via_adapter(
+    framework: str = DEFAULT_FRAMEWORK,
+    *,
+    cli_source: str | None = None,
+    source: str | None = None,
+    index_path: str | None = None,
+) -> str | None:
+    """Initialize state via the registered framework adapter."""
+
+    global _active_adapter_id
+
+    adapter = get_adapter(framework)
+    resolved_source = source or adapter.resolve_source(cli_source)
+    _state.framework = adapter.framework_id
+
+    if resolved_source:
+        adapter.bootstrap(resolved_source)
+        _state.source_root = str(Path(resolved_source).resolve())
+    elif index_path:
+        adapter.bootstrap(index_path=index_path)
+        if _state.framework == "pytorch" and _state.source_root is None:
+            _state.source_root = _state.pytorch_source
+    else:
+        _state.source_root = None
+        if adapter.framework_id == "pytorch":
+            _state.pytorch_source = None
+
+    _active_adapter_id = adapter.framework_id
+    return resolved_source
 
 
 def _init_decomp_aliases(source: str):
@@ -1471,7 +1529,7 @@ def build_index(source: str, wait_for_cpp: bool = True) -> dict:
     when wait_for_cpp is True; otherwise returns while it builds in the
     background.
     """
-    _init_from_source(source)
+    init_via_adapter(source=source)
 
     if wait_for_cpp and _state.cpp_thread is not None and _state.cpp_thread.is_alive():
         log.info("Waiting for C++ call graph build to finish...")

@@ -8,11 +8,10 @@ from typing import Literal
 
 from mcp.server.fastmcp import FastMCP
 
+from .adapters import DEFAULT_FRAMEWORK, get_adapter
 from .formatting import create_formatter
 from .indexer import (
-    _auto_detect_pytorch,
-    _init_from_source,
-    _load_from_json,
+    init_via_adapter,
     _state,
 )
 from .tools.affected import _do_affected
@@ -36,6 +35,17 @@ async def get_status() -> str:
     """Get TorchTalk status and available tools."""
     md = create_formatter()
     md.h2("TorchTalk Status")
+
+    try:
+        framework_name = get_adapter(_state.framework).display_name
+    except KeyError:
+        framework_name = _state.framework
+    md.bold("Framework", framework_name)
+    if _state.source_root:
+        md.code("Source Root", _state.source_root)
+    else:
+        md.bold("Source Root", "Not configured")
+    md.blank()
 
     if _state.pytorch_source:
         md.code("PyTorch Source", _state.pytorch_source)
@@ -297,23 +307,23 @@ def run_server(
     pytorch_source: str | None = None,
     index_path: str | None = None,
     transport: str = "stdio",
+    framework: str = DEFAULT_FRAMEWORK,
 ):
     """Start MCP server. Heavy init runs in background so the MCP client's
     initialize handshake completes immediately; tools return a 'not loaded'
     error via `_ensure_loaded` until the data is ready."""
     import threading
 
-    source = pytorch_source or _auto_detect_pytorch()
-
     def _bg_init():
         try:
-            if source:
-                _init_from_source(source)
-            elif index_path:
-                _load_from_json(index_path)
-            else:
+            source = init_via_adapter(
+                framework=framework,
+                cli_source=pytorch_source,
+                index_path=index_path,
+            )
+            if not source and not index_path:
                 log.warning(
-                    "No PyTorch source specified. "
+                    f"No {framework} source specified. "
                     "Tools will return errors until data is loaded."
                 )
         except Exception:
