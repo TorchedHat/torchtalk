@@ -163,8 +163,8 @@ class BindingDetector:
         parser = self.cuda_parser if is_cuda else self.cpp_parser
 
         try:
-            tree = parser.parse(bytes(content, "utf8"))
-            root_node = tree.root_node
+            tree = parser.parse(content)
+            root_node = tree.root_node()
         except Exception as e:
             log.warning(f"Parse error for {file_path}: {e}")
             return graph
@@ -195,14 +195,15 @@ class BindingDetector:
     def _find_pybind11_modules(self, node, content: str) -> list[tuple[str, Any]]:
         modules = []
 
-        if node.type == "function_definition":
+        if node.kind() == "function_definition":
             text = self._get_node_text(node, content)
             match = re.search(r"PYBIND11_MODULE\s*\(\s*(\w+)\s*,", text)
             if match:
                 module_name = match.group(1)
                 modules.append((module_name, node))
 
-        for child in node.children:
+        for i in range(node.child_count()):
+            child = node.child(i)
             modules.extend(self._find_pybind11_modules(child, content))
 
         return modules
@@ -216,8 +217,9 @@ class BindingDetector:
         graph: BindingGraph,
     ):
         body = None
-        for child in module_node.children:
-            if child.type == "compound_statement":
+        for i in range(module_node.child_count()):
+            child = module_node.child(i)
+            if child.kind() == "compound_statement":
                 body = child
                 break
 
@@ -225,7 +227,7 @@ class BindingDetector:
             return
 
         body_text = self._get_node_text(body, content)
-        body_start_line = body.start_point[0] + 1
+        body_start_line = body.start_position().row + 1
 
         self._extract_function_bindings(
             body_text, body_start_line, file_path, module_name, graph
@@ -600,7 +602,7 @@ class BindingDetector:
         return None
 
     def _get_node_text(self, node, content: str) -> str:
-        return content[node.start_byte : node.end_byte]
+        return content[node.start_byte() : node.end_byte()]
 
     def detect_bindings_in_directory(self, directory: str) -> BindingGraph:
         """Scan a directory for cross-language bindings."""
