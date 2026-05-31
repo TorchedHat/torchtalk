@@ -6,7 +6,15 @@ from typing import Literal
 
 from ..analysis.helpers import safe_sort_key, truncate
 from ..formatting import coverage_note, create_formatter, relative_path
-from ..indexer import _ensure_loaded, _fuzzy_find, _impls_from_extractor, _state
+from ..indexer import (
+    _ensure_capability,
+    _ensure_loaded,
+    _fuzzy_find,
+    _impls_from_extractor,
+    _source_base,
+    _state,
+)
+from . import vllm as vllm_tools
 
 
 def _with_note(text: str) -> str:
@@ -15,7 +23,7 @@ def _with_note(text: str) -> str:
 
 
 def _rel_path(path: str) -> str:
-    return relative_path(path, _state.pytorch_source)
+    return relative_path(path, _source_base())
 
 
 def _get_native_func(name: str) -> dict | None:
@@ -65,6 +73,8 @@ async def trace(
     function_name: str, focus: Literal["full", "yaml", "dispatch"] = "full"
 ) -> str:
     """Trace a PyTorch op from Python to C++ implementation with file:line locations."""
+    if _state.framework == "vllm":
+        return await vllm_tools.trace(function_name, focus=focus)
     _ensure_loaded()
 
     md = create_formatter()
@@ -212,6 +222,11 @@ async def trace(
 
 
 async def _do_cuda_kernels(query: str = "", limit: int = 15) -> str:
+    if _state.framework != "pytorch":
+        _ensure_capability(
+            "search_kernels",
+            f"Kernel search is not available for framework '{_state.framework}'.",
+        )
     _ensure_loaded()
 
     md = create_formatter()
@@ -246,7 +261,15 @@ async def _do_cuda_kernels(query: str = "", limit: int = 15) -> str:
     return _with_note(md.build())
 
 
-async def _do_search_bindings(query: str, backend: str = "", limit: int = 10) -> str:
+async def _do_search_bindings(
+    query: str,
+    mode: str = "bindings",
+    backend: str = "",
+    limit: int = 10,
+) -> str:
+    if _state.framework == "vllm":
+        return await vllm_tools.search(query, mode=mode, limit=limit)
+
     _ensure_loaded()
 
     query_lower = query.lower()

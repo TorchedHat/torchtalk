@@ -5,11 +5,11 @@ from __future__ import annotations
 from pathlib import Path
 
 from ..formatting import create_formatter, relative_path
-from ..indexer import _ensure_loaded, _state
+from ..indexer import _ensure_capability, _ensure_loaded, _source_base, _state
 
 
 def _rel_path(path: str) -> str:
-    return relative_path(path, _state.pytorch_source)
+    return relative_path(path, _source_base())
 
 
 def _word_match(query_lower: str, name_lower: str) -> bool:
@@ -29,6 +29,11 @@ def _word_match(query_lower: str, name_lower: str) -> bool:
 async def _do_find_similar_tests(
     query: str, limit: int = 10, focus: str = "all"
 ) -> str:
+    if _state.framework != "pytorch":
+        _ensure_capability(
+            "tests",
+            f"Test discovery is not available for framework '{_state.framework}'.",
+        )
     _ensure_loaded("test")
 
     # Without a query, the file branch's naked-substring match (`q in path`)
@@ -136,6 +141,12 @@ async def _do_find_similar_tests(
 
 
 async def _do_list_test_utils() -> str:
+    if _state.framework != "pytorch":
+        _ensure_capability(
+            "tests",
+            "Test utility browsing is not available for framework "
+            f"'{_state.framework}'.",
+        )
     _ensure_loaded("test")
 
     md = create_formatter()
@@ -193,8 +204,8 @@ async def _do_list_test_utils() -> str:
     for path, info in utility_info.items():
         if path in _state.test_utilities:
             exists = True
-        elif _state.pytorch_source:
-            exists = (Path(_state.pytorch_source) / path).exists()
+        elif _source_base():
+            exists = (Path(_source_base() or "") / path).exists()
         else:
             exists = False
         status = "[ok]" if exists else "[missing]"
@@ -237,6 +248,11 @@ async def _do_list_test_utils() -> str:
 
 
 async def _do_test_file_info(query: str) -> str:
+    if _state.framework != "pytorch":
+        _ensure_capability(
+            "tests",
+            f"Test file details are not available for framework '{_state.framework}'.",
+        )
     _ensure_loaded("test")
 
     needle = query.lower()

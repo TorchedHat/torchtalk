@@ -13,37 +13,73 @@ import argparse
 import json
 import logging
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
 log = logging.getLogger(__name__)
 
+_DEFAULT_LINT_PATHS = ["src/torchtalk", "tests"]
+
+
+def _framework_from_args(args) -> str:
+    return getattr(args, "framework", "pytorch")
+
+
+def _source_arg_from_args(args) -> str | None:
+    framework = _framework_from_args(args)
+    source = getattr(args, "source", None)
+    pytorch_source = getattr(args, "pytorch_source", None)
+    vllm_source = getattr(args, "vllm_source", None)
+    if source:
+        return source
+    if framework == "vllm":
+        return vllm_source or pytorch_source
+    return pytorch_source or vllm_source
+
+
+def _config_key_for_framework(framework: str) -> str:
+    return "vllm_source" if framework == "vllm" else "pytorch_source"
+
 
 def cmd_init(args):
-    """Configure TorchTalk with PyTorch source path."""
-    from torchtalk.config import load_config, save_config, validate_pytorch_path
+    """Configure TorchTalk with a framework source path."""
+    from torchtalk.adapters import get_adapter
+    from torchtalk.config import load_config, save_config, validate_framework_path
 
-    source_path = str(Path(args.pytorch_source).resolve())
+    framework = _framework_from_args(args)
+    raw_source = _source_arg_from_args(args)
+    if not raw_source:
+        log.error("Provide --source or a framework-specific source flag.")
+        return 1
 
-    valid, msg = validate_pytorch_path(source_path)
+    source_path = str(Path(raw_source).resolve())
+
+    valid, msg = validate_framework_path(framework, source_path)
     if not valid:
         log.error(msg)
-        sys.exit(1)
+        return 1
 
     config = load_config()
-    config.setdefault("source", {})["pytorch_source"] = source_path
+    config.setdefault("source", {})[_config_key_for_framework(framework)] = source_path
     path = save_config(config)
+    display_name = get_adapter(framework).display_name
 
     log.info(
         "Config saved to %s\n"
-        "  pytorch_source = %s\n\n"
+        "  framework = %s\n"
+        "  %s = %s\n\n"
         "Next steps:\n"
-        "  claude mcp add torchtalk -s user -- torchtalk mcp-serve\n\n"
+        "  claude mcp add torchtalk -s user -- torchtalk mcp-serve --framework %s\n\n"
         "Verify with:\n"
         "  torchtalk status",
         path,
+        display_name,
+        _config_key_for_framework(framework),
         source_path,
+        framework,
     )
+    return 0
 
 
 def _read_cache_stats(cache_path: Path) -> dict | None:
@@ -75,14 +111,21 @@ def cmd_status(args):
     from datetime import datetime
 
     from torchtalk import __version__
+    from torchtalk.adapters import get_adapter
     from torchtalk.config import (
         CACHE_DIR,
         CONFIG_FILE,
         cache_paths,
+        framework_cache_path,
         load_config,
-        resolve_pytorch_source,
-        validate_pytorch_path,
+        resolve_framework_source,
+        validate_framework_path,
     )
+
+    framework = _framework_from_args(args)
+    adapter = get_adapter(framework)
+    config_key = _config_key_for_framework(framework)
+    display_name = adapter.display_name
 
     lines = [f"TorchTalk v{__version__}", ""]
 
@@ -98,34 +141,37 @@ def cmd_status(args):
         sys.exit(1)
 
     lines.append(f"  Config file:     {CONFIG_FILE}")
+    lines.append(f"  Framework:       {display_name}")
 
-    # PyTorch source — show raw config value for diagnostics, even if stale
+    # Framework source — show raw config value for diagnostics, even if stale
     config = load_config()
-    config_source = config.get("source", {}).get("pytorch_source")
+    config_source = config.get("source", {}).get(config_key)
 
     if not config_source:
-        lines.append("  PyTorch source:  not configured")
+        lines.append(f"  {display_name} source:  not configured")
         lines.append("")
         lines.append(
-            "Run 'torchtalk init --pytorch-source /path/to/pytorch' to configure."
+            f"Run 'torchtalk init --framework {framework} --source /path/to/source' "
+            "to configure."
         )
         print("\n".join(lines))
         sys.exit(1)
 
-    valid, msg = validate_pytorch_path(config_source)
+    valid, msg = validate_framework_path(framework, config_source)
     lines.append(
-        f"  PyTorch source:  {config_source} ({'valid' if valid else 'INVALID'})"
+        f"  {display_name} source:  {config_source} ({'valid' if valid else 'INVALID'})"
     )
     if not valid:
         lines.append(f"                   {msg}")
         lines.append("")
         lines.append(
-            "Run 'torchtalk init --pytorch-source /path/to/pytorch' to reconfigure."
+            f"Run 'torchtalk init --framework {framework} --source /path/to/source' "
+            "to reconfigure."
         )
         print("\n".join(lines))
         sys.exit(1)
 
-    source = resolve_pytorch_source()
+    source = resolve_framework_source(framework)
 
     # Cache
     lines.append("")
@@ -133,31 +179,48 @@ def cmd_status(args):
     lines.append(f"  Cache directory:  {CACHE_DIR}")
 
     if CACHE_DIR.exists():
-        paths = cache_paths(source)
-        for key, label in [("bindings", "Bindings index"), ("callgraph", "Call graph")]:
-            p = paths[key]
+        if framework == "pytorch":
+            paths = cache_paths(source)
+            for key, label in [
+                ("bindings", "Bindings index"),
+                ("callgraph", "Call graph"),
+            ]:
+                p = paths[key]
+                if p.exists():
+                    size_mb = p.stat().st_size / (1024 * 1024)
+                    mtime = datetime.fromtimestamp(p.stat().st_mtime)
+                    lines.append(
+                        f"  {label + ':':18s} {p.name} "
+                        f"({size_mb:.1f} MB, {mtime:%Y-%m-%d %H:%M})"
+                    )
+                    if key == "callgraph":
+                        stats = _read_cache_stats(p) or {}
+                        cov = stats.get("coverage")
+                        if cov:
+                            lines.append(
+                                f"  {'TU coverage:':18s} " + _format_coverage(cov)
+                            )
+                        idirs = stats.get("include_dirs_count")
+                        if isinstance(idirs, int) and idirs > 0:
+                            lines.append(f"  {'-I dirs tracked:':18s} {idirs}")
+                else:
+                    lines.append(f"  {label + ':':18s} not built")
+        else:
+            p = framework_cache_path(source, framework)
             if p.exists():
                 size_mb = p.stat().st_size / (1024 * 1024)
                 mtime = datetime.fromtimestamp(p.stat().st_mtime)
                 lines.append(
-                    f"  {label + ':':18s} {p.name} "
+                    f"  {'Framework index:':18s} {p.name} "
                     f"({size_mb:.1f} MB, {mtime:%Y-%m-%d %H:%M})"
                 )
-                if key == "callgraph":
-                    stats = _read_cache_stats(p) or {}
-                    cov = stats.get("coverage")
-                    if cov:
-                        lines.append(f"  {'TU coverage:':18s} " + _format_coverage(cov))
-                    idirs = stats.get("include_dirs_count")
-                    if isinstance(idirs, int) and idirs > 0:
-                        lines.append(f"  {'-I dirs tracked:':18s} {idirs}")
             else:
-                lines.append(f"  {label + ':':18s} not built")
+                lines.append(f"  {'Framework index:':18s} not built")
     else:
         lines.append("  Cache directory:  not created yet")
 
     # compile_commands.json
-    if source:
+    if source and framework == "pytorch":
         compile_cmds = Path(source) / "build" / "compile_commands.json"
         lines.append("")
         lines.append("Build artifacts:")
@@ -170,35 +233,80 @@ def cmd_status(args):
             lines.append(
                 f"    Build PyTorch to enable: cd {source} && python setup.py develop"
             )
+    elif source and framework == "vllm":
+        lines.append("")
+        lines.append("Build artifacts:")
+        lines.append(
+            "  vLLM source build is framework-specific; verify with "
+            "uv/pip install and runtime smokes."
+        )
 
     lines.append("")
     lines.append("Status: Ready")
     print("\n".join(lines))
 
 
+def cmd_lint(args):
+    """Run Ruff lint checks for the TorchTalk repo."""
+
+    ruff = shutil.which("ruff")
+    if not ruff:
+        log.error(
+            "ruff is not installed. Install with 'pip install -e \".[dev]\"' or "
+            "'pip install ruff'."
+        )
+        return 1
+
+    paths = args.paths or _DEFAULT_LINT_PATHS
+    commands = []
+
+    check_cmd = [ruff, "check"]
+    if args.fix:
+        check_cmd.append("--fix")
+    check_cmd.extend(paths)
+    commands.append(check_cmd)
+
+    if args.format:
+        format_cmd = [ruff, "format"]
+        if not args.fix:
+            format_cmd.append("--check")
+        format_cmd.extend(paths)
+        commands.append(format_cmd)
+
+    for command in commands:
+        result = subprocess.run(command)
+        if result.returncode != 0:
+            return result.returncode
+    return 0
+
+
 def cmd_mcp_serve(args):
     """Start MCP server for Claude Code integration."""
     from torchtalk.server import run_server
 
+    framework = _framework_from_args(args)
     run_server(
+        source=_source_arg_from_args(args),
         pytorch_source=args.pytorch_source,
         index_path=args.index,
         transport=args.transport,
+        framework=framework,
     )
     return 0
 
 
 def cmd_index_build(args):
-    """Build or refresh the index for a PyTorch source and exit."""
-    from torchtalk.config import resolve_pytorch_source
+    """Build or refresh the index for a framework source and exit."""
+    from torchtalk.config import resolve_framework_source
     from torchtalk.indexer import build_index
 
-    source = args.pytorch_source or resolve_pytorch_source()
+    framework = _framework_from_args(args)
+    source = _source_arg_from_args(args) or resolve_framework_source(framework)
     if not source:
-        log.error("No PyTorch source configured. Run 'torchtalk init' first.")
+        log.error("No source configured. Run 'torchtalk init' first.")
         return 1
 
-    stats = build_index(source, wait_for_cpp=not args.no_wait)
+    stats = build_index(source, wait_for_cpp=not args.no_wait, framework=framework)
 
     print(f"Index built for {source}")
     print(f"  Bindings:         {stats['bindings']:,}")
@@ -219,6 +327,10 @@ def cmd_index_update(args):
     from torchtalk.config import resolve_pytorch_source
     from torchtalk.indexer import update_index
     from torchtalk.snapshots import SnapshotError
+
+    if _framework_from_args(args) != "pytorch":
+        log.error("Incremental index update is currently only supported for PyTorch.")
+        return 1
 
     source = args.pytorch_source or resolve_pytorch_source()
     if not source:
@@ -557,10 +669,23 @@ Example:
         """,
     )
     parser_init.add_argument(
+        "--framework",
+        choices=["pytorch", "vllm"],
+        default="pytorch",
+        help="Framework to configure (default: pytorch)",
+    )
+    parser_init.add_argument(
+        "--source",
+        help="Path to framework source code",
+    )
+    parser_init.add_argument(
         "--pytorch-source",
         "-p",
-        required=True,
         help="Path to PyTorch source code",
+    )
+    parser_init.add_argument(
+        "--vllm-source",
+        help="Path to vLLM source code",
     )
     parser_init.add_argument(
         "--debug", action="store_true", help="Enable debug logging"
@@ -568,10 +693,39 @@ Example:
     parser_init.set_defaults(func=cmd_init)
 
     # status command
-    subparsers.add_parser(
+    parser_status = subparsers.add_parser(
         "status",
         help="Show configuration and cache status",
-    ).set_defaults(func=cmd_status)
+    )
+    parser_status.add_argument(
+        "--framework",
+        choices=["pytorch", "vllm"],
+        default="pytorch",
+        help="Framework to inspect (default: pytorch)",
+    )
+    parser_status.set_defaults(func=cmd_status)
+
+    # lint command
+    parser_lint = subparsers.add_parser(
+        "lint",
+        help="Run Ruff lint checks for TorchTalk",
+    )
+    parser_lint.add_argument(
+        "paths",
+        nargs="*",
+        help="Paths to lint (default: src/torchtalk tests)",
+    )
+    parser_lint.add_argument(
+        "--fix",
+        action="store_true",
+        help="Apply Ruff auto-fixes where possible",
+    )
+    parser_lint.add_argument(
+        "--format",
+        action="store_true",
+        help="Also run Ruff format (check-only unless --fix is set)",
+    )
+    parser_lint.set_defaults(func=cmd_lint)
 
     # index command: headless build-and-exit
     parser_index = subparsers.add_parser(
@@ -581,9 +735,23 @@ Example:
     index_sub = parser_index.add_subparsers(dest="index_cmd", required=True)
     p_build = index_sub.add_parser("build", help="Build or refresh the index and exit")
     p_build.add_argument(
+        "--framework",
+        choices=["pytorch", "vllm"],
+        default="pytorch",
+        help="Framework to build (default: pytorch)",
+    )
+    p_build.add_argument(
+        "--source",
+        help="Override framework source (default: from config)",
+    )
+    p_build.add_argument(
         "--pytorch-source",
         "-p",
         help="Override PyTorch source (default: from config)",
+    )
+    p_build.add_argument(
+        "--vllm-source",
+        help="Override vLLM source (default: from config)",
     )
     p_build.add_argument(
         "--no-wait",
@@ -596,6 +764,12 @@ Example:
         "update",
         help="Incrementally refresh bindings and call graph "
         "using a snapshot as baseline",
+    )
+    p_update.add_argument(
+        "--framework",
+        choices=["pytorch", "vllm"],
+        default="pytorch",
+        help="Framework to update (only pytorch is currently supported)",
     )
     p_update.add_argument(
         "--since", required=True, help="Baseline snapshot name (e.g. 'nightly')"
@@ -628,9 +802,23 @@ First run builds the index (a few minutes); subsequent runs use cache.
         """,
     )
     parser_mcp.add_argument(
+        "--framework",
+        default="pytorch",
+        choices=["pytorch", "vllm"],
+        help="Framework to serve (default: pytorch)",
+    )
+    parser_mcp.add_argument(
+        "--source",
+        help="Override framework source path (default: from config)",
+    )
+    parser_mcp.add_argument(
         "--pytorch-source",
         "-p",
         help="Override PyTorch source path (default: from config)",
+    )
+    parser_mcp.add_argument(
+        "--vllm-source",
+        help="Override vLLM source path (default: from config)",
     )
     parser_mcp.add_argument(
         "--index", "-i", help="Path to existing bindings.json or index directory"

@@ -4,14 +4,20 @@ from __future__ import annotations
 
 from ..analysis.helpers import fuzzy_match
 from ..formatting import create_formatter, relative_path
-from ..indexer import _ensure_loaded, _state
+from ..indexer import _ensure_capability, _ensure_loaded, _source_base, _state
 
 
 def _rel_path(path: str) -> str:
-    return relative_path(path, _state.pytorch_source)
+    return relative_path(path, _source_base())
 
 
 async def _do_trace_module(module_name: str, focus: str = "methods") -> str:
+    if _state.framework != "pytorch":
+        _ensure_capability(
+            "python_modules",
+            "Python module tracing is not available for framework "
+            f"'{_state.framework}'.",
+        )
     _ensure_loaded()
 
     if not _state.py_classes:
@@ -77,6 +83,12 @@ async def _do_trace_module(module_name: str, focus: str = "methods") -> str:
 
 
 async def _do_list_modules(category: str = "nn") -> str:
+    if _state.framework != "pytorch":
+        _ensure_capability(
+            "python_modules",
+            "Python module listing is not available for framework "
+            f"'{_state.framework}'.",
+        )
     _ensure_loaded()
 
     if not _state.py_classes:

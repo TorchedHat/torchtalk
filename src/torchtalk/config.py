@@ -14,6 +14,8 @@ import os
 import sys
 from pathlib import Path
 
+from .adapters.base import DEFAULT_FRAMEWORK, FrameworkId
+
 if sys.version_info >= (3, 11):
     import tomllib
 else:
@@ -34,6 +36,15 @@ log = logging.getLogger(__name__)
 CONFIG_DIR = user_config_path("torchtalk")
 CONFIG_FILE = CONFIG_DIR / "config.toml"
 CACHE_DIR = user_cache_path("torchtalk")
+
+_FRAMEWORK_CONFIG_KEYS = {
+    "pytorch": "pytorch_source",
+    "vllm": "vllm_source",
+}
+_FRAMEWORK_ENV_VARS = {
+    "pytorch": ("PYTORCH_SOURCE", "PYTORCH_PATH"),
+    "vllm": ("VLLM_SOURCE",),
+}
 
 
 def load_config() -> dict:
@@ -73,6 +84,52 @@ def save_config(config: dict) -> Path:
     return CONFIG_FILE
 
 
+def _normalize_framework(framework: FrameworkId | None) -> FrameworkId:
+    return (framework or DEFAULT_FRAMEWORK).lower()
+
+
+def _resolve_source_from_config(
+    cli_flag: str | None,
+    *,
+    env_vars: tuple[str, ...],
+    config_key: str,
+) -> str | None:
+    """Resolve a source path with CLI, env, then config precedence."""
+
+    if cli_flag:
+        return cli_flag
+
+    for env_var in env_vars:
+        env_val = os.environ.get(env_var)
+        if env_val and Path(env_val).exists():
+            return env_val
+
+    config = load_config()
+    config_val = config.get("source", {}).get(config_key)
+    if config_val and Path(config_val).exists():
+        return config_val
+
+    return None
+
+
+def resolve_framework_source(
+    framework: FrameworkId = DEFAULT_FRAMEWORK,
+    cli_flag: str | None = None,
+) -> str | None:
+    """Resolve a source path for the requested framework."""
+
+    normalized = _normalize_framework(framework)
+    config_key = _FRAMEWORK_CONFIG_KEYS.get(normalized)
+    env_vars = _FRAMEWORK_ENV_VARS.get(normalized)
+    if config_key is None or env_vars is None:
+        raise ValueError(f"Unsupported framework: {framework}")
+    return _resolve_source_from_config(
+        cli_flag,
+        env_vars=env_vars,
+        config_key=config_key,
+    )
+
+
 def resolve_pytorch_source(cli_flag: str | None = None) -> str | None:
     """Resolve PyTorch source path using 3-level priority.
 
@@ -80,22 +137,8 @@ def resolve_pytorch_source(cli_flag: str | None = None) -> str | None:
     2. PYTORCH_SOURCE env var
     3. config.toml [source] pytorch_source
     """
-    # Level 1: CLI flag
-    if cli_flag:
-        return cli_flag
 
-    # Level 2: Environment variable
-    env_val = os.environ.get("PYTORCH_SOURCE") or os.environ.get("PYTORCH_PATH")
-    if env_val and Path(env_val).exists():
-        return env_val
-
-    # Level 3: Config file
-    config = load_config()
-    config_val = config.get("source", {}).get("pytorch_source")
-    if config_val and Path(config_val).exists():
-        return config_val
-
-    return None
+    return resolve_framework_source("pytorch", cli_flag)
 
 
 def source_hash(source: str | Path) -> str:
@@ -125,11 +168,25 @@ def cache_paths(source: str | Path) -> dict[str, Path]:
     }
 
 
-def validate_pytorch_path(path: str | Path) -> tuple[bool, str]:
-    """Validate that a path looks like a PyTorch source checkout.
+def framework_cache_path(
+    source: str | Path,
+    framework: FrameworkId,
+    artifact: str = "index",
+) -> Path:
+    """Return a framework-specific cache artifact path.
 
-    Returns (is_valid, message).
+    PyTorch keeps its legacy cache layout via `cache_paths`; this helper is for
+    non-PyTorch adapters and new generic artifacts.
     """
+
+    h = source_hash(source)
+    normalized = _normalize_framework(framework)
+    return CACHE_DIR / f"{normalized}_{artifact}_{h}.json"
+
+
+def _validate_pytorch_path(path: str | Path) -> tuple[bool, str]:
+    """Validate that a path looks like a PyTorch source checkout."""
+
     p = Path(path)
     if not p.exists():
         return False, f"Path does not exist: {p}"
@@ -144,3 +201,56 @@ def validate_pytorch_path(path: str | Path) -> tuple[bool, str]:
             f"native_functions.yaml not found in {p} (required for operator indexing)",
         )
     return True, f"Valid PyTorch source: {p}"
+
+
+def _validate_vllm_path(path: str | Path) -> tuple[bool, str]:
+    """Validate that a path looks like a vLLM source checkout."""
+
+    p = Path(path)
+    if not p.exists():
+        return False, f"Path does not exist: {p}"
+    if not p.is_dir():
+        return False, f"Path is not a directory: {p}"
+    if not (p / "vllm").exists():
+        return False, f"No 'vllm/' package found in {p} (not a vLLM checkout?)"
+
+    required_paths = [
+        p / "pyproject.toml",
+        p / "vllm" / "entrypoints" / "llm.py",
+        p / "vllm" / "v1" / "engine" / "llm_engine.py",
+        p / "vllm" / "model_executor" / "models" / "registry.py",
+    ]
+    missing = [
+        path.relative_to(p).as_posix()
+        for path in required_paths
+        if not path.exists()
+    ]
+    if missing:
+        return (
+            False,
+            f"Missing required vLLM markers in {p}: {', '.join(missing)}",
+        )
+    return True, f"Valid vLLM source: {p}"
+
+
+def validate_framework_path(
+    framework: FrameworkId = DEFAULT_FRAMEWORK,
+    path: str | Path = "",
+) -> tuple[bool, str]:
+    """Validate that a path looks usable for the requested framework."""
+
+    normalized = _normalize_framework(framework)
+    if normalized == "pytorch":
+        return _validate_pytorch_path(path)
+    if normalized == "vllm":
+        return _validate_vllm_path(path)
+    raise ValueError(f"Unsupported framework: {framework}")
+
+
+def validate_pytorch_path(path: str | Path) -> tuple[bool, str]:
+    """Validate that a path looks like a PyTorch source checkout.
+
+    Returns (is_valid, message).
+    """
+
+    return validate_framework_path("pytorch", path)

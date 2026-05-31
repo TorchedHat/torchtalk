@@ -6,7 +6,8 @@ import os
 
 from ..analysis.helpers import dedupe_by_key
 from ..formatting import coverage_note, create_formatter, relative_path
-from ..indexer import _cpp_status, _ensure_loaded, _state
+from ..indexer import _cpp_status, _ensure_loaded, _source_base, _state
+from . import vllm as vllm_tools
 
 # Hard ceiling on impact-walk depth. Power users can raise the soft default
 # via the TORCHTALK_GRAPH_MAX_DEPTH env var, but never above this cap —
@@ -64,7 +65,7 @@ def _python_callers_for(cpp_func: str) -> list[dict]:
 
 
 def _rel_path(path: str) -> str:
-    return relative_path(path, _state.pytorch_source)
+    return relative_path(path, _source_base())
 
 
 def _with_note(text: str) -> str:
@@ -82,6 +83,8 @@ def _format_call_item(md, item: dict, name_key: str, file_key: str, line_key: st
 
 
 async def _do_calls(function_name: str) -> str:
+    if _state.framework == "vllm":
+        return await vllm_tools.graph(function_name, mode="calls")
     _ensure_loaded()
     if status := _cpp_status():
         return status
@@ -106,6 +109,8 @@ async def _do_calls(function_name: str) -> str:
 
 
 async def _do_called_by(function_name: str) -> str:
+    if _state.framework == "vllm":
+        return await vllm_tools.graph(function_name, mode="callers")
     _ensure_loaded()
     if status := _cpp_status():
         return status
@@ -136,6 +141,8 @@ async def _do_impact(
     fuzzy_all_levels: bool = False,
     walk_python: bool = False,
 ) -> str:
+    if _state.framework == "vllm":
+        return await vllm_tools.graph(function_name, mode="impact", depth=depth)
     _ensure_loaded()
     if status := _cpp_status():
         return status

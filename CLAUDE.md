@@ -12,13 +12,15 @@ pip install -e ".[dev]"
 # Test
 pytest
 PYTORCH_SOURCE=/path/to/pytorch pytest tests/test_binding_detector_pytorch.py
+VLLM_SOURCE=/path/to/vllm pytest tests/test_vllm_adapter.py
 
 # Lint
-ruff check src/torchtalk/
-ruff format src/torchtalk/
+torchtalk lint
+torchtalk lint --fix --format
 
 # Run MCP server
 python -m torchtalk mcp-serve --pytorch-source /path/to/pytorch
+python -m torchtalk mcp-serve --framework vllm --source /path/to/vllm
 ```
 
 ## Project Structure
@@ -27,10 +29,12 @@ python -m torchtalk mcp-serve --pytorch-source /path/to/pytorch
 src/torchtalk/
 ├── server.py              # MCP server (7 tools: status + 6 query)
 ├── cli.py                 # CLI (torchtalk mcp-serve)
+├── adapters/              # Framework adapters (PyTorch, vLLM)
 ├── formatting.py          # Response formatting (CompactText/Markdown)
 └── analysis/
     ├── binding_detector.py    # pybind11/TORCH_LIBRARY detection (tree-sitter)
     ├── cpp_call_graph.py      # C++ call graph extraction (libclang)
+    ├── vllm_index.py          # Static-first vLLM indexing and proof traces
     ├── python_analyzer.py     # Python module/class analysis (AST)
     ├── patterns.py            # Search directories, exclusion patterns
     └── helpers.py             # Utility functions
@@ -38,13 +42,15 @@ src/torchtalk/
 
 ## Architecture
 
-MCP server providing cross-language binding analysis for PyTorch.
+MCP server providing framework-aware structural analysis for PyTorch and vLLM.
 
-**Server** (`server.py`): FastMCP-based, auto-builds and caches index from PyTorch source. Background thread for C++ call graph.
+**Server** (`server.py`): FastMCP-based, selects the active adapter, then auto-builds and caches the framework index. PyTorch optionally builds a C++ call graph in the background.
 
-**Analysis** (`analysis/`): BindingDetector (tree-sitter), CppCallGraphExtractor (libclang, 60K+ functions), PythonAnalyzer (AST).
+**Analysis** (`analysis/`): BindingDetector (tree-sitter), CppCallGraphExtractor (libclang, 60K+ functions), PythonAnalyzer (AST), and vLLM static index extraction.
 
-**Data Sources**: native_functions.yaml, derivatives.yaml, compile_commands.json, tree-sitter AST.
+**Data Sources**:
+- PyTorch: `native_functions.yaml`, `derivatives.yaml`, `compile_commands.json`, tree-sitter AST
+- vLLM: API entrypoints, engine anchors, registries, IR/custom-op decorators, and `csrc/*torch_bindings.cpp`
 
 **Cache**: `~/.cache/torchtalk/` — bindings (~10MB), call graph (~50MB).
 
@@ -54,10 +60,10 @@ MCP server providing cross-language binding analysis for PyTorch.
 
 | Tool | Description |
 |------|-------------|
-| `get_status()` | TorchTalk readiness summary across bindings, call graph, modules, tests |
-| `trace(func, focus?)` | Trace any PyTorch op: Python → YAML → C++ → file:line |
-| `search(query, mode?, backend?)` | mode="bindings": dispatch registrations. mode="kernels": CUDA kernel launches |
-| `graph(func, mode?, depth?, fuzzy_all_levels?, walk_python?, focus?)` | mode="callers": inbound. mode="calls": outbound. mode="impact": transitive callers (depth/fuzzy_all_levels/walk_python/focus apply to impact only) |
+| `get_status()` | TorchTalk readiness summary across framework, capabilities, entities, and optional PyTorch call graph/test layers |
+| `trace(func, focus?)` | Trace a PyTorch op or a vLLM API/op flow depending on the active framework |
+| `search(query, mode?, backend?)` | PyTorch: bindings/kernels. vLLM: bindings/apis/models/backends/ops |
+| `graph(func, mode?, depth?, fuzzy_all_levels?, walk_python?, focus?)` | PyTorch: C++ call graph. vLLM: condition-aware flow graph |
 | `modules(name, mode?, focus?)` | mode="trace": class details (focus="full" adds bases/docstring). mode="list": browse by category ("nn", "optim", "all") |
 | `tests(query?, mode?, limit?, focus?)` | mode="find": search tests (focus narrows to functions/classes/files). mode="utils": list utilities (query/focus ignored). mode="file_info": test file details |
 | `affected(funcs, depth?)` | Map changed C++ functions (comma-separated) to impacted Python test files |

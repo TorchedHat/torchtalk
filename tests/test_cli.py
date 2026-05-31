@@ -3,11 +3,18 @@
 from __future__ import annotations
 
 import json
+from argparse import Namespace
+from types import SimpleNamespace
 
 from torchtalk.cli import (
     _format_coverage,
+    _framework_from_args,
     _read_cache_stats,
     _read_coverage_from_cache,
+    _source_arg_from_args,
+    cmd_index_build,
+    cmd_init,
+    cmd_lint,
 )
 
 
@@ -143,3 +150,135 @@ class TestReadCacheStats:
         path = tmp_path / "cg.json"
         path.write_text("not json")
         assert _read_cache_stats(path) is None
+
+
+class TestLintCommand:
+    def test_returns_one_when_ruff_missing(self, monkeypatch):
+        import torchtalk.cli as cli_mod
+
+        monkeypatch.setattr(cli_mod.shutil, "which", lambda _cmd: None)
+        args = Namespace(paths=[], fix=False, format=False)
+        assert cmd_lint(args) == 1
+
+    def test_uses_default_paths(self, monkeypatch):
+        import torchtalk.cli as cli_mod
+
+        seen: list[list[str]] = []
+        monkeypatch.setattr(cli_mod.shutil, "which", lambda _cmd: "/usr/bin/ruff")
+
+        def fake_run(command):
+            seen.append(command)
+            return SimpleNamespace(returncode=0)
+
+        monkeypatch.setattr(cli_mod.subprocess, "run", fake_run)
+        args = Namespace(paths=[], fix=False, format=False)
+
+        assert cmd_lint(args) == 0
+        assert seen == [["/usr/bin/ruff", "check", "src/torchtalk", "tests"]]
+
+    def test_fix_and_format_issue_expected_commands(self, monkeypatch):
+        import torchtalk.cli as cli_mod
+
+        seen: list[list[str]] = []
+        monkeypatch.setattr(cli_mod.shutil, "which", lambda _cmd: "/usr/bin/ruff")
+
+        def fake_run(command):
+            seen.append(command)
+            return SimpleNamespace(returncode=0)
+
+        monkeypatch.setattr(cli_mod.subprocess, "run", fake_run)
+        args = Namespace(paths=["src/torchtalk"], fix=True, format=True)
+
+        assert cmd_lint(args) == 0
+        assert seen == [
+            ["/usr/bin/ruff", "check", "--fix", "src/torchtalk"],
+            ["/usr/bin/ruff", "format", "src/torchtalk"],
+        ]
+
+
+class TestFrameworkCliHelpers:
+    def test_framework_from_args_defaults_to_pytorch(self):
+        args = Namespace()
+        assert _framework_from_args(args) == "pytorch"
+
+    def test_source_arg_prefers_generic_source(self):
+        args = Namespace(
+            framework="vllm",
+            source="/tmp/generic",
+            pytorch_source="/tmp/pytorch",
+            vllm_source="/tmp/vllm",
+        )
+        assert _source_arg_from_args(args) == "/tmp/generic"
+
+    def test_source_arg_prefers_vllm_source_for_vllm(self):
+        args = Namespace(
+            framework="vllm",
+            source=None,
+            pytorch_source="/tmp/pytorch",
+            vllm_source="/tmp/vllm",
+        )
+        assert _source_arg_from_args(args) == "/tmp/vllm"
+
+
+class TestVllmCliPaths:
+    def test_cmd_init_vllm_writes_vllm_source(self, monkeypatch):
+
+        saved = {}
+
+        monkeypatch.setattr(
+            "torchtalk.config.validate_framework_path",
+            lambda framework, path: (True, f"Valid {framework}: {path}"),
+        )
+        monkeypatch.setattr("torchtalk.config.load_config", lambda: {})
+
+        def fake_save_config(config):
+            saved.update(config)
+            return "/tmp/config.toml"
+
+        monkeypatch.setattr("torchtalk.config.save_config", fake_save_config)
+
+        args = Namespace(
+            framework="vllm",
+            source="/tmp/vllm-src",
+            pytorch_source=None,
+            vllm_source=None,
+        )
+
+        assert cmd_init(args) == 0
+        assert saved["source"]["vllm_source"].endswith("/tmp/vllm-src")
+
+    def test_cmd_index_build_vllm_uses_framework_build(self, monkeypatch, capsys):
+        monkeypatch.setattr(
+            "torchtalk.config.resolve_framework_source",
+            lambda framework: f"/tmp/{framework}",
+        )
+
+        def fake_build_index(source, wait_for_cpp=True, framework="pytorch"):
+            assert source == "/tmp/vllm"
+            assert wait_for_cpp is True
+            assert framework == "vllm"
+            return {
+                "bindings": 11,
+                "cuda_kernels": 0,
+                "native_functions": 2,
+                "call_graph_functions": 0,
+                "call_graph_building": False,
+                "python_modules": 7,
+                "nn_modules": 3,
+                "test_files": 0,
+                "test_functions": 0,
+            }
+
+        monkeypatch.setattr("torchtalk.indexer.build_index", fake_build_index)
+
+        args = Namespace(
+            framework="vllm",
+            source=None,
+            pytorch_source=None,
+            vllm_source=None,
+            no_wait=False,
+        )
+
+        assert cmd_index_build(args) == 0
+        output = capsys.readouterr().out
+        assert "Index built for /tmp/vllm" in output
