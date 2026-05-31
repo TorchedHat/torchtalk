@@ -4,10 +4,16 @@ from __future__ import annotations
 
 from ..analysis.affected import affected_tests
 from ..formatting import create_formatter
-from ..indexer import _cpp_status, _ensure_loaded, _state
+from ..indexer import _cpp_status, _ensure_capability, _ensure_loaded, _state
 
 
 async def _do_affected(funcs: str, depth: int = 3) -> str:
+    if _state.framework != "pytorch":
+        _ensure_capability(
+            "affected",
+            "Affected-test analysis is not available for framework "
+            f"'{_state.framework}'.",
+        )
     _ensure_loaded()
     if status := _cpp_status():
         return status

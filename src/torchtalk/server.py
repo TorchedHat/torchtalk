@@ -8,24 +8,19 @@ from typing import Literal
 
 from mcp.server.fastmcp import FastMCP
 
+from .adapters import DEFAULT_FRAMEWORK, get_adapter
 from .formatting import create_formatter
-from .indexer import (
-    _auto_detect_pytorch,
-    _init_from_source,
-    _load_from_json,
-    _state,
-)
+from .indexer import _state, init_via_adapter
 from .tools.affected import _do_affected
 from .tools.graph import _do_called_by, _do_calls, _do_impact
 from .tools.modules import _do_list_modules, _do_trace_module
-from .tools.ops import (
-    _do_cuda_kernels,
-    _do_search_bindings,
+from .tools.ops import _do_cuda_kernels, _do_search_bindings
+from .tools.ops import trace as _do_trace
+from .tools.tests import (
+    _do_find_similar_tests,
+    _do_list_test_utils,
+    _do_test_file_info,
 )
-from .tools.ops import (
-    trace as _do_trace,
-)
-from .tools.tests import _do_find_similar_tests, _do_list_test_utils, _do_test_file_info
 
 log = logging.getLogger(__name__)
 mcp = FastMCP("torchtalk")
@@ -36,6 +31,33 @@ async def get_status() -> str:
     """Get TorchTalk status and available tools."""
     md = create_formatter()
     md.h2("TorchTalk Status")
+
+    try:
+        framework_name = get_adapter(_state.framework).display_name
+    except KeyError:
+        framework_name = _state.framework
+    md.bold("Framework", framework_name)
+    if _state.source_root:
+        md.code("Source Root", _state.source_root)
+    else:
+        md.bold("Source Root", "Not configured")
+    md.blank()
+
+    if _state.capabilities:
+        md.bold("Capabilities", ", ".join(sorted(_state.capabilities)))
+        md.blank()
+
+    if _state.entity_counts:
+        md.h3("Entity Counts")
+        for name, count in sorted(_state.entity_counts.items()):
+            md.item(f"{name}: {count:,}", 1)
+        md.blank()
+
+    if _state.dynamic_notes:
+        md.h3("Dynamic Areas")
+        for note in _state.dynamic_notes:
+            md.item(note, 1)
+        md.blank()
 
     if _state.pytorch_source:
         md.code("PyTorch Source", _state.pytorch_source)
@@ -143,14 +165,35 @@ async def get_status() -> str:
             md.item(f"{name}: {len(m):,} entries", 1)
         md.blank()
 
-    ready = "Ready" if _state.bindings else "Not ready"
+    ready = "Ready" if (_state.bindings or _state.entities) else "Not ready"
     cpp_ready = (
         "Ready"
         if _state.cpp_extractor
         else ("Building..." if _state.cpp_building else "Not ready")
     )
-    py_ready = "Ready" if _state.py_modules else "Not ready"
-    test_ready = "Ready" if _state.test_files else "Not ready"
+    py_ready = "Ready" if _state.py_modules else "Not supported"
+    test_ready = "Ready" if _state.test_files else "Not supported"
+    affected_ready = cpp_ready
+    trace_desc = "Trace a PyTorch op: Python → C++ → file:line"
+    search_desc = "Search bindings (mode=bindings) or CUDA kernels (mode=kernels)"
+    graph_desc = "C++ call graph: callers, calls, or impact analysis"
+    modules_desc = "Python modules: trace a class or list by category"
+    tests_desc = "Find tests, list utils, or get test file details"
+    affected_desc = "Map changed C++ functions to impacted Python tests"
+    if _state.framework == "vllm":
+        cpp_ready = "Ready" if "graph_flow" in _state.capabilities else "Not ready"
+        py_ready = "Not supported"
+        test_ready = "Not supported"
+        affected_ready = "Not supported"
+        trace_desc = "Trace vLLM API flows, IR ops, providers, and native bindings"
+        search_desc = (
+            "Search vLLM APIs, models, backends, ops, and torch custom-op "
+            "bindings"
+        )
+        graph_desc = "Condition-aware vLLM flow graph with dynamic branch conditions"
+        modules_desc = "Not supported for vLLM"
+        tests_desc = "Not supported for vLLM"
+        affected_desc = "Not supported for vLLM"
 
     md.h3("Available Tools")
     md.table(
@@ -159,32 +202,32 @@ async def get_status() -> str:
             [
                 "`trace`",
                 ready,
-                "Trace a PyTorch op: Python → C++ → file:line",
+                trace_desc,
             ],
             [
                 "`search`",
                 ready,
-                "Search bindings (mode=bindings) or CUDA kernels (mode=kernels)",
+                search_desc,
             ],
             [
                 "`graph`",
                 cpp_ready,
-                "C++ call graph: callers, calls, or impact analysis",
+                graph_desc,
             ],
             [
                 "`modules`",
                 py_ready,
-                "Python modules: trace a class or list by category",
+                modules_desc,
             ],
             [
                 "`tests`",
                 test_ready,
-                "Find tests, list utils, or get test file details",
+                tests_desc,
             ],
             [
                 "`affected`",
-                cpp_ready,
-                "Map changed C++ functions to impacted Python tests",
+                affected_ready,
+                affected_desc,
             ],
         ],
     )
@@ -197,26 +240,36 @@ async def trace(
     function_name: str,
     focus: Literal["full", "yaml", "dispatch"] = "full",
 ) -> str:
-    """Trace a PyTorch op from Python to C++ implementation with file:line locations."""
+    """Trace a PyTorch op or vLLM API/op using the active framework index."""
     return await _do_trace(function_name, focus)
 
 
 @mcp.tool()
 async def search(
     query: str,
-    mode: Literal["bindings", "kernels"] = "bindings",
+    mode: Literal[
+        "bindings",
+        "kernels",
+        "apis",
+        "models",
+        "backends",
+        "ops",
+    ] = "bindings",
     backend: str = "",
     limit: int = 10,
 ) -> str:
-    """Search PyTorch bindings or CUDA kernels by name.
+    """Search framework entities by name.
 
-    mode='bindings' for dispatch registrations (filterable by `backend`),
-    mode='kernels' for GPU kernel launches (`backend` is ignored — kernels
-    have no dispatch key).
+    PyTorch:
+      - mode='bindings' for dispatch registrations (filterable by `backend`)
+      - mode='kernels' for GPU kernel launches
+
+    vLLM:
+      - mode='bindings', 'apis', 'models', 'backends', or 'ops'
     """
     if mode == "kernels":
         return await _do_cuda_kernels(query, limit=limit)
-    return await _do_search_bindings(query, backend=backend, limit=limit)
+    return await _do_search_bindings(query, mode=mode, backend=backend, limit=limit)
 
 
 @mcp.tool()
@@ -228,12 +281,13 @@ async def graph(
     walk_python: bool = False,
     focus: Literal["callers", "full"] = "callers",
 ) -> str:
-    """Query the C++ call graph.
+    """Query the active graph surface.
 
+    PyTorch uses the C++ call graph. vLLM uses a condition-aware flow graph.
     mode='callers' for inbound, 'calls' for outbound, 'impact' for transitive
     callers. `depth`, `fuzzy_all_levels`, `walk_python`, and `focus` apply to
-    mode='impact' only and are ignored otherwise. `focus='full'` adds a
-    Python Entry Points section listing each walked C++ symbol's binding.
+    mode='impact' only on the PyTorch path and are ignored by the vLLM flow
+    graph.
     """
     if mode == "calls":
         return await _do_calls(function_name)
@@ -294,26 +348,27 @@ async def affected(funcs: str, depth: int = 3) -> str:
 
 
 def run_server(
+    source: str | None = None,
     pytorch_source: str | None = None,
     index_path: str | None = None,
     transport: str = "stdio",
+    framework: str = DEFAULT_FRAMEWORK,
 ):
     """Start MCP server. Heavy init runs in background so the MCP client's
     initialize handshake completes immediately; tools return a 'not loaded'
     error via `_ensure_loaded` until the data is ready."""
     import threading
 
-    source = pytorch_source or _auto_detect_pytorch()
-
     def _bg_init():
         try:
-            if source:
-                _init_from_source(source)
-            elif index_path:
-                _load_from_json(index_path)
-            else:
+            resolved_source = init_via_adapter(
+                framework=framework,
+                cli_source=source or pytorch_source,
+                index_path=index_path,
+            )
+            if not resolved_source and not index_path:
                 log.warning(
-                    "No PyTorch source specified. "
+                    f"No {framework} source specified. "
                     "Tools will return errors until data is loaded."
                 )
         except Exception:

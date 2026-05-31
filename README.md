@@ -1,6 +1,10 @@
 # TorchTalk
 
-An MCP server that gives Claude Code deep understanding of PyTorch's cross-language architecture (Python → C++ → CUDA).
+An MCP server that gives Claude Code deep understanding of framework internals.
+Today it supports:
+
+- **PyTorch** cross-language architecture (Python → C++ → CUDA)
+- **vLLM** static-first execution mapping (API → engine → registries → IR → native bindings)
 
 ## What It Does
 
@@ -21,11 +25,16 @@ pip install -e .
 # Add to Claude Code (one command)
 claude mcp add torchtalk -s user -- torchtalk mcp-serve --pytorch-source /path/to/pytorch
 
+# Serve vLLM instead
+claude mcp add torchtalk-vllm -s user -- torchtalk mcp-serve --framework vllm --source /path/to/vllm
+
 # Add to Cursor: copies .claude/ into the project's .cursor/ and adds the torchtalk MCP
 torchtalk cursor-add -C /path/to/your/project -p /path/to/pytorch
 ```
 
 ## Requirements
+
+### PyTorch
 
 - **PyTorch source code**: `git clone https://github.com/pytorch/pytorch`
 - **compile_commands.json** (optional): For full C++ call graph, build PyTorch once:
@@ -33,14 +42,20 @@ torchtalk cursor-add -C /path/to/your/project -p /path/to/pytorch
   cd /path/to/pytorch && python setup.py develop
   ```
 
+### vLLM
+
+- **vLLM source code**: `git clone https://github.com/vllm-project/vllm`
+- For runtime validation against the same checkout, prefer a fresh env and install
+  PyTorch and vLLM with `uv`/`pip`, not conda PyTorch.
+
 ## Available Tools
 
 | Tool | Description |
 |------|-------------|
-| `get_status()` | TorchTalk readiness summary across bindings, call graph, modules, tests |
-| `trace(func, focus?)` | Trace any PyTorch op: Python → YAML → C++ → file:line |
-| `search(query, mode?, backend?)` | mode="bindings": dispatch registrations. mode="kernels": CUDA kernel launches |
-| `graph(func, mode?, depth?, walk_python?)` | mode="callers": inbound. mode="calls": outbound. mode="impact": transitive callers (depth/walk_python apply to impact only) |
+| `get_status()` | TorchTalk readiness summary for the active framework, including entity counts and capabilities |
+| `trace(func, focus?)` | Trace a PyTorch op or a vLLM API/op path depending on the active framework |
+| `search(query, mode?, backend?)` | PyTorch: bindings/kernels. vLLM: bindings/apis/models/backends/ops |
+| `graph(func, mode?, depth?, walk_python?)` | PyTorch: C++ call graph. vLLM: condition-aware flow graph |
 | `modules(name, mode?, focus?)` | mode="trace": class details (focus="full" adds bases/docstring). mode="list": browse by category ("nn", "optim", "all") |
 | `tests(query?, mode?)` | mode="find": search tests. mode="utils": list utilities (query ignored). mode="file_info": test file details |
 | `affected(funcs, depth?)` | Map changed C++ functions (comma-separated) to impacted Python test files |
@@ -49,10 +64,11 @@ torchtalk cursor-add -C /path/to/your/project -p /path/to/pytorch
 
 | Command | Description |
 |---------|-------------|
-| `init --pytorch-source <path>` | Save PyTorch source path to config |
-| `status` | Show config and cache status |
-| `mcp-serve` | Start the MCP server |
-| `index build [--no-wait]` | Build or refresh the index and exit (headless) |
+| `init --framework <name> --source <path>` | Save a framework source path to config |
+| `init --pytorch-source <path>` | Legacy shortcut for PyTorch setup |
+| `status [--framework <name>]` | Show config and cache status for a framework |
+| `mcp-serve [--framework <name>]` | Start the MCP server for the selected framework |
+| `index build [--framework <name>] [--no-wait]` | Build or refresh the framework index and exit (headless) |
 | `index update --since <snapshot>` | Incrementally refresh bindings for files changed since `<snapshot>`'s commit |
 | `snapshot save <name>` | Capture current cache as a named snapshot |
 | `snapshot load <name\|--nearest> [--force]` | Restore a snapshot into the cache |
@@ -152,17 +168,20 @@ torchtalk/
 
 ## How It Works
 
-1. **On first run**: Parses `native_functions.yaml`, detects pybind11 bindings, builds C++ call graph
-2. **Caches everything**: Subsequent startups load from `~/.cache/torchtalk/`
-3. **Background building**: C++ call graph builds in background, tools work immediately
-4. **Test indexing**: Scans `test/` and `torch/testing/` for test classes, functions, and OpInfo definitions
+1. **On first run**: selects the active framework adapter and builds its index
+2. **PyTorch path**: parses `native_functions.yaml`, detects bindings, and builds the optional C++ call graph
+3. **vLLM path**: indexes API entrypoints, engine anchors, registries, IR/custom-op layers, and native bindings
+4. **Caches everything**: subsequent startups load from `~/.cache/torchtalk/`
+5. **Test indexing**: PyTorch path scans `test/` and `torch/testing/` for test classes, functions, and OpInfo definitions
 
 ## Indexed Data
 
 | Data Source | What's Extracted |
 |-------------|------------------|
-| `native_functions.yaml` | ATen operator definitions with dispatch configs |
-| `derivatives.yaml` | Backward pass formulas for autograd |
-| C++ source | TORCH_LIBRARY bindings, pybind11, CUDA kernels |
-| Python source | torch.nn modules, optimizers, method signatures |
-| Test files | Test classes, test functions, OpInfo registry |
+| `native_functions.yaml` | PyTorch ATen operator definitions with dispatch configs |
+| `derivatives.yaml` | PyTorch backward pass formulas for autograd |
+| C++ source | PyTorch TORCH_LIBRARY bindings, pybind11, CUDA kernels |
+| Python source | PyTorch modules plus curated vLLM API/engine/registry anchors |
+| vLLM registries | Model architectures, attention backends, IR ops/providers, CustomOp and pluggable layers |
+| vLLM native bindings | `csrc/*torch_bindings.cpp` custom-op schemas and registrations |
+| Test files | PyTorch test classes, test functions, OpInfo registry |

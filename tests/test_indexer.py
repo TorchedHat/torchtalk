@@ -36,6 +36,8 @@ from torchtalk.indexer import (
 class TestServerState:
     def test_default_empty(self):
         state = ServerState()
+        assert state.framework == "pytorch"
+        assert state.source_root is None
         assert state.bindings == []
         assert state.native_functions == {}
         assert state.pytorch_source is None
@@ -300,6 +302,64 @@ class TestPyCppEdgesCache:
         monkeypatch.setattr(indexer, "_source_fingerprint", lambda _: "fp_v2")
         indexer._state.py_to_cpp_edges = {}
         assert _load_py_cpp_edges_cache(cache, "/fake/source") is False
+
+
+class TestLoadFromJsonState:
+    def test_load_from_json_populates_framework_and_source_root(self, tmp_path):
+        prior_framework = indexer._state.framework
+        prior_source_root = indexer._state.source_root
+        prior_pytorch_source = indexer._state.pytorch_source
+        prior_bindings = indexer._state.bindings
+        prior_cuda_kernels = indexer._state.cuda_kernels
+        prior_native_functions = indexer._state.native_functions
+        prior_derivatives = indexer._state.derivatives
+        prior_native_impls = indexer._state.native_implementations
+        prior_symbol_to_file = indexer._state.symbol_to_file
+        prior_by_python_name = indexer._state.by_python_name
+        prior_by_cpp_name = indexer._state.by_cpp_name
+        prior_by_dispatch_key = indexer._state.by_dispatch_key
+        prior_bindings_by_file = indexer._state.bindings_by_file
+        prior_ops_by_file = indexer._state.ops_by_file
+        prior_dispatch_to_op = indexer._state.dispatch_to_op
+        try:
+            source_root = tmp_path / "pytorch-src"
+            source_root.mkdir()
+            payload = {
+                "bindings": [],
+                "cuda_kernels": [],
+                "native_functions": {},
+                "derivatives": {},
+                "native_implementations": {},
+                "symbol_to_file": {},
+                "metadata": {
+                    "framework": "pytorch",
+                    "source_path": str(source_root),
+                },
+            }
+            path = tmp_path / "bindings.json"
+            path.write_text(json.dumps(payload))
+
+            indexer._load_from_json(str(path))
+
+            assert indexer._state.framework == "pytorch"
+            assert indexer._state.source_root == str(source_root.resolve())
+            assert indexer._state.pytorch_source == str(source_root.resolve())
+        finally:
+            indexer._state.framework = prior_framework
+            indexer._state.source_root = prior_source_root
+            indexer._state.pytorch_source = prior_pytorch_source
+            indexer._state.bindings = prior_bindings
+            indexer._state.cuda_kernels = prior_cuda_kernels
+            indexer._state.native_functions = prior_native_functions
+            indexer._state.derivatives = prior_derivatives
+            indexer._state.native_implementations = prior_native_impls
+            indexer._state.symbol_to_file = prior_symbol_to_file
+            indexer._state.by_python_name = prior_by_python_name
+            indexer._state.by_cpp_name = prior_by_cpp_name
+            indexer._state.by_dispatch_key = prior_by_dispatch_key
+            indexer._state.bindings_by_file = prior_bindings_by_file
+            indexer._state.ops_by_file = prior_ops_by_file
+            indexer._state.dispatch_to_op = prior_dispatch_to_op
 
     def test_load_rejects_old_version(self, tmp_path, monkeypatch):
         monkeypatch.setattr(indexer, "_source_fingerprint", lambda _: "fp")
