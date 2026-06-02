@@ -1,0 +1,32 @@
+{
+  "name": "torchtalk",
+  "displayName": "TorchTalk",
+  "version": "1.0.0",
+  "description": "MCP server giving Claude Code cross-language understanding of PyTorch (Python -> C++ -> CUDA): binding-chain tracing, impact analysis, dispatch mapping, call graphs, and test discovery.",
+  "author": {
+    "name": "Adrian Abeyta",
+    "email": "aabeyta@redhat.com"
+  },
+  "homepage": "https://github.com/TorchedHat/torchtalk",
+  "keywords": [
+    "pytorch",
+    "mcp",
+    "claude",
+    "code-analysis",
+    "cross-language",
+    "bindings",
+    "cuda"
+  ],
+  "skills": "./.claude/skills/",
+  "commands": "./.claude/commands/",
+  "hooks": "./hooks/",
+  "mcpServers": {
+    "torchtalk": {
+      "command": "torchtalk",
+      "args": ["mcp-serve"],
+      "env": {
+        "PYTORCH_SOURCE": "${PYTORCH_SOURCE:-}"
+      }
+    }
+  }
+}
