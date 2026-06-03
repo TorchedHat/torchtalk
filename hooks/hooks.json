@@ -1,9 +1,15 @@
 {
-  "SessionStart": [
-    {
-      "type": "command",
-      "command": "${CLAUDE_PLUGIN_ROOT}/scripts/plugin-setup.sh",
-      "background": true
-    }
-  ]
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/plugin-setup.sh",
+            "statusMessage": "Setting up TorchTalk..."
+          }
+        ]
+      }
+    ]
+  }
 }
