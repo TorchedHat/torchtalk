@@ -172,8 +172,7 @@ async def trace(name: str, focus: str = "full") -> str:
     record = candidates[0]
     path = _rel_path(record["file_path"])
     md.item(
-        f"`{record['name']}` [{record['family']}] → "
-        f"`{path}:{record['line_number']}`"
+        f"`{record['name']}` [{record['family']}] → `{path}:{record['line_number']}`"
     )
     details = record.get("details", {})
     if details:

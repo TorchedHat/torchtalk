@@ -41,15 +41,9 @@ _PIPELINE_METHOD_SPECS: dict[str, tuple[str, ...]] = {
         "AsyncLLM.generate",
         "AsyncLLM.encode",
     ),
-    "vllm/v1/engine/input_processor.py": (
-        "InputProcessor.process_inputs",
-    ),
-    "vllm/v1/engine/core.py": (
-        "EngineCore.add_request",
-    ),
-    "vllm/v1/core/sched/scheduler.py": (
-        "Scheduler.schedule",
-    ),
+    "vllm/v1/engine/input_processor.py": ("InputProcessor.process_inputs",),
+    "vllm/v1/engine/core.py": ("EngineCore.add_request",),
+    "vllm/v1/core/sched/scheduler.py": ("Scheduler.schedule",),
     "vllm/v1/attention/selector.py": (
         "get_attn_backend",
         "_cached_get_attn_backend",
@@ -59,9 +53,7 @@ _PIPELINE_METHOD_SPECS: dict[str, tuple[str, ...]] = {
 }
 
 _LAYER_METHOD_SPECS: dict[str, tuple[str, ...]] = {
-    "vllm/model_executor/layers/layernorm.py": (
-        "RMSNorm.forward_native",
-    ),
+    "vllm/model_executor/layers/layernorm.py": ("RMSNorm.forward_native",),
 }
 
 _PLATFORM_METHOD_SPECS: dict[str, tuple[str, ...]] = {
@@ -81,9 +73,7 @@ _PLATFORM_METHOD_SPECS: dict[str, tuple[str, ...]] = {
         "XPUPlatform.get_attn_backend_cls",
         "XPUPlatform.get_default_ir_op_priority",
     ),
-    "vllm/platforms/cpu.py": (
-        "CpuPlatform.get_attn_backend_cls",
-    ),
+    "vllm/platforms/cpu.py": ("CpuPlatform.get_attn_backend_cls",),
 }
 
 _MODEL_REGISTRY_VARS = {
@@ -427,7 +417,7 @@ def _extract_native_bindings(root: Path) -> list[dict[str, Any]]:
 
 
 def _build_lookup_indexes(
-    records_by_family: dict[str, list[dict[str, Any]]]
+    records_by_family: dict[str, list[dict[str, Any]]],
 ) -> dict[str, Any]:
     by_id: dict[str, dict[str, Any]] = {}
     by_name: dict[str, list[str]] = {}
@@ -610,8 +600,7 @@ def _build_graph(
             conditions={"selected_backend": backend["name"]},
             confidence="conditional",
             notes=(
-                "Backend selection depends on platform defaults and backend "
-                "validation"
+                "Backend selection depends on platform defaults and backend validation"
             ),
         )
 
@@ -871,4 +860,3 @@ def _search_keys(record: dict[str, Any]) -> set[str]:
         if isinstance(value, str) and value:
             keys.add(value.lower())
     return {key for key in keys if key}
-

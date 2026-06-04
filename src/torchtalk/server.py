@@ -187,8 +187,7 @@ async def get_status() -> str:
         affected_ready = "Not supported"
         trace_desc = "Trace vLLM API flows, IR ops, providers, and native bindings"
         search_desc = (
-            "Search vLLM APIs, models, backends, ops, and torch custom-op "
-            "bindings"
+            "Search vLLM APIs, models, backends, ops, and torch custom-op bindings"
         )
         graph_desc = "Condition-aware vLLM flow graph with dynamic branch conditions"
         modules_desc = "Not supported for vLLM"

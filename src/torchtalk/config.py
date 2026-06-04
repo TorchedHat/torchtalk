@@ -221,9 +221,7 @@ def _validate_vllm_path(path: str | Path) -> tuple[bool, str]:
         p / "vllm" / "model_executor" / "models" / "registry.py",
     ]
     missing = [
-        path.relative_to(p).as_posix()
-        for path in required_paths
-        if not path.exists()
+        path.relative_to(p).as_posix() for path in required_paths if not path.exists()
     ]
     if missing:
         return (

@@ -16,6 +16,7 @@ pytestmark = pytest.mark.skipif(
     reason="VLLM_SOURCE environment variable not set",
 )
 
+
 class TestVllmAdapter:
     def test_vllm_adapter_is_registered(self):
         assert "vllm" in list_adapters()
