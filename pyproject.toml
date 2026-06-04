@@ -7,7 +7,8 @@ name = "torchtalk"
 version = "1.0.0"
 description = "MCP server providing cross-language binding analysis for PyTorch codebases (Python/C++/CUDA)"
 readme = "README.md"
-# license = "MIT"  # Add when ready to publish
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.10"
 authors = [
     { name = "Adrian Abeyta", email = "aabeyta@redhat.com" }
