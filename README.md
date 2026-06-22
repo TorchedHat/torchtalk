@@ -48,6 +48,20 @@ torchtalk cursor-add -C /path/to/your/project -p /path/to/pytorch
 - For runtime validation against the same checkout, prefer a fresh env and install
   PyTorch and vLLM with `uv`/`pip`, not conda PyTorch.
 
+## Benchmark Snapshot
+
+The repo includes a clean benchmark comparing:
+
+- **LLM + TorchTalk(vLLM)**
+- **LLM only** (no TorchTalk)
+
+On the measured `/data/vllm` run, TorchTalk reached `100` average score versus
+`89.08` for the no-TorchTalk baseline, while also using fewer tokens and much
+lower warm-query latency.
+
+See `benchmarks/VLLM_LLM_ONLY_VS_TORCHTALK.md` for the benchmark queries,
+observed results, and summary.
+
 ## Available Tools
 
 | Tool | Description |

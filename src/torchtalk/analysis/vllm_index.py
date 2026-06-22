@@ -50,10 +50,17 @@ _PIPELINE_METHOD_SPECS: dict[str, tuple[str, ...]] = {
         "get_mamba_attn_backend",
         "_cached_get_mamba_attn_backend",
     ),
+    "vllm/entrypoints/offline_utils.py": (
+        "OfflineInferenceMixin._add_completion_requests",
+        "OfflineInferenceMixin._run_completion",
+        "OfflineInferenceMixin._add_request",
+        "OfflineInferenceMixin._run_engine",
+    ),
 }
 
 _LAYER_METHOD_SPECS: dict[str, tuple[str, ...]] = {
     "vllm/model_executor/layers/layernorm.py": ("RMSNorm.forward_native",),
+    "vllm/model_executor/layers/fused_moe/layer.py": ("FusedMoE",),
 }
 
 _PLATFORM_METHOD_SPECS: dict[str, tuple[str, ...]] = {
@@ -88,6 +95,30 @@ _ATTENTION_ENUM_CLASSES = {
     "MambaAttentionBackendEnum": "mamba_attention",
 }
 
+_API_CLASS_NAME_RE = re.compile(r"(LLM|Serving|Server|Render)$")
+_API_METHOD_NAME_RE = re.compile(
+    r"^(generate|chat|encode|embed|score|enqueue|wait_for_completion|"
+    r"create_.*|_create_.*|render_.*|_prepare_.*)$"
+)
+_PIPELINE_CLASS_NAME_RE = re.compile(
+    r"(AsyncLLM|LLMEngine|EngineCore.*|InputProcessor|Scheduler|OfflineInferenceMixin)$"
+)
+_PIPELINE_METHOD_NAME_RE = re.compile(
+    r"^(add_request|generate|encode|process_inputs|step|schedule|get_output|"
+    r"abort_request|get_supported_tasks|_run_completion|_add_completion_requests|"
+    r"_add_request|_run_engine|get_attn_backend|_cached_get_attn_backend|"
+    r"get_mamba_attn_backend|_cached_get_mamba_attn_backend)$"
+)
+_LAYER_CLASS_NAME_RE = re.compile(r"(RMSNorm|GemmaRMSNorm|RMSNormGated)$")
+_LAYER_METHOD_NAME_RE = re.compile(r"^(forward_native)$")
+_LAYER_FUNCTION_NAME_RE = re.compile(r"^(FusedMoE)$")
+_PLATFORM_CLASS_NAME_RE = re.compile(
+    r"(Platform|CudaPlatform.*|RocmPlatform|XPUPlatform|CpuPlatform)$"
+)
+_PLATFORM_METHOD_NAME_RE = re.compile(
+    r"^(get_attn_backend_cls|get_default_ir_op_priority)$"
+)
+
 _CPP_DEF_PATTERN = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\.def\s*\(")
 _CPP_IMPL_PATTERN = re.compile(
     r'([A-Za-z_][A-Za-z0-9_]*)\.impl\(\s*"([^"]+)"(?P<body>.*?)\);',
@@ -104,18 +135,31 @@ def build_vllm_index(source: str) -> dict[str, Any]:
     """Build a static-first index for authoritative vLLM mapping layers."""
 
     root = Path(source).resolve()
+    discovered_records = _discover_vllm_records(root)
     records_by_family: dict[str, list[dict[str, Any]]] = {
-        "api_entrypoints": _extract_selected_python_records(
-            root, _API_METHOD_SPECS, "api_entrypoints"
+        "api_entrypoints": _merge_records(
+            discovered_records["api_entrypoints"],
+            _extract_selected_python_records(
+                root, _API_METHOD_SPECS, "api_entrypoints"
+            ),
         ),
-        "request_pipeline_nodes": _extract_selected_python_records(
-            root, _PIPELINE_METHOD_SPECS, "request_pipeline_nodes"
+        "request_pipeline_nodes": _merge_records(
+            discovered_records["request_pipeline_nodes"],
+            _extract_selected_python_records(
+                root,
+                _PIPELINE_METHOD_SPECS,
+                "request_pipeline_nodes",
+            ),
         ),
-        "layer_nodes": _extract_selected_python_records(
-            root, _LAYER_METHOD_SPECS, "layer_nodes"
+        "layer_nodes": _merge_records(
+            discovered_records["layer_nodes"],
+            _extract_selected_python_records(root, _LAYER_METHOD_SPECS, "layer_nodes"),
         ),
-        "platform_defaults": _extract_selected_python_records(
-            root, _PLATFORM_METHOD_SPECS, "platform_defaults"
+        "platform_defaults": _merge_records(
+            discovered_records["platform_defaults"],
+            _extract_selected_python_records(
+                root, _PLATFORM_METHOD_SPECS, "platform_defaults"
+            ),
         ),
         "model_architectures": _extract_model_registry_records(root),
         "attention_backends": _extract_attention_backend_records(root),
@@ -143,6 +187,7 @@ def build_vllm_index(source: str) -> dict[str, Any]:
         "metadata": {
             "framework": "vllm",
             "source_path": str(root),
+            "discovery_mode": "hybrid",
         },
         **records_by_family,
         "lookup_indexes": lookup_indexes,
@@ -150,6 +195,64 @@ def build_vllm_index(source: str) -> dict[str, Any]:
         "graph_nodes": graph_payload["graph_nodes"],
         "graph_edges": graph_payload["graph_edges"],
         "dynamic_notes": graph_payload["dynamic_notes"],
+    }
+
+
+def _discover_vllm_records(root: Path) -> dict[str, list[dict[str, Any]]]:
+    """Discover major vLLM components from the tree structure and AST."""
+
+    return {
+        "api_entrypoints": _discover_python_records(
+            root,
+            "vllm/entrypoints",
+            family="api_entrypoints",
+            class_name_re=_API_CLASS_NAME_RE,
+            method_name_re=_API_METHOD_NAME_RE,
+        ),
+        "request_pipeline_nodes": _merge_records(
+            _discover_python_records(
+                root,
+                "vllm/v1/engine",
+                family="request_pipeline_nodes",
+                class_name_re=_PIPELINE_CLASS_NAME_RE,
+                method_name_re=_PIPELINE_METHOD_NAME_RE,
+            ),
+            _discover_python_records(
+                root,
+                "vllm/v1/core/sched",
+                family="request_pipeline_nodes",
+                class_name_re=_PIPELINE_CLASS_NAME_RE,
+                method_name_re=_PIPELINE_METHOD_NAME_RE,
+            ),
+            _discover_python_records(
+                root,
+                "vllm/v1/attention",
+                family="request_pipeline_nodes",
+                function_name_re=_PIPELINE_METHOD_NAME_RE,
+            ),
+            _discover_python_records(
+                root,
+                "vllm/entrypoints",
+                family="request_pipeline_nodes",
+                class_name_re=_PIPELINE_CLASS_NAME_RE,
+                method_name_re=_PIPELINE_METHOD_NAME_RE,
+            ),
+        ),
+        "layer_nodes": _discover_python_records(
+            root,
+            "vllm/model_executor/layers",
+            family="layer_nodes",
+            class_name_re=_LAYER_CLASS_NAME_RE,
+            method_name_re=_LAYER_METHOD_NAME_RE,
+            function_name_re=_LAYER_FUNCTION_NAME_RE,
+        ),
+        "platform_defaults": _discover_python_records(
+            root,
+            "vllm/platforms",
+            family="platform_defaults",
+            class_name_re=_PLATFORM_CLASS_NAME_RE,
+            method_name_re=_PLATFORM_METHOD_NAME_RE,
+        ),
     }
 
 
@@ -162,6 +265,104 @@ def _extract_selected_python_records(
     for relative_path, qualified_names in specs.items():
         path = root / relative_path
         records.extend(_extract_python_members(path, family, set(qualified_names)))
+    return records
+
+
+def _discover_python_records(
+    root: Path,
+    relative_root: str,
+    *,
+    family: str,
+    class_name_re: re.Pattern[str] | None = None,
+    method_name_re: re.Pattern[str] | None = None,
+    function_name_re: re.Pattern[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Discover Python records from a subtree using structural heuristics."""
+
+    records: list[dict[str, Any]] = []
+    search_root = root / relative_root
+    for path in sorted(search_root.rglob("*.py")):
+        text = path.read_text(encoding="utf-8", errors="replace")
+        try:
+            tree = ast.parse(text, filename=str(path))
+        except SyntaxError:
+            continue
+
+        records.extend(
+            _discover_python_records_in_tree(
+                path,
+                tree,
+                family=family,
+                class_name_re=class_name_re,
+                method_name_re=method_name_re,
+                function_name_re=function_name_re,
+            )
+        )
+    return records
+
+
+def _discover_python_records_in_tree(
+    path: Path,
+    tree: ast.Module,
+    *,
+    family: str,
+    class_name_re: re.Pattern[str] | None,
+    method_name_re: re.Pattern[str] | None,
+    function_name_re: re.Pattern[str] | None,
+) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if function_name_re and function_name_re.match(node.name):
+                records.append(
+                    _record(
+                        family=family,
+                        name=node.name,
+                        file_path=str(path),
+                        line_number=node.lineno,
+                        kind="python_function",
+                        discovery_source="auto",
+                        async_function=isinstance(node, ast.AsyncFunctionDef),
+                    )
+                )
+            continue
+
+        if not isinstance(node, ast.ClassDef):
+            continue
+        class_matches = bool(class_name_re and class_name_re.search(node.name))
+        if class_matches:
+            records.append(
+                _record(
+                    family=family,
+                    name=node.name,
+                    file_path=str(path),
+                    line_number=node.lineno,
+                    kind="python_class",
+                    discovery_source="auto",
+                )
+            )
+        if not method_name_re:
+            continue
+        for item in node.body:
+            if not isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if not (class_matches or method_name_re.match(item.name)):
+                continue
+            if method_name_re and not method_name_re.match(item.name):
+                continue
+            records.append(
+                _record(
+                    family=family,
+                    name=f"{node.name}.{item.name}",
+                    file_path=str(path),
+                    line_number=item.lineno,
+                    kind="python_method",
+                    discovery_source="auto",
+                    async_function=isinstance(item, ast.AsyncFunctionDef),
+                    owner=node.name,
+                )
+            )
     return records
 
 
@@ -416,6 +617,19 @@ def _extract_native_bindings(root: Path) -> list[dict[str, Any]]:
     return records
 
 
+def _merge_records(*groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Merge record groups by id, keeping later groups as overrides."""
+
+    merged: dict[str, dict[str, Any]] = {}
+    for group in groups:
+        for record in group:
+            merged[record["id"]] = record
+    return sorted(
+        merged.values(),
+        key=lambda record: (record["family"], record["name"], record["line_number"]),
+    )
+
+
 def _build_lookup_indexes(
     records_by_family: dict[str, list[dict[str, Any]]],
 ) -> dict[str, Any]:
@@ -468,6 +682,27 @@ def _build_graph(
             return record["id"]
         raise KeyError(f"Missing graph node for {family}:{name}")
 
+    def find_optional_id(
+        family: str,
+        name: str,
+        *,
+        id_suffix: str | None = None,
+    ) -> str | None:
+        try:
+            return find_id(family, name, id_suffix=id_suffix)
+        except KeyError:
+            return None
+
+    def find_first_id(
+        candidates: list[tuple[str, str, str | None]],
+    ) -> str:
+        for family, name, id_suffix in candidates:
+            record_id = find_optional_id(family, name, id_suffix=id_suffix)
+            if record_id is not None:
+                return record_id
+        choices = ", ".join(f"{family}:{name}" for family, name, _ in candidates)
+        raise KeyError(f"Missing graph node for any of: {choices}")
+
     def add_edge(
         source_id: str,
         target_id: str,
@@ -513,8 +748,26 @@ def _build_graph(
     async_generate_id = find_id("request_pipeline_nodes", "AsyncLLM.generate")
     async_encode_id = find_id("request_pipeline_nodes", "AsyncLLM.encode")
     llm_generate_id = find_id("api_entrypoints", "LLM.generate")
-    llm_run_completion_id = find_id("api_entrypoints", "LLM._run_completion")
-    llm_add_request_id = find_id("api_entrypoints", "LLM._add_request")
+    llm_run_completion_id = find_first_id(
+        [
+            ("api_entrypoints", "LLM._run_completion", None),
+            ("request_pipeline_nodes", "OfflineInferenceMixin._run_completion", None),
+        ]
+    )
+    llm_add_completion_requests_id = find_optional_id(
+        "request_pipeline_nodes",
+        "OfflineInferenceMixin._add_completion_requests",
+    )
+    llm_add_request_id = find_first_id(
+        [
+            ("api_entrypoints", "LLM._add_request", None),
+            ("request_pipeline_nodes", "OfflineInferenceMixin._add_request", None),
+        ]
+    )
+    llm_run_engine_id = find_optional_id(
+        "request_pipeline_nodes",
+        "OfflineInferenceMixin._run_engine",
+    )
     llm_engine_add_request_id = find_id(
         "request_pipeline_nodes",
         "LLMEngine.add_request",
@@ -545,9 +798,18 @@ def _build_graph(
         find_id("platform_defaults", "XPUPlatform.get_attn_backend_cls"),
         find_id("platform_defaults", "CpuPlatform.get_attn_backend_cls"),
     ]
-    fused_moe_id = find_id("pluggable_layers", "fused_moe")
-    unquantized_moe_id = find_id("custom_ops", "unquantized_fused_moe")
-    moe_sum_binding_id = find_id("torch_custom_ops", "moe_sum", id_suffix="moe")
+    fused_moe_id = find_first_id(
+        [
+            ("pluggable_layers", "fused_moe", None),
+            ("layer_nodes", "FusedMoE", None),
+        ]
+    )
+    unquantized_moe_id = find_optional_id("custom_ops", "unquantized_fused_moe")
+    moe_sum_binding_id = find_optional_id(
+        "torch_custom_ops",
+        "moe_sum",
+        id_suffix="moe",
+    )
 
     add_edge(chat_create_id, async_generate_id)
     add_edge(async_generate_id, async_add_request_id)
@@ -565,9 +827,23 @@ def _build_graph(
     add_edge(torch_op_node["id"], rms_binding_id)
 
     add_edge(llm_generate_id, llm_run_completion_id)
-    add_edge(llm_run_completion_id, llm_add_request_id)
+    if llm_add_completion_requests_id is not None:
+        add_edge(llm_run_completion_id, llm_add_completion_requests_id)
+        add_edge(llm_add_completion_requests_id, llm_add_request_id)
+    else:
+        add_edge(llm_run_completion_id, llm_add_request_id)
     add_edge(llm_add_request_id, llm_engine_add_request_id)
     add_edge(llm_engine_add_request_id, input_process_id)
+    if llm_run_engine_id is not None:
+        add_edge(
+            llm_run_completion_id,
+            llm_run_engine_id,
+            notes=(
+                "Offline inference mixin delegates the final result collection "
+                "through _run_engine"
+            ),
+        )
+        add_edge(llm_run_engine_id, llm_engine_step_id)
     add_edge(
         llm_generate_id,
         llm_engine_step_id,
@@ -604,18 +880,20 @@ def _build_graph(
             ),
         )
 
-    add_edge(
-        fused_moe_id,
-        unquantized_moe_id,
-        conditions={"moe_family": "unquantized"},
-        confidence="conditional",
-    )
-    add_edge(
-        unquantized_moe_id,
-        moe_sum_binding_id,
-        conditions={"backend_family": "moe"},
-        confidence="conditional",
-    )
+    if unquantized_moe_id is not None:
+        add_edge(
+            fused_moe_id,
+            unquantized_moe_id,
+            conditions={"moe_family": "unquantized"},
+            confidence="conditional",
+        )
+    if unquantized_moe_id is not None and moe_sum_binding_id is not None:
+        add_edge(
+            unquantized_moe_id,
+            moe_sum_binding_id,
+            conditions={"backend_family": "moe"},
+            confidence="conditional",
+        )
 
     proof_traces = {
         "chat_completion_to_rms_norm": _proof_trace(
@@ -638,15 +916,17 @@ def _build_graph(
         "offline_generate": _proof_trace(
             "offline_generate",
             "Offline LLM.generate()",
-            [
+            [step for step in [
                 llm_generate_id,
                 llm_run_completion_id,
+                llm_add_completion_requests_id,
                 llm_add_request_id,
                 llm_engine_add_request_id,
                 input_process_id,
                 engine_add_request_id,
+                llm_run_engine_id,
                 llm_engine_step_id,
-            ],
+            ] if step is not None],
         ),
         "pooling_encode": _proof_trace(
             "pooling_encode",
@@ -675,7 +955,9 @@ def _build_graph(
                 fused_moe_id,
                 unquantized_moe_id,
                 moe_sum_binding_id,
-            ],
+            ]
+            if unquantized_moe_id is not None and moe_sum_binding_id is not None
+            else [fused_moe_id],
         ),
     }
 

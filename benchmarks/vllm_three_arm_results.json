@@ -1,0 +1,1495 @@
+{
+  "source_root": "/data/vllm",
+  "repeats": 3,
+  "limitations": {
+    "true_cursor_sdk_agent_unavailable": true,
+    "reason": "cursor_sdk was not installed and CURSOR_API_KEY was not available, so the third arm uses a deterministic no-TorchTalk source-guided navigator instead of a live Cursor SDK agent."
+  },
+  "server": {
+    "initialize_time_ms": 509.47,
+    "list_tools_time_ms": 1.91,
+    "tool_names": [
+      "affected",
+      "get_status",
+      "graph",
+      "modules",
+      "search",
+      "tests",
+      "trace"
+    ],
+    "command": [
+      "/root/miniforge3/envs/torchtalk-adapter/bin/python",
+      "-m",
+      "torchtalk.cli",
+      "mcp-serve",
+      "--framework",
+      "vllm",
+      "--source",
+      "/data/vllm"
+    ]
+  },
+  "tasks": [
+    {
+      "id": "search_api_openai_chat",
+      "category": "search",
+      "description": "Find the main OpenAI chat completion serving entrypoint.",
+      "tool_name": "search",
+      "torchtalk": {
+        "matched_required": 2,
+        "total_required": 2,
+        "coverage": 1.0,
+        "ordered_score": 1.0,
+        "score": 100,
+        "required_positions": [
+          65,
+          154
+        ],
+        "tokens": 162,
+        "time_ms": 2.57,
+        "preview": [
+          "[vLLM Search: `OpenAIServingChat` (apis)]",
+          "Found 4 result(s)",
+          "",
+          "- **OpenAIServingChat._create_chat_completion** [api_entrypoints] \u2192 `vllm/entrypoints/openai/chat_completion/serving.py:251`",
+          "- **OpenAIServingChat._create_chat_logprobs** [api_entrypoints] \u2192 `vllm/entrypoints/openai/chat_completion/serving.py:1135`",
+          "- **OpenAIServingChat.create_chat_completion** [api_entrypoints] \u2192 `vllm/entrypoints/openai/chat_completion/serving.py:235`",
+          "- **OpenAIServingChat.render_chat_request** [api_entrypoints] \u2192 `vllm/entrypoints/openai/chat_completion/serving.py:208`"
+        ]
+      },
+      "source_guided": {
+        "matched_required": 2,
+        "total_required": 2,
+        "coverage": 1.0,
+        "ordered_score": 1.0,
+        "score": 100,
+        "required_positions": [
+          193,
+          129
+        ],
+        "tokens": 332,
+        "time_ms": 3322.41,
+        "preview": [
+          "[source-guided navigator baseline: `search_api_openai_chat`]",
+          "Seed resolution",
+          "- 1. `OpenAIServingChat` \u2192 `vllm/entrypoints/openai/chat_completion/serving.py:108` [query=OpenAIServingChat]",
+          "- 2. `OpenAIServingChat._create_chat_completion` \u2192 `vllm/entrypoints/openai/chat_completion/serving.py:251` [query=_create_chat_completion]",
+          "- 3. `create_chat_completion` \u2192 `vllm/entrypoints/openai/chat_completion/api_router.py:53` [query=chat_completion]",
+          "",
+          "Agent follow-ups",
+          "- 1. `HTTPStatus.OK` \u2192 `vllm/entrypoints/anthropic/api_router.py:56` [from=HTTPStatus.INTERNAL_SERVER_ERROR]",
+          "- 2. `MistralToolParser` \u2192 `vllm/tool_parsers/mistral_tool_parser.py:96` [from=MistralToolParser.model_can_reason]",
+          "- 3. `ParserManager.get_parser` \u2192 `vllm/parser/parser_manager.py:76` [from=ParserManager.get_parser]",
+          "- 4. `EngineClient.dead_error` \u2192 `vllm/engine/protocol.py:62` [from=engine_client.dead_error]",
+          "- 5. `EngineClient.errored` \u2192 `vllm/engine/protocol.py:58` [from=engine_client.errored]"
+        ],
+        "unique_files": 7,
+        "seed_hits": 3,
+        "expansion_hits": 6,
+        "expansion_symbols": [
+          "HTTPStatus.INTERNAL_SERVER_ERROR",
+          "MistralToolParser.model_can_reason",
+          "ParserManager.get_parser",
+          "engine_client.dead_error",
+          "engine_client.errored",
+          "engine_client.generate"
+        ]
+      },
+      "rg_baseline": {
+        "matched_required": 1,
+        "total_required": 2,
+        "coverage": 0.5,
+        "ordered_score": 1.0,
+        "score": 65,
+        "required_positions": [
+          -1,
+          3012
+        ],
+        "tokens": 2695,
+        "time_ms": 45.5,
+        "preview": [
+          "[rg+read baseline: `search_api_openai_chat`]",
+          "",
+          "## query=OpenAIServingChat",
+          "/data/vllm/vllm/entrypoints/generate/api_router.py:62:     )",
+          "/data/vllm/vllm/entrypoints/generate/api_router.py:63:     from vllm.entrypoints.openai.chat_completion.batch_serving import (",
+          "/data/vllm/vllm/entrypoints/generate/api_router.py:64:         OpenAIServingChatBatch,",
+          "/data/vllm/vllm/entrypoints/generate/api_router.py:65:     )",
+          "/data/vllm/vllm/entrypoints/generate/api_router.py:66:     from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat",
+          "",
+          "## query=OpenAIServingChat",
+          "/data/vllm/vllm/entrypoints/generate/api_router.py:64:         OpenAIServingChatBatch,",
+          "/data/vllm/vllm/entrypoints/generate/api_router.py:65:     )"
+        ],
+        "query_hit_counts": {
+          "OpenAIServingChat": 29,
+          "_create_chat_completion": 12,
+          "chat_completion": 372
+        },
+        "unique_files": 8,
+        "snippet_count": 18
+      }
+    },
+    {
+      "id": "search_api_pooling_prepare",
+      "category": "search",
+      "description": "Find the pooling serving entrypoint that prepares request generators.",
+      "tool_name": "search",
+      "torchtalk": {
+        "matched_required": 2,
+        "total_required": 2,
+        "coverage": 1.0,
+        "ordered_score": 1.0,
+        "score": 100,
+        "required_positions": [
+          66,
+          145
+        ],
+        "tokens": 54,
+        "time_ms": 2.97,
+        "preview": [
+          "[vLLM Search: `PoolingServingBase` (apis)]",
+          "Found 1 result(s)",
+          "",
+          "- **PoolingServingBase._prepare_generators** [api_entrypoints] \u2192 `vllm/entrypoints/pooling/base/serving.py:124`"
+        ]
+      },
+      "source_guided": {
+        "matched_required": 2,
+        "total_required": 2,
+        "coverage": 1.0,
+        "ordered_score": 1.0,
+        "score": 100,
+        "required_positions": [
+          188,
+          127
+        ],
+        "tokens": 339,
+        "time_ms": 5246.69,
+        "preview": [
+          "[source-guided navigator baseline: `search_api_pooling_prepare`]",
+          "Seed resolution",
+          "- 1. `PoolingServingBase` \u2192 `vllm/entrypoints/pooling/base/serving.py:39` [query=PoolingServingBase]",
+          "- 2. `PoolingServingBase._prepare_generators` \u2192 `vllm/entrypoints/pooling/base/serving.py:124` [query=_prepare_generators]",
+          "- 3. `AsyncLLM.encode` \u2192 `vllm/v1/engine/async_llm.py:803` [query=AsyncLLM.encode]",
+          "",
+          "Agent follow-ups",
+          "- 1. `HTTPStatus.OK` \u2192 `vllm/entrypoints/anthropic/api_router.py:54` [from=HTTPStatus.BAD_REQUEST]",
+          "- 2. `EngineClient.is_tracing_enabled` \u2192 `vllm/engine/protocol.py:126` [from=engine_client.is_tracing_enabled]",
+          "- 3. `ChatCompletionRequest.build_tok_params` \u2192 `vllm/entrypoints/openai/chat_completion/protocol.py:503` [from=model_config.max_model_len]",
+          "- 4. `OpenAIModelRegistry.is_base_model` \u2192 `vllm/entrypoints/openai/models/serving.py:46` [from=models.is_base_model]",
+          "- 5. `get_intel_gpu_models` \u2192 `vllm/collect_env.py:397` [from=models.lora_requests]"
+        ],
+        "unique_files": 7,
+        "seed_hits": 3,
+        "expansion_hits": 6,
+        "expansion_symbols": [
+          "HTTPStatus.BAD_REQUEST",
+          "engine_client.is_tracing_enabled",
+          "model_config.max_model_len",
+          "models.is_base_model",
+          "models.lora_requests",
+          "models.model_name"
+        ]
+      },
+      "rg_baseline": {
+        "matched_required": 1,
+        "total_required": 2,
+        "coverage": 0.5,
+        "ordered_score": 1.0,
+        "score": 65,
+        "required_positions": [
+          -1,
+          106
+        ],
+        "tokens": 1855,
+        "time_ms": 43.91,
+        "preview": [
+          "[rg+read baseline: `search_api_pooling_prepare`]",
+          "",
+          "## query=PoolingServingBase",
+          "/data/vllm/vllm/entrypoints/pooling/base/serving.py:37: ",
+          "/data/vllm/vllm/entrypoints/pooling/base/serving.py:38: ",
+          "/data/vllm/vllm/entrypoints/pooling/base/serving.py:39: class PoolingServingBase(ABC):",
+          "/data/vllm/vllm/entrypoints/pooling/base/serving.py:40:     request_id_prefix: ClassVar[str]",
+          "/data/vllm/vllm/entrypoints/pooling/base/serving.py:41: ",
+          "",
+          "## query=PoolingServingBase",
+          "/data/vllm/vllm/entrypoints/pooling/base/serving.py:371: ",
+          "/data/vllm/vllm/entrypoints/pooling/base/serving.py:372: "
+        ],
+        "query_hit_counts": {
+          "PoolingServingBase": 8,
+          "_prepare_generators": 4,
+          "AsyncLLM.encode": 0
+        },
+        "unique_files": 5,
+        "snippet_count": 12
+      }
+    },
+    {
+      "id": "search_model_llama",
+      "category": "search",
+      "description": "Find where LlamaForCausalLM is represented in the model registry.",
+      "tool_name": "search",
+      "torchtalk": {
+        "matched_required": 2,
+        "total_required": 2,
+        "coverage": 1.0,
+        "ordered_score": 1.0,
+        "score": 100,
+        "required_positions": [
+          15,
+          111
+        ],
+        "tokens": 517,
+        "time_ms": 3.92,
+        "preview": [
+          "[vLLM Search: `LlamaForCausalLM` (models)]",
+          "Found 10 result(s)",
+          "",
+          "- **AquilaModel** [model_architectures] \u2192 `vllm/model_executor/models/registry.py:75`",
+          "  - category=text_generation, impl_module=llama, impl_class=LlamaForCausalLM",
+          "- **AquilaForCausalLM** [model_architectures] \u2192 `vllm/model_executor/models/registry.py:76`",
+          "  - category=text_generation, impl_module=llama, impl_class=LlamaForCausalLM",
+          "- **CwmForCausalLM** [model_architectures] \u2192 `vllm/model_executor/models/registry.py:94`",
+          "  - category=text_generation, impl_module=llama, impl_class=LlamaForCausalLM",
+          "- **InternLM3ForCausalLM** [model_architectures] \u2192 `vllm/model_executor/models/registry.py:144`",
+          "  - category=text_generation, impl_module=llama, impl_class=LlamaForCausalLM",
+          "- **IQuestCoderForCausalLM** [model_architectures] \u2192 `vllm/model_executor/models/registry.py:145`"
+        ]
+      },
+      "source_guided": {
+        "matched_required": 2,
+        "total_required": 2,
+        "coverage": 1.0,
+        "ordered_score": 1.0,
+        "score": 100,
+        "required_positions": [
+          79,
+          205
+        ],
+        "tokens": 346,
+        "time_ms": 5957.88,
+        "preview": [
+          "[source-guided navigator baseline: `search_model_llama`]",
+          "Seed resolution",
+          "- 1. `LlamaForCausalLM` \u2192 `vllm/model_executor/models/llama.py:486` [query=LlamaForCausalLM]",
+          "- 2. `_TEXT_GENERATION_MODELS` \u2192 `vllm/model_executor/models/registry.py:71` [query=_TEXT_GENERATION_MODELS]",
+          "- 3. `model registry` \u2192 `vllm/models/deepseek_v4/__init__.py:7` [query=model registry]",
+          "",
+          "Agent follow-ups",
+          "- 1. `_get_config_dtype_str` \u2192 `vllm/model_executor/layers/fused_moe/config.py:36` [from=config.tie_word_embeddings]",
+          "- 2. `QuantizeMethodBase.tie_weights` \u2192 `vllm/model_executor/layers/quantization/base_config.py:51` [from=lm_head.tie_weights]",
+          "- 3. `AXK1ForCausalLM.embed_input_ids` \u2192 `vllm/model_executor/models/AXK1.py:1111` [from=model.embed_input_ids]",
+          "- 4. `Gemma3nTextModel.embed_tokens` \u2192 `vllm/model_executor/models/gemma3n.py:879` [from=model.embed_tokens]",
+          "- 5. `AfmoeModel.make_empty_intermediate_tensors` \u2192 `vllm/model_executor/models/afmoe.py:469` [from=model.make_empty_intermediate_tensors]"
+        ],
+        "unique_files": 8,
+        "seed_hits": 3,
+        "expansion_hits": 6,
+        "expansion_symbols": [
+          "config.tie_word_embeddings",
+          "lm_head.tie_weights",
+          "model.embed_input_ids",
+          "model.embed_tokens",
+          "model.make_empty_intermediate_tensors",
+          "embed_input_ids"
+        ]
+      },
+      "rg_baseline": {
+        "matched_required": 1,
+        "total_required": 2,
+        "coverage": 0.5,
+        "ordered_score": 1.0,
+        "score": 65,
+        "required_positions": [
+          51,
+          -1
+        ],
+        "tokens": 2458,
+        "time_ms": 45.62,
+        "preview": [
+          "[rg+read baseline: `search_model_llama`]",
+          "",
+          "## query=LlamaForCausalLM",
+          "/data/vllm/tests/basic_correctness/test_mem.py:127:     [",
+          "/data/vllm/tests/basic_correctness/test_mem.py:128:         # sleep mode with safetensors",
+          "/data/vllm/tests/basic_correctness/test_mem.py:129:         \"hmellor/tiny-random-LlamaForCausalLM\",",
+          "/data/vllm/tests/basic_correctness/test_mem.py:130:         # sleep mode with pytorch checkpoint",
+          "/data/vllm/tests/basic_correctness/test_mem.py:131:         \"facebook/opt-125m\",",
+          "",
+          "## query=LlamaForCausalLM",
+          "/data/vllm/tests/basic_correctness/test_mem.py:181: @create_new_process_for_each_test()",
+          "/data/vllm/tests/basic_correctness/test_mem.py:182: def test_deep_sleep():"
+        ],
+        "query_hit_counts": {
+          "LlamaForCausalLM": 122,
+          "_TEXT_GENERATION_MODELS": 9,
+          "model registry": 3
+        },
+        "unique_files": 8,
+        "snippet_count": 18
+      }
+    },
+    {
+      "id": "search_backend_flash_attn",
+      "category": "search",
+      "description": "Find the FLASH_ATTN backend registration surface.",
+      "tool_name": "search",
+      "torchtalk": {
+        "matched_required": 2,
+        "total_required": 2,
+        "coverage": 1.0,
+        "ordered_score": 1.0,
+        "score": 100,
+        "required_positions": [
+          15,
+          107
+        ],
+        "tokens": 54,
+        "time_ms": 3.41,
+        "preview": [
+          "[vLLM Search: `FLASH_ATTN` (backends)]",
+          "Found 1 result(s)",
+          "",
+          "- **FLASH_ATTN** [attention_backends] \u2192 `vllm/v1/attention/backends/registry.py:44`",
+          "  - backend_group=attention"
+        ]
+      },
+      "source_guided": {
+        "matched_required": 2,
+        "total_required": 2,
+        "coverage": 1.0,
+        "ordered_score": 1.0,
+        "score": 100,
+        "required_positions": [
+          51,
+          709
+        ],
+        "tokens": 366,
+        "time_ms": 600.46,
+        "preview": [
+          "[source-guided navigator baseline: `search_backend_flash_attn`]",
+          "Seed resolution",
+          "- 1. `FlashAttnPrefillBackend._flash_attn_varlen_diff_headdims` \u2192 `vllm/v1/attention/backends/mla/prefill/flash_attn.py:104` [query=FLASH_ATTN]",
+          "- 2. `CpuPlatform.get_attn_backend_cls` \u2192 `vllm/platforms/cpu.py:75` [query=get_attn_backend_cls]",
+          "- 3. `AttentionConfig` \u2192 `vllm/config/attention.py:20` [query=attention backend]",
+          "",
+          "Agent follow-ups",
+          "- 1. `AiterTritonMLAImpl._flash_attn_varlen_diff_headdims` \u2192 `vllm/v1/attention/backends/mla/aiter_triton_mla.py:49` [from=_flash_attn_varlen_diff_headdims]",
+          "- 2. `VLLM_BATCH_INVARIANT` \u2192 `csrc/core/batch_invariant.hpp:8` [from=VLLM_BATCH_INVARIANT]",
+          "- 3. `AttentionBackendEnum` \u2192 `vllm/v1/attention/backends/registry.py:34` [from=AttentionBackendEnum.CPU_ATTN]",
+          "- 4. `cpu_attn_get_scheduler_metadata` \u2192 `vllm/_custom_ops.py:3619` [from=CPU_ATTN]",
+          "- 5. `CPUWNA16LinearKernel` \u2192 `vllm/model_executor/kernels/linear/mixed_precision/cpu.py:20` [from=CPU]"
+        ],
+        "unique_files": 9,
+        "seed_hits": 3,
+        "expansion_hits": 6,
+        "expansion_symbols": [
+          "_flash_attn_varlen_diff_headdims",
+          "VLLM_BATCH_INVARIANT",
+          "AttentionBackendEnum.CPU_ATTN",
+          "CPU_ATTN",
+          "CPU",
+          "MLA"
+        ]
+      },
+      "rg_baseline": {
+        "matched_required": 1,
+        "total_required": 2,
+        "coverage": 0.5,
+        "ordered_score": 1.0,
+        "score": 65,
+        "required_positions": [
+          35,
+          -1
+        ],
+        "tokens": 2256,
+        "time_ms": 46.32,
+        "preview": [
+          "[rg+read baseline: `search_backend_flash_attn`]",
+          "",
+          "## query=FLASH_ATTN",
+          "/data/vllm/vllm/_xpu_ops.py:6: ",
+          "/data/vllm/vllm/_xpu_ops.py:7: import torch",
+          "/data/vllm/vllm/_xpu_ops.py:8: from vllm_xpu_kernels.flash_attn_interface import flash_attn_varlen_func",
+          "/data/vllm/vllm/_xpu_ops.py:9: ",
+          "/data/vllm/vllm/_xpu_ops.py:10: from vllm.logger import init_logger",
+          "",
+          "## query=FLASH_ATTN",
+          "/data/vllm/vllm/_xpu_ops.py:756: ",
+          "/data/vllm/vllm/_xpu_ops.py:757:     @staticmethod"
+        ],
+        "query_hit_counts": {
+          "FLASH_ATTN": 356,
+          "get_attn_backend_cls": 12,
+          "attention backend": 212
+        },
+        "unique_files": 6,
+        "snippet_count": 18
+      }
+    },
+    {
+      "id": "search_ir_rms_norm",
+      "category": "search",
+      "description": "Find the RMSNorm IR op and its vllm_c provider.",
+      "tool_name": "search",
+      "torchtalk": {
+        "matched_required": 2,
+        "total_required": 2,
+        "coverage": 1.0,
+        "ordered_score": 1.0,
+        "score": 100,
+        "required_positions": [
+          15,
+          286
+        ],
+        "tokens": 213,
+        "time_ms": 3.27,
+        "preview": [
+          "[vLLM Search: `rms_norm` (ops)]",
+          "Found 6 result(s)",
+          "",
+          "- **rms_norm** [ir_ops] \u2192 `vllm/ir/ops/layernorm.py:10`",
+          "- **rms_norm::aiter** [ir_providers] \u2192 `vllm/kernels/aiter_ops.py:46`",
+          "  - provider=aiter",
+          "- **rms_norm::oink** [ir_providers] \u2192 `vllm/kernels/oink_ops.py:76`",
+          "  - provider=oink",
+          "- **rms_norm::vllm_c** [ir_providers] \u2192 `vllm/kernels/vllm_c.py:22`",
+          "  - provider=vllm_c",
+          "- **rms_norm::xpu_kernels** [ir_providers] \u2192 `vllm/kernels/xpu_ops.py:26`",
+          "  - provider=xpu_kernels"
+        ]
+      },
+      "source_guided": {
+        "matched_required": 2,
+        "total_required": 2,
+        "coverage": 1.0,
+        "ordered_score": 1.0,
+        "score": 100,
+        "required_positions": [
+          46,
+          233
+        ],
+        "tokens": 177,
+        "time_ms": 562.08,
+        "preview": [
+          "[source-guided navigator baseline: `search_ir_rms_norm`]",
+          "Seed resolution",
+          "- 1. `rms_norm` \u2192 `vllm/ir/ops/layernorm.py:10` [query=rms_norm]",
+          "- 2. `IrOp.register_impl` \u2192 `vllm/ir/op.py:244` [query=register_impl]",
+          "- 3. `vllm_c::vllm_c` \u2192 `vllm/kernels/vllm_c.py:23` [query=vllm_c]",
+          "",
+          "Agent follow-ups",
+          "- 1. `RESERVED_PROVIDERS` \u2192 `vllm/ir/op.py:36` [from=RESERVED_PROVIDERS]",
+          "- 2. `Platform.is_cuda_alike` \u2192 `vllm/platforms/interface.py:193` [from=CUDA_ALIKE]"
+        ],
+        "unique_files": 4,
+        "seed_hits": 3,
+        "expansion_hits": 2,
+        "expansion_symbols": [
+          "RESERVED_PROVIDERS",
+          "CUDA_ALIKE"
+        ]
+      },
+      "rg_baseline": {
+        "matched_required": 1,
+        "total_required": 2,
+        "coverage": 0.5,
+        "ordered_score": 1.0,
+        "score": 65,
+        "required_positions": [
+          30,
+          -1
+        ],
+        "tokens": 2456,
+        "time_ms": 53.48,
+        "preview": [
+          "[rg+read baseline: `search_ir_rms_norm`]",
+          "",
+          "## query=rms_norm",
+          "/data/vllm/scripts/autotune_helion_kernels.py:13: ",
+          "/data/vllm/scripts/autotune_helion_kernels.py:14:     # Autotune multiple kernels",
+          "/data/vllm/scripts/autotune_helion_kernels.py:15:     python scripts/autotune_helion_kernels.py --kernels silu_mul_fp8 rms_norm_fp8",
+          "/data/vllm/scripts/autotune_helion_kernels.py:16: ",
+          "/data/vllm/scripts/autotune_helion_kernels.py:17:     # Force re-autotuning",
+          "",
+          "## query=rms_norm",
+          "/data/vllm/tests/utils_/test_argparse_utils.py:194:         \"-cc.custom_ops+\",",
+          "/data/vllm/tests/utils_/test_argparse_utils.py:195:         \"-quant_fp8\","
+        ],
+        "query_hit_counts": {
+          "rms_norm": 1006,
+          "register_impl": 20,
+          "vllm_c": 4083
+        },
+        "unique_files": 7,
+        "snippet_count": 18
+      }
+    },
+    {
+      "id": "search_binding_rms_norm",
+      "category": "search",
+      "description": "Find the RMSNorm torch custom-op binding.",
+      "tool_name": "search",
+      "torchtalk": {
+        "matched_required": 2,
+        "total_required": 2,
+        "coverage": 1.0,
+        "ordered_score": 1.0,
+        "score": 100,
+        "required_positions": [
+          132,
+          196
+        ],
+        "tokens": 86,
+        "time_ms": 2.93,
+        "preview": [
+          "[vLLM Search: `rms_norm`]",
+          "Found 2 result(s)",
+          "",
+          "- **rms_norm** [torch_custom_ops] \u2192 `csrc/cpu/torch_bindings.cpp:312`",
+          "  - torch_symbol=torch.ops._C.rms_norm",
+          "- **rms_norm** [torch_custom_ops] \u2192 `csrc/libtorch_stable/torch_bindings.cpp:371`",
+          "  - torch_symbol=torch.ops._C.rms_norm"
+        ]
+      },
+      "source_guided": {
+        "matched_required": 1,
+        "total_required": 2,
+        "coverage": 0.5,
+        "ordered_score": 1.0,
+        "score": 65,
+        "required_positions": [
+          84,
+          -1
+        ],
+        "tokens": 253,
+        "time_ms": 507.72,
+        "preview": [
+          "[source-guided navigator baseline: `search_binding_rms_norm`]",
+          "Seed resolution",
+          "- 1. `torch.ops._C.rms_norm` \u2192 `vllm/kernels/vllm_c.py:25` [query=torch.ops._C.rms_norm]",
+          "- 2. `rms_norm` \u2192 `vllm/ir/ops/layernorm.py:10` [query=rms_norm]",
+          "- 3. `_apply_cpp_indirect_assert_patch` \u2192 `vllm/env_override.py:660` [query=torch_bindings.cpp]",
+          "",
+          "Agent follow-ups",
+          "- 1. `Platform.is_rocm` \u2192 `vllm/platforms/interface.py:165` [from=IS_ROCM]",
+          "- 2. `_apply_cpp_indirect_assert_patch` \u2192 `vllm/env_override.py:714` [from=CppVecKernel._vllm_indirect_assert_patched]",
+          "- 3. `patched_indirect_assert` \u2192 `vllm/env_override.py:674` [from=CppVecKernel.indirect_assert]",
+          "- 4. `_patch_cpp_indirect_assert_if_needed` \u2192 `vllm/env_override.py:735` [from=_apply_cpp_indirect_assert_patch]"
+        ],
+        "unique_files": 4,
+        "seed_hits": 3,
+        "expansion_hits": 4,
+        "expansion_symbols": [
+          "IS_ROCM",
+          "CppVecKernel._vllm_indirect_assert_patched",
+          "CppVecKernel.indirect_assert",
+          "_apply_cpp_indirect_assert_patch"
+        ]
+      },
+      "rg_baseline": {
+        "matched_required": 1,
+        "total_required": 2,
+        "coverage": 0.5,
+        "ordered_score": 1.0,
+        "score": 65,
+        "required_positions": [
+          56,
+          -1
+        ],
+        "tokens": 2812,
+        "time_ms": 46.34,
+        "preview": [
+          "[rg+read baseline: `search_binding_rms_norm`]",
+          "",
+          "## query=torch.ops._C.rms_norm",
+          "/data/vllm/tests/kernels/core/test_layernorm.py:83:     else:",
+          "/data/vllm/tests/kernels/core/test_layernorm.py:84:         opcheck(",
+          "/data/vllm/tests/kernels/core/test_layernorm.py:85:             torch.ops._C.rms_norm, (out, x, layer.weight.data, layer.variance_epsilon)",
+          "/data/vllm/tests/kernels/core/test_layernorm.py:86:         )",
+          "/data/vllm/tests/kernels/core/test_layernorm.py:87: ",
+          "",
+          "## query=torch.ops._C.rms_norm",
+          "/data/vllm/tests/kernels/core/test_layernorm.py:125:     else:",
+          "/data/vllm/tests/kernels/core/test_layernorm.py:126:         opcheck("
+        ],
+        "query_hit_counts": {
+          "torch.ops._C.rms_norm": 26,
+          "rms_norm": 1006,
+          "torch_bindings.cpp": 10
+        },
+        "unique_files": 9,
+        "snippet_count": 18
+      }
+    },
+    {
+      "id": "search_moe_ops",
+      "category": "search",
+      "description": "Find the fused-MoE operator family surface.",
+      "tool_name": "search",
+      "torchtalk": {
+        "matched_required": 2,
+        "total_required": 2,
+        "coverage": 1.0,
+        "ordered_score": 1.0,
+        "score": 100,
+        "required_positions": [
+          164,
+          111
+        ],
+        "tokens": 128,
+        "time_ms": 5.94,
+        "preview": [
+          "[vLLM Search: `FusedMoE` (ops)]",
+          "Found 3 result(s)",
+          "",
+          "- **modular_fused_moe** [custom_ops] \u2192 `vllm/model_executor/layers/fused_moe/fused_moe_modular_method.py:34`",
+          "- **unquantized_fused_moe** [custom_ops] \u2192 `vllm/model_executor/layers/fused_moe/unquantized_fused_moe_method.py:46`",
+          "- **transformers_fused_moe** [pluggable_layers] \u2192 `vllm/model_executor/models/transformers/moe.py:55`"
+        ]
+      },
+      "source_guided": {
+        "matched_required": 2,
+        "total_required": 2,
+        "coverage": 1.0,
+        "ordered_score": 1.0,
+        "score": 100,
+        "required_positions": [
+          183,
+          125
+        ],
+        "tokens": 367,
+        "time_ms": 263.57,
+        "preview": [
+          "[source-guided navigator baseline: `search_moe_ops`]",
+          "Seed resolution",
+          "- 1. `fused_moe_kernel_gptq_awq` \u2192 `vllm/model_executor/layers/fused_moe/fused_moe.py:59` [query=fused_moe]",
+          "- 2. `unquantized_fused_moe` \u2192 `vllm/model_executor/layers/fused_moe/__init__.py:44` [query=unquantized_fused_moe]",
+          "- 3. `moe_sum` \u2192 `vllm/_custom_ops.py:2228` [query=moe_sum]",
+          "",
+          "Agent follow-ups",
+          "- 1. `BLOCK_SIZE_K` \u2192 `csrc/libtorch_stable/moe/moe_align_sum_kernels.cu:555` [from=BLOCK_SIZE_K]",
+          "- 2. `BLOCK_SIZE_M` \u2192 `csrc/libtorch_stable/moe/moe_wna16.cu:40` [from=BLOCK_SIZE_M]",
+          "- 3. `BLOCK_SIZE_N` \u2192 `csrc/libtorch_stable/moe/moe_wna16.cu:42` [from=BLOCK_SIZE_N]",
+          "- 4. `_compute_pid` \u2192 `vllm/model_executor/layers/batch_invariant.py:32` [from=GROUP_SIZE_M]",
+          "- 5. `_fused_moe_lora_shrink_fp8` \u2192 `vllm/lora/ops/triton_ops/fused_moe_lora_fp8_op.py:376` [from=MUL_ROUTED_WEIGHT]"
+        ],
+        "unique_files": 8,
+        "seed_hits": 3,
+        "expansion_hits": 6,
+        "expansion_symbols": [
+          "BLOCK_SIZE_K",
+          "BLOCK_SIZE_M",
+          "BLOCK_SIZE_N",
+          "GROUP_SIZE_M",
+          "MUL_ROUTED_WEIGHT",
+          "SPLIT_K"
+        ]
+      },
+      "rg_baseline": {
+        "matched_required": 0,
+        "total_required": 2,
+        "coverage": 0.0,
+        "ordered_score": 1.0,
+        "score": 30,
+        "required_positions": [
+          -1,
+          -1
+        ],
+        "tokens": 2457,
+        "time_ms": 47.9,
+        "preview": [
+          "[rg+read baseline: `search_moe_ops`]",
+          "",
+          "## query=fused_moe",
+          "/data/vllm/vllm/distributed/elastic_ep/elastic_execute.py:40: from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator",
+          "/data/vllm/vllm/distributed/elastic_ep/elastic_execute.py:41: from vllm.logger import init_logger",
+          "/data/vllm/vllm/distributed/elastic_ep/elastic_execute.py:42: from vllm.model_executor.layers.fused_moe.config import FusedMoEParallelConfig",
+          "/data/vllm/vllm/distributed/elastic_ep/elastic_execute.py:43: from vllm.model_executor.layers.fused_moe.eep_reconfigure import (",
+          "/data/vllm/vllm/distributed/elastic_ep/elastic_execute.py:44:     make_eep_staged_quant_method,",
+          "",
+          "## query=fused_moe",
+          "/data/vllm/vllm/distributed/elastic_ep/elastic_execute.py:41: from vllm.logger import init_logger",
+          "/data/vllm/vllm/distributed/elastic_ep/elastic_execute.py:42: from vllm.model_executor.layers.fused_moe.config import FusedMoEParallelConfig"
+        ],
+        "query_hit_counts": {
+          "fused_moe": 1152,
+          "unquantized_fused_moe": 9,
+          "moe_sum": 40
+        },
+        "unique_files": 6,
+        "snippet_count": 18
+      }
+    },
+    {
+      "id": "trace_offline_generate",
+      "category": "trace",
+      "description": "Trace offline LLM.generate through the execution spine.",
+      "tool_name": "trace",
+      "torchtalk": {
+        "matched_required": 9,
+        "total_required": 9,
+        "coverage": 1.0,
+        "ordered_score": 1.0,
+        "score": 100,
+        "required_positions": [
+          14,
+          164,
+          312,
+          469,
+          614,
+          741,
+          881,
+          967,
+          1111
+        ],
+        "tokens": 361,
+        "time_ms": 3.14,
+        "preview": [
+          "[vLLM Trace: `LLM.generate`]",
+          "Offline LLM.generate()",
+          "- 1. `LLM.generate` [api_entrypoints] \u2192 `vllm/entrypoints/llm.py:422`",
+          "  - conditions=none confidence=high",
+          "- 2. `OfflineInferenceMixin._run_completion` [request_pipeline_nodes] \u2192 `vllm/entrypoints/offline_utils.py:326`",
+          "  - conditions=none confidence=high",
+          "- 3. `OfflineInferenceMixin._add_completion_requests` [request_pipeline_nodes] \u2192 `vllm/entrypoints/offline_utils.py:290`",
+          "  - conditions=none confidence=high",
+          "- 4. `OfflineInferenceMixin._add_request` [request_pipeline_nodes] \u2192 `vllm/entrypoints/offline_utils.py:552`",
+          "  - conditions=none confidence=high",
+          "- 5. `LLMEngine.add_request` [request_pipeline_nodes] \u2192 `vllm/v1/engine/llm_engine.py:218`",
+          "  - conditions=none confidence=high"
+        ]
+      },
+      "source_guided": {
+        "matched_required": 8,
+        "total_required": 9,
+        "coverage": 0.8889,
+        "ordered_score": 0.0,
+        "score": 62,
+        "required_positions": [
+          162,
+          182,
+          293,
+          422,
+          527,
+          623,
+          725,
+          -1,
+          817
+        ],
+        "tokens": 527,
+        "time_ms": 4735.81,
+        "preview": [
+          "[source-guided navigator baseline: `trace_offline_generate`]",
+          "Seed resolution",
+          "- 1. `generate` \u2192 `csrc/libtorch_stable/quantization/machete/generate.py:498` [query=LLM.generate]",
+          "- 2. `OfflineInferenceMixin._run_completion` \u2192 `vllm/entrypoints/offline_utils.py:326` [query=_run_completion]",
+          "- 3. `OfflineInferenceMixin._add_completion_requests` \u2192 `vllm/entrypoints/offline_utils.py:290` [query=_add_completion_requests]",
+          "- 4. `OfflineInferenceMixin._add_request` \u2192 `vllm/entrypoints/offline_utils.py:552` [query=_add_request]",
+          "- 5. `LLMEngine.add_request` \u2192 `vllm/v1/engine/llm_engine.py:218` [query=LLMEngine.add_request]",
+          "- 6. `InputProcessor.process_inputs` \u2192 `vllm/v1/engine/input_processor.py:242` [query=process_inputs]",
+          "- 7. `EngineCore.add_request` \u2192 `vllm/v1/engine/core.py:372` [query=EngineCore.add_request]",
+          "- 8. `LLMEngine.step` \u2192 `vllm/v1/engine/llm_engine.py:296` [query=LLMEngine.step]",
+          "",
+          "Agent follow-ups"
+        ],
+        "unique_files": 11,
+        "seed_hits": 8,
+        "expansion_hits": 6,
+        "expansion_symbols": [
+          "DataType.bf16",
+          "DataType.e4m3",
+          "DataType.f16",
+          "DataType.f32",
+          "DataType.s32",
+          "DataType.void"
+        ]
+      },
+      "rg_baseline": {
+        "matched_required": 1,
+        "total_required": 9,
+        "coverage": 0.1111,
+        "ordered_score": 0.0,
+        "score": 8,
+        "required_positions": [
+          55,
+          -1,
+          -1,
+          -1,
+          -1,
+          -1,
+          -1,
+          -1,
+          -1
+        ],
+        "tokens": 2545,
+        "time_ms": 119.98,
+        "preview": [
+          "[rg+read baseline: `trace_offline_generate`]",
+          "",
+          "## query=LLM.generate",
+          "/data/vllm/examples/basic/offline_inference/basic.py:21:     # The output is a list of RequestOutput objects",
+          "/data/vllm/examples/basic/offline_inference/basic.py:22:     # that contain the prompt, generated text, and other information.",
+          "/data/vllm/examples/basic/offline_inference/basic.py:23:     outputs = llm.generate(prompts, sampling_params)",
+          "/data/vllm/examples/basic/offline_inference/basic.py:24:     # Print the outputs.",
+          "/data/vllm/examples/basic/offline_inference/basic.py:25:     print(\"\\nGenerated Outputs:\\n\" + \"-\" * 60)",
+          "",
+          "## query=LLM.generate",
+          "/data/vllm/examples/generate/qwen_1m_offline.py:37:     )",
+          "/data/vllm/examples/generate/qwen_1m_offline.py:38:     # Generate texts from the prompts."
+        ],
+        "query_hit_counts": {
+          "LLM.generate": 320,
+          "_run_completion": 6,
+          "_add_completion_requests": 9,
+          "_add_request": 46,
+          "LLMEngine.add_request": 8,
+          "process_inputs": 13,
+          "EngineCore.add_request": 1,
+          "LLMEngine.step": 0
+        },
+        "unique_files": 17,
+        "snippet_count": 18
+      }
+    },
+    {
+      "id": "trace_chat_completion_rms_norm",
+      "category": "trace",
+      "description": "Trace chat completion down to the RMSNorm/native-binding path.",
+      "tool_name": "trace",
+      "torchtalk": {
+        "matched_required": 10,
+        "total_required": 10,
+        "coverage": 1.0,
+        "ordered_score": 1.0,
+        "score": 100,
+        "required_positions": [
+          14,
+          254,
+          376,
+          501,
+          641,
+          763,
+          890,
+          1016,
+          1123,
+          1245
+        ],
+        "tokens": 463,
+        "time_ms": 3.62,
+        "preview": [
+          "[vLLM Trace: `OpenAIServingChat._create_chat_completion`]",
+          "Chat completion to rms_norm",
+          "- 1. `OpenAIServingChat._create_chat_completion` [api_entrypoints] \u2192 `vllm/entrypoints/openai/chat_completion/serving.py:251`",
+          "  - conditions=none confidence=high",
+          "- 2. `AsyncLLM.generate` [request_pipeline_nodes] \u2192 `vllm/v1/engine/async_llm.py:524`",
+          "  - conditions=none confidence=high",
+          "- 3. `AsyncLLM.add_request` [request_pipeline_nodes] \u2192 `vllm/v1/engine/async_llm.py:280`",
+          "  - conditions=none confidence=high",
+          "- 4. `InputProcessor.process_inputs` [request_pipeline_nodes] \u2192 `vllm/v1/engine/input_processor.py:242`",
+          "  - conditions=none confidence=high",
+          "- 5. `EngineCore.add_request` [request_pipeline_nodes] \u2192 `vllm/v1/engine/core.py:372`",
+          "  - conditions=none confidence=high"
+        ]
+      },
+      "source_guided": {
+        "matched_required": 7,
+        "total_required": 10,
+        "coverage": 0.7,
+        "ordered_score": 0.0,
+        "score": 49,
+        "required_positions": [
+          91,
+          310,
+          -1,
+          335,
+          -1,
+          437,
+          530,
+          651,
+          -1,
+          703
+        ],
+        "tokens": 462,
+        "time_ms": 2084.05,
+        "preview": [
+          "[source-guided navigator baseline: `trace_chat_completion_rms_norm`]",
+          "Seed resolution",
+          "- 1. `OpenAIServingChat._create_chat_completion` \u2192 `vllm/entrypoints/openai/chat_completion/serving.py:251` [query=_create_chat_completion]",
+          "- 2. `generate` \u2192 `csrc/libtorch_stable/quantization/machete/generate.py:498` [query=AsyncLLM.generate]",
+          "- 3. `InputProcessor.process_inputs` \u2192 `vllm/v1/engine/input_processor.py:242` [query=process_inputs]",
+          "- 4. `Scheduler.schedule` \u2192 `vllm/v1/core/sched/scheduler.py:387` [query=Scheduler.schedule]",
+          "- 5. `RMSNorm.forward_native` \u2192 `vllm/model_executor/layers/layernorm.py:74` [query=RMSNorm.forward_native]",
+          "- 6. `rms_norm` \u2192 `vllm/ir/ops/layernorm.py:10` [query=rms_norm]",
+          "- 7. `torch.ops._C.rms_norm` \u2192 `vllm/kernels/vllm_c.py:25` [query=torch.ops._C.rms_norm]",
+          "",
+          "Agent follow-ups",
+          "- 1. `generate_sch_sig` \u2192 `csrc/libtorch_stable/quantization/machete/generate.py:285` [from=engine_client.generate]"
+        ],
+        "unique_files": 12,
+        "seed_hits": 7,
+        "expansion_hits": 6,
+        "expansion_symbols": [
+          "engine_client.generate",
+          "model_config.max_model_len",
+          "models.model_name",
+          "renderer.tokenizer",
+          "max_model_len",
+          "model_name"
+        ]
+      },
+      "rg_baseline": {
+        "matched_required": 1,
+        "total_required": 10,
+        "coverage": 0.1,
+        "ordered_score": 0.0,
+        "score": 7,
+        "required_positions": [
+          -1,
+          7901,
+          -1,
+          -1,
+          -1,
+          -1,
+          -1,
+          -1,
+          -1,
+          -1
+        ],
+        "tokens": 2691,
+        "time_ms": 101.82,
+        "preview": [
+          "[rg+read baseline: `trace_chat_completion_rms_norm`]",
+          "",
+          "## query=_create_chat_completion",
+          "/data/vllm/examples/disaggregated/disaggregated_serving/disagg_proxy_pushconnector_demo.py:91:         prefill_tp_size: int,",
+          "/data/vllm/examples/disaggregated/disaggregated_serving/disagg_proxy_pushconnector_demo.py:92:         custom_create_completion: Callable[[Request], StreamingResponse] | None = None,",
+          "/data/vllm/examples/disaggregated/disaggregated_serving/disagg_proxy_pushconnector_demo.py:93:         custom_create_chat_completion: Callable[[Request], StreamingResponse]",
+          "/data/vllm/examples/disaggregated/disaggregated_serving/disagg_proxy_pushconnector_demo.py:94:         | None = None,",
+          "/data/vllm/examples/disaggregated/disaggregated_serving/disagg_proxy_pushconnector_demo.py:95:     ):",
+          "",
+          "## query=_create_chat_completion",
+          "/data/vllm/examples/disaggregated/disaggregated_serving/disagg_proxy_pushconnector_demo.py:114: ",
+          "/data/vllm/examples/disaggregated/disaggregated_serving/disagg_proxy_pushconnector_demo.py:115:         self.custom_create_completion = custom_create_completion"
+        ],
+        "query_hit_counts": {
+          "_create_chat_completion": 12,
+          "AsyncLLM.generate": 5,
+          "process_inputs": 13,
+          "Scheduler.schedule": 83,
+          "RMSNorm.forward_native": 0,
+          "rms_norm": 1006,
+          "torch.ops._C.rms_norm": 26
+        },
+        "unique_files": 8,
+        "snippet_count": 18
+      }
+    },
+    {
+      "id": "trace_pooling_encode",
+      "category": "trace",
+      "description": "Trace pooling encode through the shared request spine.",
+      "tool_name": "trace",
+      "torchtalk": {
+        "matched_required": 5,
+        "total_required": 5,
+        "coverage": 1.0,
+        "ordered_score": 1.0,
+        "score": 100,
+        "required_positions": [
+          14,
+          247,
+          384,
+          509,
+          649
+        ],
+        "tokens": 223,
+        "time_ms": 3.4,
+        "preview": [
+          "[vLLM Trace: `PoolingServingBase._prepare_generators`]",
+          "Pooling encode flow",
+          "- 1. `PoolingServingBase._prepare_generators` [api_entrypoints] \u2192 `vllm/entrypoints/pooling/base/serving.py:124`",
+          "  - conditions=[runner_type=pooling] confidence=high",
+          "- 2. `AsyncLLM.encode` [request_pipeline_nodes] \u2192 `vllm/v1/engine/async_llm.py:803`",
+          "  - conditions=[runner_type=pooling] confidence=high",
+          "- 3. `AsyncLLM.add_request` [request_pipeline_nodes] \u2192 `vllm/v1/engine/async_llm.py:280`",
+          "  - conditions=none confidence=high",
+          "- 4. `InputProcessor.process_inputs` [request_pipeline_nodes] \u2192 `vllm/v1/engine/input_processor.py:242`",
+          "  - conditions=none confidence=high",
+          "- 5. `EngineCore.add_request` [request_pipeline_nodes] \u2192 `vllm/v1/engine/core.py:372`"
+        ]
+      },
+      "source_guided": {
+        "matched_required": 5,
+        "total_required": 5,
+        "coverage": 1.0,
+        "ordered_score": 1.0,
+        "score": 100,
+        "required_positions": [
+          81,
+          204,
+          287,
+          380,
+          482
+        ],
+        "tokens": 412,
+        "time_ms": 1121.29,
+        "preview": [
+          "[source-guided navigator baseline: `trace_pooling_encode`]",
+          "Seed resolution",
+          "- 1. `PoolingServingBase._prepare_generators` \u2192 `vllm/entrypoints/pooling/base/serving.py:124` [query=_prepare_generators]",
+          "- 2. `AsyncLLM.encode` \u2192 `vllm/v1/engine/async_llm.py:803` [query=AsyncLLM.encode]",
+          "- 3. `AsyncLLM.add_request` \u2192 `vllm/v1/engine/async_llm.py:280` [query=AsyncLLM.add_request]",
+          "- 4. `InputProcessor.process_inputs` \u2192 `vllm/v1/engine/input_processor.py:242` [query=process_inputs]",
+          "- 5. `EngineCore.add_request` \u2192 `vllm/v1/engine/core.py:372` [query=EngineCore.add_request]",
+          "",
+          "Agent follow-ups",
+          "- 1. `get_oneapi_ccl_version` \u2192 `vllm/collect_env.py:384` [from=API]",
+          "- 2. `EngineCoreRequest` \u2192 `vllm/v1/engine/__init__.py:86` [from=EngineCoreRequest.request_id]",
+          "- 3. `OpenAIServingRender.render_chat` \u2192 `vllm/entrypoints/serve/render/serving.py:280` [from=Renderer.render_chat]"
+        ],
+        "unique_files": 10,
+        "seed_hits": 5,
+        "expansion_hits": 6,
+        "expansion_symbols": [
+          "API",
+          "EngineCoreRequest.request_id",
+          "Renderer.render_chat",
+          "Renderer.render_cmpl",
+          "AsyncLLM.generate",
+          "cache_config.kv_sharing_fast_prefill"
+        ]
+      },
+      "rg_baseline": {
+        "matched_required": 1,
+        "total_required": 5,
+        "coverage": 0.2,
+        "ordered_score": 0.0,
+        "score": 14,
+        "required_positions": [
+          -1,
+          -1,
+          1992,
+          -1,
+          -1
+        ],
+        "tokens": 2365,
+        "time_ms": 73.95,
+        "preview": [
+          "[rg+read baseline: `trace_pooling_encode`]",
+          "",
+          "## query=_prepare_generators",
+          "/data/vllm/vllm/entrypoints/pooling/scoring/serving.py:240:         )",
+          "/data/vllm/vllm/entrypoints/pooling/scoring/serving.py:241: ",
+          "/data/vllm/vllm/entrypoints/pooling/scoring/serving.py:242:         await self._prepare_generators(query_ctx)",
+          "/data/vllm/vllm/entrypoints/pooling/scoring/serving.py:243:         await self._collect_batch(query_ctx)",
+          "/data/vllm/vllm/entrypoints/pooling/scoring/serving.py:244:         ctx.query_final_res_batch = query_ctx.final_res_batch",
+          "",
+          "## query=_prepare_generators",
+          "/data/vllm/vllm/entrypoints/pooling/scoring/serving.py:282:         )",
+          "/data/vllm/vllm/entrypoints/pooling/scoring/serving.py:283: "
+        ],
+        "query_hit_counts": {
+          "_prepare_generators": 4,
+          "AsyncLLM.encode": 0,
+          "AsyncLLM.add_request": 7,
+          "process_inputs": 13,
+          "EngineCore.add_request": 1
+        },
+        "unique_files": 7,
+        "snippet_count": 18
+      }
+    },
+    {
+      "id": "trace_moe_family",
+      "category": "trace",
+      "description": "Trace one fused-MoE family path into the native binding layer.",
+      "tool_name": "trace",
+      "torchtalk": {
+        "matched_required": 2,
+        "total_required": 2,
+        "coverage": 1.0,
+        "ordered_score": 1.0,
+        "score": 100,
+        "required_positions": [
+          14,
+          247
+        ],
+        "tokens": 108,
+        "time_ms": 3.57,
+        "preview": [
+          "[vLLM Trace: `unquantized_fused_moe`]",
+          "One fused_moe family path",
+          "- 1. `unquantized_fused_moe` [custom_ops] \u2192 `vllm/model_executor/layers/fused_moe/unquantized_fused_moe_method.py:46`",
+          "  - conditions=[backend_family=moe] confidence=conditional",
+          "- 2. `moe_sum` [torch_custom_ops] \u2192 `csrc/libtorch_stable/moe/torch_bindings.cpp:27`"
+        ]
+      },
+      "source_guided": {
+        "matched_required": 2,
+        "total_required": 2,
+        "coverage": 1.0,
+        "ordered_score": 1.0,
+        "score": 100,
+        "required_positions": [
+          77,
+          192
+        ],
+        "tokens": 172,
+        "time_ms": 46.93,
+        "preview": [
+          "[source-guided navigator baseline: `trace_moe_family`]",
+          "Seed resolution",
+          "- 1. `unquantized_fused_moe` \u2192 `vllm/model_executor/layers/fused_moe/__init__.py:44` [query=unquantized_fused_moe]",
+          "- 2. `moe_sum` \u2192 `vllm/_custom_ops.py:2228` [query=moe_sum]",
+          "- 3. `torch.ops._C.moe_sum` \u2192 `vllm/model_executor/layers/fused_moe/experts/flashinfer_cutlass_moe.py:404` [query=torch.ops._C.moe_sum]",
+          "",
+          "Agent follow-ups",
+          "- 1. `has_triton_kernels` \u2192 `vllm/utils/import_utils.py:490` [from=HAS_TRITON]"
+        ],
+        "unique_files": 4,
+        "seed_hits": 3,
+        "expansion_hits": 1,
+        "expansion_symbols": [
+          "HAS_TRITON"
+        ]
+      },
+      "rg_baseline": {
+        "matched_required": 2,
+        "total_required": 2,
+        "coverage": 1.0,
+        "ordered_score": 1.0,
+        "score": 100,
+        "required_positions": [
+          49,
+          4842
+        ],
+        "tokens": 3031,
+        "time_ms": 44.75,
+        "preview": [
+          "[rg+read baseline: `trace_moe_family`]",
+          "",
+          "## query=unquantized_fused_moe",
+          "/data/vllm/tests/kernels/moe/test_moe.py:1601:         UnquantizedMoeBackend,",
+          "/data/vllm/tests/kernels/moe/test_moe.py:1602:     )",
+          "/data/vllm/tests/kernels/moe/test_moe.py:1603:     from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (",
+          "/data/vllm/tests/kernels/moe/test_moe.py:1604:         UnquantizedFusedMoEMethod,",
+          "/data/vllm/tests/kernels/moe/test_moe.py:1605:     )",
+          "",
+          "## query=unquantized_fused_moe",
+          "/data/vllm/vllm/model_executor/layers/fused_moe/unquantized_fused_moe_method.py:42: ",
+          "/data/vllm/vllm/model_executor/layers/fused_moe/unquantized_fused_moe_method.py:43: "
+        ],
+        "query_hit_counts": {
+          "unquantized_fused_moe": 9,
+          "moe_sum": 40,
+          "torch.ops._C.moe_sum": 0
+        },
+        "unique_files": 10,
+        "snippet_count": 18
+      }
+    },
+    {
+      "id": "graph_attention_selector_calls",
+      "category": "graph",
+      "description": "Show the conditional branches from the cached attention selector.",
+      "tool_name": "graph",
+      "torchtalk": {
+        "matched_required": 4,
+        "total_required": 4,
+        "coverage": 1.0,
+        "ordered_score": 1.0,
+        "score": 100,
+        "required_positions": [
+          14,
+          190,
+          786,
+          164
+        ],
+        "tokens": 702,
+        "time_ms": 3.32,
+        "preview": [
+          "[vLLM Calls: `_cached_get_attn_backend`]",
+          "- `Platform.get_attn_backend_cls` [platform_defaults] \u2192 `vllm/platforms/interface.py:262` [platform_dispatch=Platform]",
+          "  - confidence=conditional",
+          "- `CudaPlatformBase.get_attn_backend_cls` [platform_defaults] \u2192 `vllm/platforms/cuda.py:351` [platform_dispatch=CudaPlatformBase]",
+          "  - confidence=conditional",
+          "- `RocmPlatform.get_attn_backend_cls` [platform_defaults] \u2192 `vllm/platforms/rocm.py:513` [platform_dispatch=RocmPlatform]",
+          "  - confidence=conditional",
+          "- `XPUPlatform.get_attn_backend_cls` [platform_defaults] \u2192 `vllm/platforms/xpu.py:50` [platform_dispatch=XPUPlatform]",
+          "  - confidence=conditional",
+          "- `CpuPlatform.get_attn_backend_cls` [platform_defaults] \u2192 `vllm/platforms/cpu.py:75` [platform_dispatch=CpuPlatform]",
+          "  - confidence=conditional",
+          "- `FLASH_ATTN` [attention_backends] \u2192 `vllm/v1/attention/backends/registry.py:44` [selected_backend=FLASH_ATTN]"
+        ]
+      },
+      "source_guided": {
+        "matched_required": 3,
+        "total_required": 4,
+        "coverage": 0.75,
+        "ordered_score": 1.0,
+        "score": 82,
+        "required_positions": [
+          91,
+          -1,
+          317,
+          1177
+        ],
+        "tokens": 425,
+        "time_ms": 436.59,
+        "preview": [
+          "[source-guided navigator baseline: `graph_attention_selector_calls`]",
+          "Seed resolution",
+          "- 1. `_cached_get_attn_backend` \u2192 `vllm/v1/attention/selector.py:114` [query=_cached_get_attn_backend]",
+          "- 2. `CpuPlatform.get_attn_backend_cls` \u2192 `vllm/platforms/cpu.py:75` [query=get_attn_backend_cls]",
+          "- 3. `FlashAttnPrefillBackend._flash_attn_varlen_diff_headdims` \u2192 `vllm/v1/attention/backends/mla/prefill/flash_attn.py:104` [query=FLASH_ATTN]",
+          "- 4. `AttentionBackendEnum` \u2192 `vllm/v1/attention/backends/registry.py:34` [query=AttentionBackendEnum]",
+          "",
+          "Agent follow-ups",
+          "- 1. `cpu_attn_get_scheduler_metadata` \u2192 `vllm/_custom_ops.py:3619` [from=AttentionBackendEnum.CPU_ATTN]",
+          "- 2. `cpu_attn_reshape_and_cache` \u2192 `vllm/_custom_ops.py:3650` [from=CPU_ATTN]",
+          "- 3. `CPUWNA16LinearKernel` \u2192 `vllm/model_executor/kernels/linear/mixed_precision/cpu.py:20` [from=CPU]",
+          "- 4. `MLAModules` \u2192 `vllm/model_executor/layers/mla.py:14` [from=MLA]"
+        ],
+        "unique_files": 9,
+        "seed_hits": 4,
+        "expansion_hits": 6,
+        "expansion_symbols": [
+          "AttentionBackendEnum.CPU_ATTN",
+          "CPU_ATTN",
+          "CPU",
+          "MLA",
+          "_flash_attn_varlen_diff_headdims",
+          "VLLM_BATCH_INVARIANT"
+        ]
+      },
+      "rg_baseline": {
+        "matched_required": 1,
+        "total_required": 4,
+        "coverage": 0.25,
+        "ordered_score": 1.0,
+        "score": 48,
+        "required_positions": [
+          63,
+          -1,
+          -1,
+          -1
+        ],
+        "tokens": 2251,
+        "time_ms": 60.71,
+        "preview": [
+          "[rg+read baseline: `graph_attention_selector_calls`]",
+          "",
+          "## query=_cached_get_attn_backend",
+          "/data/vllm/tests/kernels/attention/test_rocm_attention_selector.py:8: from vllm.platforms.rocm import RocmPlatform",
+          "/data/vllm/tests/kernels/attention/test_rocm_attention_selector.py:9: from vllm.v1.attention.backends.registry import AttentionBackendEnum",
+          "/data/vllm/tests/kernels/attention/test_rocm_attention_selector.py:10: from vllm.v1.attention.selector import _cached_get_attn_backend, get_attn_backend",
+          "/data/vllm/tests/kernels/attention/test_rocm_attention_selector.py:11: ",
+          "/data/vllm/tests/kernels/attention/test_rocm_attention_selector.py:12: ",
+          "",
+          "## query=_cached_get_attn_backend",
+          "/data/vllm/tests/kernels/attention/test_rocm_attention_selector.py:14: def clear_cache():",
+          "/data/vllm/tests/kernels/attention/test_rocm_attention_selector.py:15:     \"\"\"Clear lru cache to ensure each test case runs without caching.\"\"\""
+        ],
+        "query_hit_counts": {
+          "_cached_get_attn_backend": 13,
+          "get_attn_backend_cls": 12,
+          "FLASH_ATTN": 356,
+          "AttentionBackendEnum": 300
+        },
+        "unique_files": 10,
+        "snippet_count": 18
+      }
+    },
+    {
+      "id": "graph_rms_norm_impact",
+      "category": "graph",
+      "description": "Show upstream impact into the RMSNorm path.",
+      "tool_name": "graph",
+      "torchtalk": {
+        "matched_required": 3,
+        "total_required": 3,
+        "coverage": 1.0,
+        "ordered_score": 1.0,
+        "score": 100,
+        "required_positions": [
+          37,
+          134,
+          231
+        ],
+        "tokens": 102,
+        "time_ms": 3.41,
+        "preview": [
+          "[vLLM Impact: `rms_norm`]",
+          "Depth 1",
+          "- `RMSNorm.forward_native` [layer_nodes] \u2192 `vllm/model_executor/layers/layernorm.py:74`",
+          "",
+          "Depth 2",
+          "- `Scheduler.schedule` [request_pipeline_nodes] \u2192 `vllm/v1/core/sched/scheduler.py:387`",
+          "",
+          "Depth 3",
+          "- `EngineCore.add_request` [request_pipeline_nodes] \u2192 `vllm/v1/engine/core.py:372`"
+        ]
+      },
+      "source_guided": {
+        "matched_required": 3,
+        "total_required": 3,
+        "coverage": 1.0,
+        "ordered_score": 1.0,
+        "score": 100,
+        "required_positions": [
+          147,
+          255,
+          348
+        ],
+        "tokens": 357,
+        "time_ms": 1289.62,
+        "preview": [
+          "[source-guided navigator baseline: `graph_rms_norm_impact`]",
+          "Seed resolution",
+          "- 1. `rms_norm` \u2192 `vllm/ir/ops/layernorm.py:10` [query=rms_norm]",
+          "- 2. `RMSNorm.forward_native` \u2192 `vllm/model_executor/layers/layernorm.py:74` [query=RMSNorm.forward_native]",
+          "- 3. `Scheduler.schedule` \u2192 `vllm/v1/core/sched/scheduler.py:387` [query=Scheduler.schedule]",
+          "- 4. `EngineCore.add_request` \u2192 `vllm/v1/engine/core.py:372` [query=EngineCore.add_request]",
+          "",
+          "Agent follow-ups",
+          "- 1. `MatcherCustomOp.forward_native` \u2192 `vllm/compilation/passes/fusion/matcher_utils.py:66` [from=forward_native]",
+          "- 2. `PostGradPassManager.add` \u2192 `vllm/compilation/passes/pass_manager.py:202` [from=_inflight_prefills.add]",
+          "- 3. `NewRequestData.from_request` \u2192 `vllm/v1/core/sched/output.py:47` [from=NewRequestData.from_request]",
+          "- 4. `PauseState` \u2192 `vllm/v1/core/sched/interface.py:22` [from=PauseState.PAUSED_ALL]"
+        ],
+        "unique_files": 10,
+        "seed_hits": 4,
+        "expansion_hits": 6,
+        "expansion_symbols": [
+          "forward_native",
+          "_inflight_prefills.add",
+          "NewRequestData.from_request",
+          "PauseState.PAUSED_ALL",
+          "RequestStatus.WAITING_FOR_REMOTE_KVS",
+          "EngineCoreEventType.SCHEDULED"
+        ]
+      },
+      "rg_baseline": {
+        "matched_required": 0,
+        "total_required": 3,
+        "coverage": 0.0,
+        "ordered_score": 0.0,
+        "score": 0,
+        "required_positions": [
+          -1,
+          -1,
+          -1
+        ],
+        "tokens": 2733,
+        "time_ms": 67.16,
+        "preview": [
+          "[rg+read baseline: `graph_rms_norm_impact`]",
+          "",
+          "## query=rms_norm",
+          "/data/vllm/vllm/_aiter_ops.py:1291: ",
+          "/data/vllm/vllm/_aiter_ops.py:1292: ",
+          "/data/vllm/vllm/_aiter_ops.py:1293: def _fused_mla_dual_rms_norm_impl(",
+          "/data/vllm/vllm/_aiter_ops.py:1294:     x1: torch.Tensor,",
+          "/data/vllm/vllm/_aiter_ops.py:1295:     x1_weight: torch.Tensor,",
+          "",
+          "## query=rms_norm",
+          "/data/vllm/vllm/_aiter_ops.py:1305:             \"fused_qk_rmsnorm requires AITer >= PR #2442. \"",
+          "/data/vllm/vllm/_aiter_ops.py:1306:             \"Please upgrade aiter or disable the \""
+        ],
+        "query_hit_counts": {
+          "rms_norm": 1006,
+          "RMSNorm.forward_native": 0,
+          "Scheduler.schedule": 83,
+          "EngineCore.add_request": 1
+        },
+        "unique_files": 5,
+        "snippet_count": 18
+      }
+    }
+  ],
+  "summary": {
+    "task_count": 13,
+    "torchtalk": {
+      "avg_score": 100,
+      "avg_tokens": 244.08,
+      "avg_time_ms": 3.5
+    },
+    "source_guided": {
+      "avg_score": 89.08,
+      "avg_tokens": 348.85,
+      "avg_time_ms": 2013.47
+    },
+    "rg_baseline": {
+      "avg_score": 45.92,
+      "avg_tokens": 2508.08,
+      "avg_time_ms": 61.34
+    },
+    "torchtalk_best_or_tied_on_score": 13,
+    "source_guided_best_or_tied_on_score": 9,
+    "rg_baseline_best_or_tied_on_score": 1,
+    "avg_source_guided_unique_files": 7.92,
+    "avg_source_guided_seed_hits": 4,
+    "avg_source_guided_expansion_hits": 5.15,
+    "avg_rg_unique_files": 8.15,
+    "avg_rg_snippets": 17.54,
+    "by_category": {
+      "graph": {
+        "task_count": 2,
+        "torchtalk": {
+          "avg_score": 100,
+          "avg_tokens": 402,
+          "avg_time_ms": 3.37
+        },
+        "source_guided": {
+          "avg_score": 91,
+          "avg_tokens": 391,
+          "avg_time_ms": 863.1
+        },
+        "rg_baseline": {
+          "avg_score": 24,
+          "avg_tokens": 2492,
+          "avg_time_ms": 63.94
+        }
+      },
+      "search": {
+        "task_count": 7,
+        "torchtalk": {
+          "avg_score": 100,
+          "avg_tokens": 173.43,
+          "avg_time_ms": 3.57
+        },
+        "source_guided": {
+          "avg_score": 95,
+          "avg_tokens": 311.43,
+          "avg_time_ms": 2351.54
+        },
+        "rg_baseline": {
+          "avg_score": 60,
+          "avg_tokens": 2427,
+          "avg_time_ms": 47.01
+        }
+      },
+      "trace": {
+        "task_count": 4,
+        "torchtalk": {
+          "avg_score": 100,
+          "avg_tokens": 288.75,
+          "avg_time_ms": 3.43
+        },
+        "source_guided": {
+          "avg_score": 77.75,
+          "avg_tokens": 393.25,
+          "avg_time_ms": 1997.02
+        },
+        "rg_baseline": {
+          "avg_score": 32.25,
+          "avg_tokens": 2658,
+          "avg_time_ms": 85.12
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,331 @@
+[
+  {
+    "id": "search_api_openai_chat",
+    "category": "search",
+    "description": "Find the main OpenAI chat completion serving entrypoint.",
+    "tool_name": "search",
+    "tool_args": {
+      "query": "OpenAIServingChat",
+      "mode": "apis",
+      "limit": 10
+    },
+    "baseline_queries": [
+      "OpenAIServingChat",
+      "_create_chat_completion",
+      "chat_completion"
+    ],
+    "required_groups": [
+      ["OpenAIServingChat._create_chat_completion"],
+      ["chat_completion/serving.py"]
+    ]
+  },
+  {
+    "id": "search_api_pooling_prepare",
+    "category": "search",
+    "description": "Find the pooling serving entrypoint that prepares request generators.",
+    "tool_name": "search",
+    "tool_args": {
+      "query": "PoolingServingBase",
+      "mode": "apis",
+      "limit": 10
+    },
+    "baseline_queries": [
+      "PoolingServingBase",
+      "_prepare_generators",
+      "AsyncLLM.encode"
+    ],
+    "required_groups": [
+      ["PoolingServingBase._prepare_generators"],
+      ["pooling/base/serving.py"]
+    ]
+  },
+  {
+    "id": "search_model_llama",
+    "category": "search",
+    "description": "Find where LlamaForCausalLM is represented in the model registry.",
+    "tool_name": "search",
+    "tool_args": {
+      "query": "LlamaForCausalLM",
+      "mode": "models",
+      "limit": 10
+    },
+    "baseline_queries": [
+      "LlamaForCausalLM",
+      "_TEXT_GENERATION_MODELS",
+      "model registry"
+    ],
+    "required_groups": [
+      ["LlamaForCausalLM"],
+      ["model_executor/models/registry.py"]
+    ]
+  },
+  {
+    "id": "search_backend_flash_attn",
+    "category": "search",
+    "description": "Find the FLASH_ATTN backend registration surface.",
+    "tool_name": "search",
+    "tool_args": {
+      "query": "FLASH_ATTN",
+      "mode": "backends",
+      "limit": 10
+    },
+    "baseline_queries": [
+      "FLASH_ATTN",
+      "get_attn_backend_cls",
+      "attention backend"
+    ],
+    "required_groups": [
+      ["FLASH_ATTN"],
+      ["attention/backends/registry.py"]
+    ]
+  },
+  {
+    "id": "search_ir_rms_norm",
+    "category": "search",
+    "description": "Find the RMSNorm IR op and its vllm_c provider.",
+    "tool_name": "search",
+    "tool_args": {
+      "query": "rms_norm",
+      "mode": "ops",
+      "limit": 10
+    },
+    "baseline_queries": [
+      "rms_norm",
+      "register_impl",
+      "vllm_c"
+    ],
+    "required_groups": [
+      ["rms_norm"],
+      ["rms_norm::vllm_c", "vllm/kernels/vllm_c.py"]
+    ]
+  },
+  {
+    "id": "search_binding_rms_norm",
+    "category": "search",
+    "description": "Find the RMSNorm torch custom-op binding.",
+    "tool_name": "search",
+    "tool_args": {
+      "query": "rms_norm",
+      "mode": "bindings",
+      "limit": 10
+    },
+    "baseline_queries": [
+      "torch.ops._C.rms_norm",
+      "rms_norm",
+      "torch_bindings.cpp"
+    ],
+    "required_groups": [
+      ["torch.ops._C.rms_norm"],
+      ["libtorch_stable/torch_bindings.cpp"]
+    ]
+  },
+  {
+    "id": "search_moe_ops",
+    "category": "search",
+    "description": "Find the fused-MoE operator family surface.",
+    "tool_name": "search",
+    "tool_args": {
+      "query": "FusedMoE",
+      "mode": "ops",
+      "limit": 10
+    },
+    "baseline_queries": [
+      "fused_moe",
+      "unquantized_fused_moe",
+      "moe_sum"
+    ],
+    "required_groups": [
+      ["unquantized_fused_moe"],
+      ["layers/fused_moe", "transformers/moe.py"]
+    ]
+  },
+  {
+    "id": "trace_offline_generate",
+    "category": "trace",
+    "description": "Trace offline LLM.generate through the execution spine.",
+    "tool_name": "trace",
+    "tool_args": {
+      "function_name": "LLM.generate",
+      "focus": "full"
+    },
+    "baseline_queries": [
+      "LLM.generate",
+      "_run_completion",
+      "_add_completion_requests",
+      "_add_request",
+      "LLMEngine.add_request",
+      "process_inputs",
+      "EngineCore.add_request",
+      "LLMEngine.step"
+    ],
+    "required_groups": [
+      ["LLM.generate"],
+      ["LLM._run_completion", "OfflineInferenceMixin._run_completion"],
+      ["LLM._add_completion_requests", "OfflineInferenceMixin._add_completion_requests"],
+      ["LLM._add_request", "OfflineInferenceMixin._add_request"],
+      ["LLMEngine.add_request"],
+      ["InputProcessor.process_inputs"],
+      ["EngineCore.add_request"],
+      ["LLM._run_engine", "OfflineInferenceMixin._run_engine"],
+      ["LLMEngine.step"]
+    ],
+    "ordered_groups": [
+      ["LLM.generate"],
+      ["LLM._run_completion", "OfflineInferenceMixin._run_completion"],
+      ["LLM._add_completion_requests", "OfflineInferenceMixin._add_completion_requests"],
+      ["LLM._add_request", "OfflineInferenceMixin._add_request"],
+      ["LLMEngine.add_request"],
+      ["InputProcessor.process_inputs"],
+      ["EngineCore.add_request"],
+      ["LLM._run_engine", "OfflineInferenceMixin._run_engine"],
+      ["LLMEngine.step"]
+    ]
+  },
+  {
+    "id": "trace_chat_completion_rms_norm",
+    "category": "trace",
+    "description": "Trace chat completion down to the RMSNorm/native-binding path.",
+    "tool_name": "trace",
+    "tool_args": {
+      "function_name": "OpenAIServingChat._create_chat_completion",
+      "focus": "full"
+    },
+    "baseline_queries": [
+      "_create_chat_completion",
+      "AsyncLLM.generate",
+      "process_inputs",
+      "Scheduler.schedule",
+      "RMSNorm.forward_native",
+      "rms_norm",
+      "torch.ops._C.rms_norm"
+    ],
+    "required_groups": [
+      ["OpenAIServingChat._create_chat_completion"],
+      ["AsyncLLM.generate"],
+      ["AsyncLLM.add_request"],
+      ["InputProcessor.process_inputs"],
+      ["EngineCore.add_request"],
+      ["Scheduler.schedule"],
+      ["RMSNorm.forward_native"],
+      ["`rms_norm` [ir_ops]", "vllm/ir/ops/layernorm.py"],
+      ["rms_norm::vllm_c"],
+      ["torch.ops._C.rms_norm"]
+    ],
+    "ordered_groups": [
+      ["OpenAIServingChat._create_chat_completion"],
+      ["AsyncLLM.generate"],
+      ["AsyncLLM.add_request"],
+      ["InputProcessor.process_inputs"],
+      ["EngineCore.add_request"],
+      ["Scheduler.schedule"],
+      ["RMSNorm.forward_native"],
+      ["`rms_norm` [ir_ops]", "vllm/ir/ops/layernorm.py"],
+      ["rms_norm::vllm_c"],
+      ["torch.ops._C.rms_norm"]
+    ]
+  },
+  {
+    "id": "trace_pooling_encode",
+    "category": "trace",
+    "description": "Trace pooling encode through the shared request spine.",
+    "tool_name": "trace",
+    "tool_args": {
+      "function_name": "PoolingServingBase._prepare_generators",
+      "focus": "full"
+    },
+    "baseline_queries": [
+      "_prepare_generators",
+      "AsyncLLM.encode",
+      "AsyncLLM.add_request",
+      "process_inputs",
+      "EngineCore.add_request"
+    ],
+    "required_groups": [
+      ["PoolingServingBase._prepare_generators"],
+      ["AsyncLLM.encode"],
+      ["AsyncLLM.add_request"],
+      ["InputProcessor.process_inputs"],
+      ["EngineCore.add_request"]
+    ],
+    "ordered_groups": [
+      ["PoolingServingBase._prepare_generators"],
+      ["AsyncLLM.encode"],
+      ["AsyncLLM.add_request"],
+      ["InputProcessor.process_inputs"],
+      ["EngineCore.add_request"]
+    ]
+  },
+  {
+    "id": "trace_moe_family",
+    "category": "trace",
+    "description": "Trace one fused-MoE family path into the native binding layer.",
+    "tool_name": "trace",
+    "tool_args": {
+      "function_name": "unquantized_fused_moe",
+      "focus": "full"
+    },
+    "baseline_queries": [
+      "unquantized_fused_moe",
+      "moe_sum",
+      "torch.ops._C.moe_sum"
+    ],
+    "required_groups": [
+      ["unquantized_fused_moe"],
+      ["moe_sum"]
+    ],
+    "ordered_groups": [
+      ["unquantized_fused_moe"],
+      ["moe_sum"]
+    ]
+  },
+  {
+    "id": "graph_attention_selector_calls",
+    "category": "graph",
+    "description": "Show the conditional branches from the cached attention selector.",
+    "tool_name": "graph",
+    "tool_args": {
+      "function_name": "_cached_get_attn_backend",
+      "mode": "calls",
+      "depth": 2
+    },
+    "baseline_queries": [
+      "_cached_get_attn_backend",
+      "get_attn_backend_cls",
+      "FLASH_ATTN",
+      "AttentionBackendEnum"
+    ],
+    "required_groups": [
+      ["_cached_get_attn_backend"],
+      ["CudaPlatformBase.get_attn_backend_cls"],
+      ["FLASH_ATTN"],
+      ["confidence=conditional"]
+    ]
+  },
+  {
+    "id": "graph_rms_norm_impact",
+    "category": "graph",
+    "description": "Show upstream impact into the RMSNorm path.",
+    "tool_name": "graph",
+    "tool_args": {
+      "function_name": "rms_norm",
+      "mode": "impact",
+      "depth": 3
+    },
+    "baseline_queries": [
+      "rms_norm",
+      "RMSNorm.forward_native",
+      "Scheduler.schedule",
+      "EngineCore.add_request"
+    ],
+    "required_groups": [
+      ["RMSNorm.forward_native"],
+      ["Scheduler.schedule"],
+      ["EngineCore.add_request"]
+    ],
+    "ordered_groups": [
+      ["RMSNorm.forward_native"],
+      ["Scheduler.schedule"],
+      ["EngineCore.add_request"]
+    ]
+  }
+]

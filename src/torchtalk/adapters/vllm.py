@@ -15,7 +15,7 @@ from ..config import (
     validate_framework_path,
 )
 
-_VLLM_CACHE_VERSION = 2
+_VLLM_CACHE_VERSION = 3
 _VLLM_CAPABILITIES = frozenset(
     {
         "trace_apis",

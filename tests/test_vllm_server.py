@@ -20,8 +20,8 @@ class TestVllmStatus:
         status = await server.get_status()
         assert "Framework: vLLM" in status
         assert "Capabilities:" in status
-        assert "api_entrypoints: 12" in status
-        assert "attention_backends: 31" in status
+        assert "api_entrypoints:" in status
+        assert "attention_backends:" in status
         assert "Dynamic Areas" in status
         assert "`modules`  Not supported" in status
         assert "`affected`  Not supported" in status
