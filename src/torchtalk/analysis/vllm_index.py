@@ -916,17 +916,21 @@ def _build_graph(
         "offline_generate": _proof_trace(
             "offline_generate",
             "Offline LLM.generate()",
-            [step for step in [
-                llm_generate_id,
-                llm_run_completion_id,
-                llm_add_completion_requests_id,
-                llm_add_request_id,
-                llm_engine_add_request_id,
-                input_process_id,
-                engine_add_request_id,
-                llm_run_engine_id,
-                llm_engine_step_id,
-            ] if step is not None],
+            [
+                step
+                for step in [
+                    llm_generate_id,
+                    llm_run_completion_id,
+                    llm_add_completion_requests_id,
+                    llm_add_request_id,
+                    llm_engine_add_request_id,
+                    input_process_id,
+                    engine_add_request_id,
+                    llm_run_engine_id,
+                    llm_engine_step_id,
+                ]
+                if step is not None
+            ],
         ),
         "pooling_encode": _proof_trace(
             "pooling_encode",
