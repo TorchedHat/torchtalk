@@ -1,5 +1,7 @@
 # LLM + TorchTalk(vLLM) vs LLM-only on vLLM
 
+*GPT 5.4 extra high 1M was used for this. Claude 4.6 Opus 1M was also used. Not sure which is which but in general the results are really good with torchtalk for vllm*
+
 This benchmark compares two ways of navigating the live `/data/vllm` codebase:
 
 1. **LLM + TorchTalk(vLLM)** via the TorchTalk MCP server
