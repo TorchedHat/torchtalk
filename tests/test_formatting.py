@@ -151,5 +151,8 @@ class TestRelativePath:
     def test_strips_pytorch_fallback_without_base(self):
         assert relative_path("pytorch/aten/x.cpp") == "aten/x.cpp"
 
+    def test_strips_checkout_name_for_other_repos(self):
+        assert relative_path("vllm/csrc/ops.cpp", "/scratch/vllm") == "csrc/ops.cpp"
+
     def test_unrelated_path_unchanged(self):
         assert relative_path("other/x.cpp", "/src/pytorch") == "other/x.cpp"

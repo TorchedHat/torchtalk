@@ -160,16 +160,33 @@ def _clean_impl_target(raw: str, op_name: str = "") -> str:
 class BindingDetector:
     """Detects pybind11, TORCH_LIBRARY, and CUDA binding patterns."""
 
-    def __init__(self):
+    def __init__(
+        self,
+        macro_aliases: dict[str, str] | None = None,
+        token_map: dict[str, str] | None = None,
+    ):
         from tree_sitter_language_pack import get_parser
 
         self.cpp_parser = get_parser("cpp")
         self.cuda_parser = get_parser("cuda")  # If available, falls back to cpp
+        self.macro_aliases = macro_aliases or {}
+        self.token_map = token_map or {}
         log.info("BindingDetector initialized with C++/CUDA support")
+
+    def _preprocess(self, content: str) -> str:
+        """Expand manifest macro aliases and tokens (line-count preserving)."""
+        for alias, canonical in self.macro_aliases.items():
+            content = re.sub(rf"\b{re.escape(alias)}\b", canonical, content)
+        for token, value in self.token_map.items():
+            content = re.sub(rf"\b{re.escape(token)}\b", value, content)
+        return content
 
     def detect_bindings(self, file_path: str, content: str) -> BindingGraph:
         """Parse a C++/CUDA file and extract bindings."""
         graph = BindingGraph()
+
+        if self.macro_aliases or self.token_map:
+            content = self._preprocess(content)
 
         is_cuda = file_path.endswith((".cu", ".cuh"))
         parser = self.cuda_parser if is_cuda else self.cpp_parser

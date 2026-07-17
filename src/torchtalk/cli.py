@@ -179,8 +179,11 @@ def cmd_status(args):
 def cmd_mcp_serve(args):
     """Start MCP server for Claude Code integration."""
     from torchtalk.formatting import set_formatter_mode
+    from torchtalk.harness import set_active_harness
     from torchtalk.server import run_server
 
+    if args.harness:
+        set_active_harness(args.harness)
     set_formatter_mode(args.format)
     run_server(
         pytorch_source=args.pytorch_source,
@@ -193,8 +196,11 @@ def cmd_mcp_serve(args):
 def cmd_index_build(args):
     """Build or refresh the index for a PyTorch source and exit."""
     from torchtalk.config import resolve_pytorch_source
+    from torchtalk.harness import set_active_harness
     from torchtalk.indexer import build_index
 
+    if args.harness:
+        set_active_harness(args.harness)
     source = args.pytorch_source or resolve_pytorch_source()
     if not source:
         log.error("No PyTorch source configured. Run 'torchtalk init' first.")
@@ -592,6 +598,10 @@ Example:
         action="store_true",
         help="Return immediately instead of waiting for the C++ call graph",
     )
+    p_build.add_argument(
+        "--harness",
+        help="Harness to index with (default: pytorch)",
+    )
     p_build.set_defaults(func=cmd_index_build)
 
     p_update = index_sub.add_parser(
@@ -642,6 +652,10 @@ First run builds the index (a few minutes); subsequent runs use cache.
         default="stdio",
         choices=["stdio", "streamable-http"],
         help="MCP transport type (default: stdio for Claude Code)",
+    )
+    parser_mcp.add_argument(
+        "--harness",
+        help="Harness to index with (default: pytorch)",
     )
     parser_mcp.add_argument(
         "--format",

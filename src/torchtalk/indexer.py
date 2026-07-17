@@ -13,19 +13,15 @@ from typing import Any
 
 from .analysis.helpers import fuzzy_distance_limit, levenshtein_distance, truncate
 from .analysis.patterns import (
-    CPP_SEARCH_DIRS,
-    PYTHON_SEARCH_DIRS,
-    TEST_SEARCH_DIRS,
-    TEST_UTILITY_MODULES,
-    is_vendor_path,
-)
-from .analysis.patterns import (
     has_test_patterns as _has_test_patterns,
 )
+from .analysis.patterns import is_vendor_path
 from .analysis.patterns import (
     should_exclude as _should_exclude,
 )
 from .config import CACHE_DIR, cache_paths, resolve_pytorch_source, source_hash
+from .harness import ConventionManifest, active_manifest
+from .symbols import PackageIdentity, content_fingerprint, detect_package_identity
 
 log = logging.getLogger(__name__)
 
@@ -40,6 +36,7 @@ class ServerState:
     derivatives: dict[str, dict] = field(default_factory=dict)
     native_implementations: dict[str, list[dict]] = field(default_factory=dict)
     symbol_to_file: dict[str, str] = field(default_factory=dict)
+    registrations: dict[str, list[dict]] = field(default_factory=dict)
 
     by_python_name: dict[str, list[dict]] = field(default_factory=dict)
     by_cpp_name: dict[str, list[dict]] = field(default_factory=dict)
@@ -69,6 +66,7 @@ class ServerState:
     dispatch_to_op: dict[str, str] = field(default_factory=dict)
 
     pytorch_source: str | None = None
+    package: PackageIdentity | None = None
     cpp_extractor: Any = None
     cpp_building: bool = False
     cpp_thread: Any = None
@@ -89,9 +87,7 @@ def _source_fingerprint(source: str) -> str:
     commits, pulls, and uncommitted edits all invalidate caches. Non-git
     checkouts fall back to mtime/size of version files.
     """
-    from .snapshots import _content_fingerprint
-
-    fp = _content_fingerprint(source) if source else None
+    fp = content_fingerprint(source) if source else None
     if fp:
         return fp
     src = Path(source)
@@ -109,17 +105,20 @@ def _source_fingerprint(source: str) -> str:
 
 
 # Bump when the bindings-cache schema changes (e.g. a new field added to
-# `native_functions` entries). v2 introduced `python_module`; v3 renamed
-# binding "line" -> "line_number".
-_BINDINGS_CACHE_FORMAT_VERSION = 3
+# `native_functions` entries). v2 introduced `python_module`; v3 added
+# package identity to metadata; v4 added the `registrations` section; v5
+# renamed binding "line" → "line_number".
+_BINDINGS_CACHE_FORMAT_VERSION = 5
 
 
-def _cache_metadata(source: str) -> dict:
+def _cache_metadata(source: str, manifest: ConventionManifest | None = None) -> dict:
     """Metadata every bindings-cache writer must emit; `_cache_valid` checks it."""
+    manifest = manifest or active_manifest()
     return {
         "source_path": source,
         "source_fingerprint": _source_fingerprint(source),
         "format_version": _BINDINGS_CACHE_FORMAT_VERSION,
+        "package": asdict(detect_package_identity(source, manifest.package)),
     }
 
 
@@ -133,20 +132,29 @@ def _cache_valid(cache: Path, source: str) -> bool:
         meta = data.get("metadata", {})
         if meta.get("format_version") != _BINDINGS_CACHE_FORMAT_VERSION:
             return False
+        if meta.get("package") != asdict(
+            detect_package_identity(source, active_manifest().package)
+        ):
+            return False
         return meta.get("source_fingerprint") == _source_fingerprint(source)
     except Exception:
         return False
 
 
-def _parse_native_functions(source: str) -> tuple[dict, dict]:
-    """Parse native_functions.yaml and derivatives.yaml."""
+def _parse_native_functions(
+    source: str, manifest: ConventionManifest | None = None
+) -> tuple[dict, dict]:
+    """Parse the manifest's YAML op/derivative sources; empty when undeclared."""
     import yaml
 
+    manifest = manifest or active_manifest()
     src = Path(source)
     functions, derivatives = {}, {}
 
-    nf_yaml = src / "aten/src/ATen/native/native_functions.yaml"
-    if nf_yaml.exists():
+    nf_yaml = (
+        src / manifest.native_functions_yaml if manifest.native_functions_yaml else None
+    )
+    if nf_yaml is not None and nf_yaml.exists():
         try:
             data = yaml.safe_load(nf_yaml.read_text())
             for entry in data or []:
@@ -193,8 +201,8 @@ def _parse_native_functions(source: str) -> tuple[dict, dict]:
         except Exception as e:
             log.warning(f"Failed to parse native_functions.yaml: {e}")
 
-    deriv_yaml = src / "tools/autograd/derivatives.yaml"
-    if deriv_yaml.exists():
+    deriv_yaml = src / manifest.derivatives_yaml if manifest.derivatives_yaml else None
+    if deriv_yaml is not None and deriv_yaml.exists():
         try:
             data = yaml.safe_load(deriv_yaml.read_text())
             for entry in data or []:
@@ -284,7 +292,7 @@ def _impls_from_extractor(target: str) -> list[dict]:
 
 
 def _find_implementations(
-    source: str, functions: dict
+    source: str, functions: dict, manifest: ConventionManifest | None = None
 ) -> tuple[dict[str, list[dict]], dict[str, str]]:
     """Find C++ implementations in source using configured search directories.
 
@@ -294,9 +302,10 @@ def _find_implementations(
     helper functions like `run_cudnn_SDP_fprop` that aren't YAML ops but still
     need a file-cohort bridge for test selection.
     """
+    manifest = manifest or active_manifest()
     src = Path(source)
 
-    search_dirs = [src / d for d in CPP_SEARCH_DIRS]
+    search_dirs = [src / d for d in manifest.cpp_search_dirs]
 
     targets = set()
     for f in functions.values():
@@ -402,19 +411,31 @@ def _fuzzy_find(name: str, data: dict[str, Any]) -> list[Any] | None:
     return None
 
 
-def _build_index(source: str) -> dict[str, Any]:
+def _build_index(
+    source: str, manifest: ConventionManifest | None = None
+) -> dict[str, Any]:
     """Build binding index from source."""
     from .analysis.binding_detector import BindingDetector
+    from .analysis.extractors import extract_registrations
 
+    manifest = manifest or active_manifest()
     log.info(f"Building index from {source}...")
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
-    functions, derivatives = _parse_native_functions(source)
+    functions, derivatives = _parse_native_functions(source, manifest)
 
-    implementations, symbol_to_file = _find_implementations(source, functions)
+    implementations, symbol_to_file = _find_implementations(source, functions, manifest)
 
-    detector = BindingDetector()
+    detector = BindingDetector(
+        macro_aliases=manifest.cpp_macro_aliases, token_map=manifest.cpp_token_map
+    )
     graph = detector.detect_bindings_in_directory(source)
+
+    registrations = extract_registrations(source, manifest)
+    log.info(
+        f"Registrations: {len(registrations['records'])} records, "
+        f"{len(registrations['candidate_edges'])} candidate edges"
+    )
 
     data = {
         "bindings": [b.to_dict() for b in graph.bindings],
@@ -423,7 +444,8 @@ def _build_index(source: str) -> dict[str, Any]:
         "derivatives": derivatives,
         "native_implementations": implementations,
         "symbol_to_file": symbol_to_file,
-        "metadata": _cache_metadata(source),
+        "registrations": registrations,
+        "metadata": _cache_metadata(source, manifest),
     }
 
     cache = _cache_path(source)
@@ -482,6 +504,7 @@ def _load_from_json(path: str):
     _state.derivatives = data.get("derivatives", {})
     _state.native_implementations = data.get("native_implementations", {})
     _state.symbol_to_file = data.get("symbol_to_file", {})
+    _state.registrations = data.get("registrations", {})
 
     _build_indexes(_state)
 
@@ -594,11 +617,14 @@ def _init_python_modules(source: str):
         _state.alias_map = build_function_alias_map(_state.native_functions)
         log.info(f"Alias map: {len(_state.alias_map)} torch.<op> aliases")
 
-        analyzer = PythonAnalyzer(alias_map=_state.alias_map)
+        manifest = active_manifest()
+        analyzer = PythonAnalyzer(
+            alias_map=_state.alias_map,
+            package_roots=manifest.python_package_roots or None,
+        )
         src = Path(source)
 
-        # Use configured Python search directories
-        dirs_to_analyze = [src / d for d in PYTHON_SEARCH_DIRS]
+        dirs_to_analyze = [src / d for d in manifest.python_search_dirs]
 
         all_modules: dict[str, Any] = {}
         analyzed_count = 0
@@ -713,9 +739,11 @@ def _init_from_source(source: str):
         _state.derivatives = data.get("derivatives", {})
         _state.native_implementations = data.get("native_implementations", {})
         _state.symbol_to_file = data.get("symbol_to_file", {})
+        _state.registrations = data.get("registrations", {})
         _build_indexes(_state)
 
     _state.pytorch_source = str(src)
+    _state.package = detect_package_identity(str(src), active_manifest().package)
     _init_decomp_aliases(str(src))
     _init_backward_bridge()
     _init_dispatch_stubs(str(src))
@@ -761,7 +789,9 @@ def load_python_profiling(path: str) -> int:
     return len(data)
 
 
-_TEST_INFRA_CACHE_VERSION = 1
+# v2: mention vocabulary reseeded from native_functions + OpInfo names.
+# v3: vocabulary gains nn-Module PascalCase variants (`AvgPool2d`).
+_TEST_INFRA_CACHE_VERSION = 3
 
 
 def _save_test_infra_cache(path: Path) -> None:
@@ -825,14 +855,38 @@ def _init_test_infrastructure(source: str):
 
         log.info("Analyzing test infrastructure...")
 
-        # Bound the attr index by only recording mentions of names that
-        # could plausibly resolve to a known binding's API.
+        # OpInfo registry must exist before the scan: it feeds the mention
+        # vocabulary below.
+        opinfo_dirs = [
+            src / "torch/testing/_internal/opinfo",
+            src / "torch/testing/_internal/opinfo/definitions",
+        ]
+        for opinfo_dir in opinfo_dirs:
+            if opinfo_dir.exists():
+                for opinfo_file in opinfo_dir.glob("*.py"):
+                    _parse_opinfo_registry(str(opinfo_file))
+        op_db_main = src / "torch/testing/_internal/common_methods_invocations.py"
+        if op_db_main.exists():
+            _parse_opinfo_registry(str(op_db_main))
+
+        # Bound the attr index by only recording mentions of names that could
+        # plausibly resolve to an API: binding python_names, YAML op names, and
+        # OpInfo names/aliases. Seeding from bindings alone missed `cummax`,
+        # `gelu`, `avg_pool2d` — the ops CI selection needs most.
         interesting_attrs: set[str] = set()
         for py_name in _state.by_python_name:
             interesting_attrs.update(api_attr_variants(normalize_api(py_name)))
+        for name, entry in _state.native_functions.items():
+            interesting_attrs.update(api_attr_variants(entry.get("base_name") or name))
+        for op_name, entry in _state.opinfo_registry.items():
+            interesting_attrs.update(api_attr_variants(op_name))
+            for alias in entry.get("aliases", []):
+                interesting_attrs.update(api_attr_variants(alias))
+            if aten_name := entry.get("aten_name"):
+                interesting_attrs.update(api_attr_variants(aten_name))
 
         # Scan test directories
-        for test_dir in TEST_SEARCH_DIRS:
+        for test_dir in active_manifest().test_search_dirs:
             dir_path = src / test_dir
             if not dir_path.exists():
                 continue
@@ -948,7 +1002,7 @@ def _init_test_infrastructure(source: str):
                     log.debug(f"Error parsing {py_file.name}: {e}")
 
         # Index test utilities
-        for util_path in TEST_UTILITY_MODULES:
+        for util_path in active_manifest().test_utility_modules:
             full_path = src / util_path
             if full_path.exists():
                 _state.test_utilities[util_path] = {
@@ -956,20 +1010,6 @@ def _init_test_infrastructure(source: str):
                     "full_path": str(full_path),
                     "exists": True,
                 }
-
-        # Parse OpInfo registry - scan opinfo definition files plus the main
-        # op_db source (`common_methods_invocations.py`).
-        opinfo_dirs = [
-            src / "torch/testing/_internal/opinfo",
-            src / "torch/testing/_internal/opinfo/definitions",
-        ]
-        for opinfo_dir in opinfo_dirs:
-            if opinfo_dir.exists():
-                for opinfo_file in opinfo_dir.glob("*.py"):
-                    _parse_opinfo_registry(str(opinfo_file))
-        op_db_main = src / "torch/testing/_internal/common_methods_invocations.py"
-        if op_db_main.exists():
-            _parse_opinfo_registry(str(op_db_main))
 
         log.info(
             f"Test infrastructure: {len(_state.test_files)} files, "
@@ -1283,7 +1323,10 @@ def update_index(source: str, since: str, on_uncovered: str = "warn") -> dict:
         if _relpath(k.get("file_path", ""), prior_source) not in dirty
     ]
 
-    detector = BindingDetector()
+    detector = BindingDetector(
+        macro_aliases=active_manifest().cpp_macro_aliases,
+        token_map=active_manifest().cpp_token_map,
+    )
     src = Path(source)
     for rel in changed_cpp:
         full = src / rel
@@ -1313,6 +1356,11 @@ def update_index(source: str, since: str, on_uncovered: str = "warn") -> dict:
         "derivatives": derivatives,
         "native_implementations": implementations,
         "symbol_to_file": symbol_to_file,
+        # Python files are not rescanned on incremental update; carry the
+        # baseline's registration records forward.
+        "registrations": prior.get(
+            "registrations", {"records": [], "candidate_edges": []}
+        ),
         "metadata": {
             **_cache_metadata(source),
             "updated_since": since,
@@ -1510,6 +1558,9 @@ def build_index(source: str, wait_for_cpp: bool = True) -> dict:
         cg_functions = len(_state.cpp_extractor.function_locations)
 
     return {
+        "package": str(_state.package),
+        "registration_records": len(_state.registrations.get("records", [])),
+        "candidate_edges": len(_state.registrations.get("candidate_edges", [])),
         "bindings": len(_state.bindings),
         "cuda_kernels": len(_state.cuda_kernels),
         "native_functions": len(_state.native_functions),

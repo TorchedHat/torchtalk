@@ -64,6 +64,13 @@ async def get_status() -> str:
         )
     if _state.derivatives:
         md.bold("Derivatives", f"{len(_state.derivatives):,} formulas")
+    if _state.registrations:
+        md.bold(
+            "Registrations",
+            f"{len(_state.registrations.get('records', [])):,} records, "
+            f"{len(_state.registrations.get('candidate_edges', [])):,} "
+            "candidate edges",
+        )
     md.blank()
 
     md.h3("C++ Call Graph")

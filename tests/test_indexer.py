@@ -3,6 +3,7 @@
 import ast
 import json
 import subprocess
+from dataclasses import asdict
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -15,6 +16,7 @@ from torchtalk.analysis.python_analyzer import (
     PyFunction,
     PyModule,
 )
+from torchtalk.harness import ConventionManifest
 from torchtalk.indexer import (
     _FREE_FUNC_RE,
     _METHOD_FUNC_RE,
@@ -32,6 +34,7 @@ from torchtalk.indexer import (
     _save_py_cpp_edges_cache,
     update_index,
 )
+from torchtalk.symbols import PackageIdentity
 
 
 class TestServerState:
@@ -438,6 +441,11 @@ class TestUpdateIndex:
         monkeypatch.setattr(indexer, "CACHE_DIR", cache)
         monkeypatch.setattr(indexer, "_cache_path", lambda _s: cache / "bindings.json")
         monkeypatch.setattr(indexer, "_source_fingerprint", lambda _s: "newfp")
+        monkeypatch.setattr(
+            indexer,
+            "detect_package_identity",
+            lambda _s, _n: PackageIdentity("pytorch", "abc123def456"),
+        )
 
         def fake_diff(cmd, **kwargs):
             class R:
@@ -463,6 +471,9 @@ class TestUpdateIndex:
                 self.cuda_kernels = []
 
         class FakeDetector:
+            def __init__(self, **_kwargs):
+                pass
+
             def detect_bindings(self, _path, _content):
                 return FakeBindingGraph()
 
@@ -628,6 +639,74 @@ class TestCollectTestAttrHits:
         assert index["copy_"][0]["receiver_type"] is None
 
 
+class TestCacheValidPackageIdentity:
+    @pytest.fixture(autouse=True)
+    def stub_identity(self, monkeypatch):
+        monkeypatch.setattr(indexer, "_source_fingerprint", lambda _s: "fp")
+        monkeypatch.setattr(
+            indexer,
+            "detect_package_identity",
+            lambda _s, _n: PackageIdentity("pytorch", "abc123def456"),
+        )
+
+    def _write(self, tmp_path, meta):
+        cache = tmp_path / "bindings.json"
+        cache.write_text(json.dumps({"bindings": [], "metadata": meta}))
+        return cache
+
+    def _meta(self, **overrides):
+        meta = {
+            "format_version": indexer._BINDINGS_CACHE_FORMAT_VERSION,
+            "source_fingerprint": "fp",
+            "package": {"name": "pytorch", "revision": "abc123def456"},
+        }
+        meta.update(overrides)
+        return meta
+
+    def test_accepts_matching_metadata(self, tmp_path):
+        assert indexer._cache_valid(self._write(tmp_path, self._meta()), "/src") is True
+
+    def test_rejects_revision_mismatch(self, tmp_path):
+        meta = self._meta(package={"name": "pytorch", "revision": "fff000fff000"})
+        assert indexer._cache_valid(self._write(tmp_path, meta), "/src") is False
+
+    def test_rejects_missing_package(self, tmp_path):
+        meta = self._meta()
+        del meta["package"]
+        assert indexer._cache_valid(self._write(tmp_path, meta), "/src") is False
+
+    def test_rejects_old_format_version(self, tmp_path):
+        meta = self._meta(format_version=indexer._BINDINGS_CACHE_FORMAT_VERSION - 1)
+        assert indexer._cache_valid(self._write(tmp_path, meta), "/src") is False
+
+
+class TestBuildIndexPackageMetadata:
+    def test_metadata_carries_package_identity(self, tmp_path, monkeypatch):
+        src = tmp_path / "src"
+        src.mkdir()
+        cache_dir = tmp_path / "cache"
+        cache_dir.mkdir()
+        monkeypatch.setattr(indexer, "CACHE_DIR", cache_dir)
+        monkeypatch.setattr(
+            indexer, "_cache_path", lambda _s: cache_dir / "bindings.json"
+        )
+        monkeypatch.setattr(
+            indexer,
+            "detect_package_identity",
+            lambda _s, _n: PackageIdentity("pytorch", "abc123def456"),
+        )
+
+        data = indexer._build_index(str(src))
+
+        assert data["metadata"]["package"] == {
+            "name": "pytorch",
+            "revision": "abc123def456",
+        }
+        assert (
+            data["metadata"]["format_version"] == indexer._BINDINGS_CACHE_FORMAT_VERSION
+        )
+
+
 class TestCacheInvalidationByGitState:
     """_cache_valid must reject caches after commits/pulls and dirty edits."""
 
@@ -651,7 +730,13 @@ class TestCacheInvalidationByGitState:
             json.dumps(
                 {
                     "bindings": [],
-                    "metadata": indexer._cache_metadata(str(src)),
+                    "metadata": {
+                        "format_version": indexer._BINDINGS_CACHE_FORMAT_VERSION,
+                        "source_fingerprint": indexer._source_fingerprint(str(src)),
+                        "package": asdict(
+                            indexer.detect_package_identity(str(src), "pytorch")
+                        ),
+                    },
                 }
             )
         )
@@ -705,6 +790,11 @@ class TestUpdateIndexMetadata:
         monkeypatch.setattr(indexer, "CACHE_DIR", cache)
         monkeypatch.setattr(indexer, "_cache_path", lambda _s: cache_file)
         monkeypatch.setattr(indexer, "_source_fingerprint", lambda _s: "fp")
+        monkeypatch.setattr(
+            indexer,
+            "detect_package_identity",
+            lambda _s, _n: PackageIdentity("pytorch", "abc123def456"),
+        )
 
         def fake_diff(cmd, **kwargs):
             class R:
@@ -724,6 +814,62 @@ class TestUpdateIndexMetadata:
         cache_file, src = self._run_noop_update(tmp_path, monkeypatch)
         written = json.loads(cache_file.read_text())["metadata"]
         assert set(indexer._cache_metadata(str(src))) <= set(written)
+
+
+class TestBuildIndexRegistrations:
+    def test_registration_records_land_in_index_and_cache(self, tmp_path, monkeypatch):
+        src = tmp_path / "src"
+        (src / "pkg").mkdir(parents=True)
+        (src / "pkg" / "ops.py").write_text(
+            "@CustomOp.register('silu')\nclass Silu:\n    pass\n"
+        )
+        cache_dir = tmp_path / "cache"
+        cache_dir.mkdir()
+        monkeypatch.setattr(indexer, "CACHE_DIR", cache_dir)
+        monkeypatch.setattr(
+            indexer, "_cache_path", lambda _s: cache_dir / "bindings.json"
+        )
+        monkeypatch.setattr(
+            indexer,
+            "detect_package_identity",
+            lambda _s, _n: PackageIdentity("fake", "abc123def456"),
+        )
+        m = ConventionManifest(
+            package="fake",
+            cpp_search_dirs=(),
+            python_search_dirs=("pkg",),
+            decorator_registries={"CustomOp.register": "custom_ops"},
+        )
+
+        data = indexer._build_index(str(src), manifest=m)
+
+        (rec,) = data["registrations"]["records"]
+        assert rec["key"] == "silu"
+        assert rec["target"] == "pkg.ops.Silu"
+        assert rec["kind"] == "resolved"
+        cached = json.loads((cache_dir / "bindings.json").read_text())
+        assert cached["registrations"]["records"] == [rec]
+
+
+class TestManifestYamlSources:
+    def test_custom_yaml_path_honored(self, tmp_path):
+        (tmp_path / "defs").mkdir()
+        (tmp_path / "defs" / "ops.yaml").write_text("- func: foo() -> Tensor\n")
+        m = ConventionManifest(
+            package="fake", cpp_search_dirs=(), native_functions_yaml="defs/ops.yaml"
+        )
+        functions, derivatives = indexer._parse_native_functions(str(tmp_path), m)
+        assert "foo" in functions
+        assert derivatives == {}
+
+    def test_undeclared_yaml_sources_are_skipped(self, tmp_path):
+        nf = tmp_path / "aten/src/ATen/native/native_functions.yaml"
+        nf.parent.mkdir(parents=True)
+        nf.write_text("- func: bar() -> Tensor\n")
+        m = ConventionManifest(package="fake", cpp_search_dirs=())
+        functions, derivatives = indexer._parse_native_functions(str(tmp_path), m)
+        assert functions == {}
+        assert derivatives == {}
 
 
 class TestFuzzyFindDeterminism:
