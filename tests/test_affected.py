@@ -19,7 +19,7 @@ from torchtalk.analysis.affected import (
     normalize_api,
     symbols_in_file,
 )
-from torchtalk.tools.affected import _do_affected
+from torchtalk.tools.affected import _do_affected, _split_funcs
 
 
 class TestNormalizeApi:
@@ -1618,3 +1618,53 @@ class TestAffectedTool:
         result = asyncio.run(_do_affected("foo_kernel"))
         # 12 fuzzy helpers -> preview shows 10 with `+2 more`.
         assert "+2 more" in result
+
+
+class TestSplitFuncs:
+    def test_comma_inside_template_args_not_split(self):
+        assert _split_funcs("vec<T, N>::store, at::native::gelu") == [
+            "vec<T, N>::store",
+            "at::native::gelu",
+        ]
+
+    def test_plain_csv(self):
+        assert _split_funcs(" a , b ") == ["a", "b"]
+
+    def test_nested_templates(self):
+        assert _split_funcs("f<a<b, c>, d>, g") == ["f<a<b, c>, d>", "g"]
+
+    def test_empty_tokens_dropped(self):
+        assert _split_funcs(",foo,,") == ["foo"]
+
+
+class TestAffectedDepthClamp:
+    def test_depth_clamped_like_graph(self, monkeypatch):
+        from unittest.mock import MagicMock
+
+        from torchtalk import indexer
+        from torchtalk.tools import affected as affected_tool
+
+        ext = MagicMock()
+        ext.get_callers.return_value = []
+        monkeypatch.setattr(indexer._state, "bindings", [{"x": 1}])
+        monkeypatch.setattr(indexer._state, "cpp_extractor", ext)
+        captured = {}
+
+        def fake_affected_tests(**kwargs):
+            captured.update(kwargs)
+            return {
+                "callers_walked": 0,
+                "bindings_matched": [],
+                "python_apis": [],
+                "api_sources": {},
+                "api_tier": {},
+                "test_runs": [],
+            }
+
+        monkeypatch.setattr(affected_tool, "affected_tests", fake_affected_tests)
+        monkeypatch.delenv("TORCHTALK_GRAPH_MAX_DEPTH", raising=False)
+
+        asyncio.run(_do_affected("foo", depth=-1))
+        assert captured["depth"] == 1
+        asyncio.run(_do_affected("foo", depth=99))
+        assert captured["depth"] == 5

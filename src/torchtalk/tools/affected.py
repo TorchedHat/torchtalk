@@ -5,6 +5,26 @@ from __future__ import annotations
 from ..analysis.affected import affected_tests
 from ..formatting import create_formatter
 from ..indexer import _cpp_status, _ensure_loaded, _state
+from .graph import _max_depth
+
+
+def _split_funcs(funcs: str) -> list[str]:
+    """Split on commas outside angle brackets so template args stay intact."""
+    out: list[str] = []
+    buf: list[str] = []
+    nesting = 0
+    for ch in funcs:
+        if ch == "<":
+            nesting += 1
+        elif ch == ">":
+            nesting = max(0, nesting - 1)
+        if ch == "," and nesting == 0:
+            out.append("".join(buf).strip())
+            buf = []
+        else:
+            buf.append(ch)
+    out.append("".join(buf).strip())
+    return [f for f in out if f]
 
 
 async def _do_affected(funcs: str, depth: int = 3) -> str:
@@ -12,9 +32,11 @@ async def _do_affected(funcs: str, depth: int = 3) -> str:
     if status := _cpp_status():
         return status
 
-    func_list = [f.strip() for f in funcs.split(",") if f.strip()]
+    func_list = _split_funcs(funcs)
     if not func_list:
         return "No functions provided."
+
+    depth = min(max(depth, 1), _max_depth())
 
     result = affected_tests(
         funcs=func_list,
