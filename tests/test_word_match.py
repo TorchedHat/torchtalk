@@ -35,3 +35,15 @@ class TestWordMatch:
 
     def test_no_match(self):
         assert not _word_match("matmul", "softmax")
+
+
+class TestLaterOccurrences:
+    def test_boundary_hit_after_failed_first_occurrence(self):
+        # first "add" is inside "padding" (fails), second is word-bounded
+        assert _word_match("add", "test_padding_add") is True
+
+    def test_all_occurrences_embedded_still_rejects(self):
+        assert _word_match("add", "test_padding_paddle") is False
+
+    def test_repeated_embedded_then_bounded(self):
+        assert _word_match("norm", "test_normalize_layer_norm") is True

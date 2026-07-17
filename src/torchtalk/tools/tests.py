@@ -4,26 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ..formatting import create_formatter, relative_path
+from ..analysis.helpers import word_match as _word_match
+from ..formatting import create_formatter
 from ..indexer import _ensure_loaded, _state
-
-
-def _rel_path(path: str) -> str:
-    return relative_path(path, _state.pytorch_source)
-
-
-def _word_match(query_lower: str, name_lower: str) -> bool:
-    """Match on word boundaries to avoid 'add' matching 'padding'."""
-    idx = name_lower.find(query_lower)
-    if idx == -1:
-        return False
-    before = name_lower[idx - 1] if idx > 0 else "_"
-    after = (
-        name_lower[idx + len(query_lower)]
-        if idx + len(query_lower) < len(name_lower)
-        else "_"
-    )
-    return not before.isalpha() and not after.isalpha()
 
 
 async def _do_find_similar_tests(
@@ -35,6 +18,7 @@ async def _do_find_similar_tests(
     # would match every indexed file — refuse rather than dump 1k+ paths.
     if not query.strip():
         return "Provide a query string to search tests."
+    limit = max(1, limit)
 
     query_lower = query.lower()
     md = create_formatter()
@@ -238,6 +222,8 @@ async def _do_list_test_utils() -> str:
 
 async def _do_test_file_info(query: str) -> str:
     _ensure_loaded("test")
+    if not query.strip():
+        return "Provide a test file name."
 
     needle = query.lower()
     matches = []

@@ -42,10 +42,10 @@ class TestTranslateArgs:
         out = _translate_args("/x.cpp", raw, cuda_env=None)
         assert out == ["-I/foo", "-DBAR=1", "-std=c++17"]
 
-    def test_cu_without_cuda_env_falls_back_to_cpp_filter(self):
+    def test_cu_without_cuda_env_parses_host_side_as_cpp(self):
         raw = ["-O2", "-I/foo", "-DBAR=1", "-std=c++17"]
         out = _translate_args("/x.cu", raw, cuda_env=None)
-        assert out == ["-I/foo", "-DBAR=1", "-std=c++17"]
+        assert out == ["-x", "c++", "-I/foo", "-DBAR=1", "-std=c++17"]
 
     def test_cu_with_cuda_env_emits_cuda_flag_stack(self):
         env = {
@@ -452,6 +452,7 @@ class TestTuStatus:
             "parse_failed": 1,
             "unsupported_language": 1,
             "filtered": 3,
+            "cu_unindexed": 1,
         }
 
     def test_coverage_summary_empty_when_no_tus_tracked(self, extractor):
@@ -612,3 +613,233 @@ class TestIncludeDirsPersistence:
         )
         assert extractor.load_from_path(legacy)
         assert extractor.include_dirs == []
+
+
+class _FakePool:
+    def __init__(self, processes=None):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def map(self, fn, items):
+        return [fn(i) for i in items]
+
+
+class TestSupportedExtensions:
+    """.cc/.cxx parse like .cpp; .cu is attempted even without a CUDA env."""
+
+    def test_cc_cxx_cu_are_parsed_without_cuda_env(
+        self, extractor, tmp_path, monkeypatch
+    ):
+        src = tmp_path / "repo"
+        (src / "src").mkdir(parents=True)
+        db = []
+        for name in ("a.cpp", "b.cc", "c.cxx", "d.cu", "e.mm"):
+            p = src / "src" / name
+            p.write_text("")
+            db.append({"file": str(p), "directory": str(src), "command": f"c++ {p}"})
+        (src / "compile_commands.json").write_text(json.dumps(db))
+
+        monkeypatch.setattr(cpp_call_graph, "_discover_cuda_env", lambda: None)
+        monkeypatch.setattr(cpp_call_graph, "should_exclude", lambda _p: False)
+        monkeypatch.setattr(cpp_call_graph, "should_include_dir", lambda _p, _d: True)
+        monkeypatch.setattr(cpp_call_graph, "Pool", _FakePool)
+
+        parsed: list[str] = []
+
+        def fake_parse(args):
+            fp, _ = args
+            parsed.append(fp)
+            return {
+                "file": fp,
+                "callees": {},
+                "callers": {},
+                "function_locations": {},
+                "includes": [],
+                "success": True,
+                "error": None,
+            }
+
+        monkeypatch.setattr(cpp_call_graph, "_parse_single_file", fake_parse)
+
+        extractor.extract_from_pytorch_parallel(str(src), num_workers=2)
+
+        names = {p.rsplit("/", 1)[-1] for p in parsed}
+        assert names == {"a.cpp", "b.cc", "c.cxx", "d.cu"}
+        assert extractor.tu_status["src/e.mm"] == "unsupported_language"
+        for parsed_tu in ("src/a.cpp", "src/b.cc", "src/c.cxx", "src/d.cu"):
+            assert extractor.tu_status[parsed_tu] == "ok"
+
+
+class TestCoverageSummaryComposition:
+    def test_reports_unindexed_cu_and_cc_counts(self, extractor):
+        extractor.tu_status = {
+            "src/a.cpp": "ok",
+            "src/k.cu": "parse_failed",
+            "src/l.cu": "unsupported_language",
+            "src/m.cc": "parse_failed",
+            "src/n.mm": "unsupported_language",
+            "src/o.cu": "ok",
+        }
+        cov = extractor.coverage_summary()
+        assert cov["cu_unindexed"] == 2
+        assert cov["cc_unindexed"] == 1
+        assert cov["ok"] == 2
+        assert cov["parse_failed"] == 2
+        assert cov["unsupported_language"] == 2
+
+    def test_fully_indexed_has_no_composition_keys(self, extractor):
+        extractor.tu_status = {"src/a.cpp": "ok", "src/d.cu": "ok"}
+        cov = extractor.coverage_summary()
+        assert "cu_unindexed" not in cov
+        assert "cc_unindexed" not in cov
+
+
+class TestHeaderStaleEdgeEviction:
+    """update_files must evict header-owned records the re-parse observes."""
+
+    def test_removed_header_edge_gone_after_update(self, extractor, monkeypatch):
+        _seed(
+            extractor,
+            {
+                "/B.h": {
+                    "callees": {"inline_fn": ["old_callee", "kept_callee"]},
+                    "callers": {
+                        "old_callee": ["inline_fn"],
+                        "kept_callee": ["inline_fn"],
+                    },
+                    "function_locations": {"inline_fn": ("/B.h", 3)},
+                },
+                "/C.h": {
+                    "callees": {"other_fn": ["x"]},
+                    "callers": {"x": ["other_fn"]},
+                    "function_locations": {"other_fn": ("/C.h", 1)},
+                },
+            },
+        )
+
+        def fake_parse(args):
+            return {
+                "file": "/A.cpp",
+                "callees": {"inline_fn": ["kept_callee"]},
+                "callers": {"kept_callee": ["inline_fn"]},
+                "function_locations": {"inline_fn": ("/B.h", 3)},
+                "includes": [],
+                "success": True,
+                "error": None,
+            }
+
+        monkeypatch.setattr(cpp_call_graph, "_parse_single_file", fake_parse)
+        extractor.update_files(entries=[("/A.cpp", [])])
+
+        assert "old_callee" not in extractor.callees["inline_fn"]
+        assert "kept_callee" in extractor.callees["inline_fn"]
+        assert "inline_fn" not in extractor.callers.get("old_callee", set())
+
+    def test_unobserved_header_records_survive(self, extractor, monkeypatch):
+        _seed(
+            extractor,
+            {
+                "/C.h": {
+                    "callees": {"other_fn": ["x"]},
+                    "callers": {"x": ["other_fn"]},
+                    "function_locations": {"other_fn": ("/C.h", 1)},
+                },
+            },
+        )
+
+        def fake_parse(args):
+            return {
+                "file": "/A.cpp",
+                "callees": {"tu_fn": ["y"]},
+                "callers": {"y": ["tu_fn"]},
+                "function_locations": {"tu_fn": ("/A.cpp", 10)},
+                "includes": [],
+                "success": True,
+                "error": None,
+            }
+
+        monkeypatch.setattr(cpp_call_graph, "_parse_single_file", fake_parse)
+        extractor.update_files(entries=[("/A.cpp", [])])
+
+        assert "x" in extractor.callees["other_fn"]
+        assert "other_fn" in extractor.callers["x"]
+
+
+class TestCacheFingerprint:
+    """Call-graph cache must self-invalidate when source content changes."""
+
+    def _seeded(self, extractor):
+        _seed(
+            extractor,
+            {
+                "/a.cpp": {
+                    "callees": {"f": ["g"]},
+                    "callers": {"g": ["f"]},
+                    "function_locations": {"f": ("/a.cpp", 1)},
+                }
+            },
+        )
+        return extractor
+
+    def test_mismatched_fingerprint_rejected(self, extractor, tmp_path):
+        self._seeded(extractor).save_cache("k", fingerprint="fp1")
+        fresh = CppCallGraphExtractor(cache_dir=tmp_path)
+        assert fresh.load_cache("k", expect_fingerprint="fp2") is False
+        assert fresh.function_locations == {}
+
+    def test_matching_fingerprint_loads(self, extractor, tmp_path):
+        self._seeded(extractor).save_cache("k", fingerprint="fp1")
+        fresh = CppCallGraphExtractor(cache_dir=tmp_path)
+        assert fresh.load_cache("k", expect_fingerprint="fp1") is True
+        assert "f" in fresh.function_locations
+
+    def test_legacy_cache_without_fingerprint_rejected(self, extractor, tmp_path):
+        self._seeded(extractor).save_cache("k")
+        fresh = CppCallGraphExtractor(cache_dir=tmp_path)
+        assert fresh.load_cache("k", expect_fingerprint="fp1") is False
+
+    def test_no_expectation_loads_anything(self, extractor, tmp_path):
+        self._seeded(extractor).save_cache("k", fingerprint="fp1")
+        fresh = CppCallGraphExtractor(cache_dir=tmp_path)
+        assert fresh.load_cache("k") is True
+
+
+class TestLevenshteinCap:
+    def test_long_names_do_not_cross_match_unrelated_ops(self, extractor):
+        _seed(
+            extractor,
+            {
+                "/nll.cpp": {
+                    "callees": {},
+                    "callers": {"nll_loss_backward_out_cpu_template": ["nll_caller"]},
+                    "function_locations": {
+                        "nll_loss_backward_out_cpu_template": ("/nll.cpp", 1)
+                    },
+                },
+            },
+        )
+        # 38-char query: old rule allowed 12 edits, matching nll_loss_*.
+        matches = extractor.match_functions(
+            "avg_pool2d_backward_out_cuda_template", fuzzy=True
+        )
+        assert matches == []
+
+    def test_small_typos_still_match(self, extractor):
+        _seed(
+            extractor,
+            {
+                "/s.cpp": {
+                    "callees": {},
+                    "callers": {},
+                    "function_locations": {"softmax_kernel": ("/s.cpp", 1)},
+                },
+            },
+        )
+        assert extractor.match_functions("softmax_kernal", fuzzy=True) == [
+            "softmax_kernel"
+        ]

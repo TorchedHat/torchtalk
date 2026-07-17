@@ -219,3 +219,86 @@ class TestCudaDeviceFuncBinding:
             if b.binding_type == BindingType.CUDA_DEVICE_FUNC.value
         ]
         assert device_bindings == []
+
+
+class TestModuleVarTorchOps:
+    def test_library_block_uses_declared_module_variable(self):
+        code = (
+            "TORCH_LIBRARY(myns, lib) {\n"
+            '  lib.def("custom_op(Tensor t) -> Tensor");\n'
+            "}\n"
+        )
+        graph = BindingDetector().detect_bindings("/v.cpp", code)
+        assert any(b.python_name == "myns.custom_op" for b in graph.bindings)
+
+
+class TestBindingToDict:
+    def test_emits_line_number_key(self):
+        from torchtalk.analysis.binding_detector import Binding
+
+        d = Binding(
+            python_name="x",
+            cpp_name="x",
+            binding_type="torch_op",
+            file_path="/f.cpp",
+            line_number=7,
+        ).to_dict()
+        assert d["line_number"] == 7
+        assert "line" not in d
+
+
+class TestStandalonePybindBounds:
+    def test_def_chain_bounded_by_semicolon(self):
+        code = (
+            'py::class_<Foo>(m, "Foo")\n'
+            '    .def("real_method", &Foo::real_method);\n'
+            "\n"
+            'm.def("unrelated_fn", &unrelated_fn);\n'
+            'other.attr("x").def("phantom_method", &Bar::phantom);\n'
+        )
+        graph = BindingDetector().detect_bindings("/x.cpp", code)
+        names = {b.python_name for b in graph.bindings}
+        assert "Foo.real_method" in names
+        assert "Foo.phantom_method" not in names
+
+    def test_module_region_not_double_extracted(self):
+        code = (
+            "PYBIND11_MODULE(mymod, m) {\n"
+            '  py::class_<Foo>(m, "Foo")\n'
+            '      .def("method_a", &Foo::method_a);\n'
+            "}\n"
+        )
+        graph = BindingDetector().detect_bindings("/y.cpp", code)
+        rows = [
+            (b.python_name, b.binding_type)
+            for b in graph.bindings
+            if b.python_name == "Foo.method_a"
+        ]
+        assert len(rows) == 1
+
+
+class TestEnclosingFunctionKeywords:
+    def test_kernel_launch_inside_if_attributes_to_function(self):
+        code = (
+            "__global__ void my_kernel(float* x) {}\n"
+            "void launch_my_kernel(float* x) {\n"
+            "  if (x != nullptr) {\n"
+            "    my_kernel<<<1, 1>>>(x);\n"
+            "  }\n"
+            "}\n"
+        )
+        graph = BindingDetector().detect_bindings("/k.cu", code)
+        kernel = next(k for k in graph.cuda_kernels if k.name == "my_kernel")
+        assert kernel.called_by == ["launch_my_kernel"]
+
+    def test_at_dispatch_inside_for_not_named_for(self):
+        code = (
+            "void gelu_impl(Tensor& t) {\n"
+            "  for (int i = 0; i < 2; i++) {\n"
+            '    AT_DISPATCH_FLOATING_TYPES(t.scalar_type(), "gelu", [&] {});\n'
+            "  }\n"
+            "}\n"
+        )
+        graph = BindingDetector().detect_bindings("/d.cpp", code)
+        disp = next(b for b in graph.bindings if b.binding_type == "at_dispatch")
+        assert disp.cpp_name == "gelu_impl"

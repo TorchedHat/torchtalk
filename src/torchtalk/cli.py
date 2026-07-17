@@ -178,8 +178,10 @@ def cmd_status(args):
 
 def cmd_mcp_serve(args):
     """Start MCP server for Claude Code integration."""
+    from torchtalk.formatting import set_formatter_mode
     from torchtalk.server import run_server
 
+    set_formatter_mode(args.format)
     run_server(
         pytorch_source=args.pytorch_source,
         index_path=args.index,
@@ -641,6 +643,12 @@ First run builds the index (a few minutes); subsequent runs use cache.
         choices=["stdio", "streamable-http"],
         help="MCP transport type (default: stdio for Claude Code)",
     )
+    parser_mcp.add_argument(
+        "--format",
+        default="compact",
+        choices=["compact", "markdown"],
+        help="Tool response format (default: compact)",
+    )
     parser_mcp.add_argument("--debug", action="store_true", help="Enable debug logging")
     parser_mcp.set_defaults(func=cmd_mcp_serve)
 
@@ -753,7 +761,7 @@ First run builds the index (a few minutes); subsequent runs use cache.
         parser.print_help()
         sys.exit(1)
 
-    args.func(args)
+    sys.exit(args.func(args) or 0)
 
 
 if __name__ == "__main__":

@@ -169,6 +169,8 @@ def relative_path(full_path: str, base: str | None = None) -> str:
 
 def coverage_note(extractor) -> str:
     """Return a one-line C++ TU coverage summary, or '' when empty."""
+    if extractor is None:
+        return ""
     cov = extractor.coverage_summary()
     if not cov:
         return ""
@@ -181,8 +183,14 @@ def coverage_note(extractor) -> str:
         return ""
     bits = []
     if unsupported:
-        bits.append(f"{unsupported:,} CUDA/.mm/.cc")
+        bits.append(f"{unsupported:,} unsupported")
     if parse_failed:
         bits.append(f"{parse_failed:,} parse-failed")
-    unindexed = f"; unindexed: {', '.join(bits)}" if bits else ""
+    comp = []
+    if cu := cov.get("cu_unindexed", 0):
+        comp.append(f"{cu:,} .cu")
+    if cc := cov.get("cc_unindexed", 0):
+        comp.append(f"{cc:,} .cc")
+    composition = f" (incl. {', '.join(comp)})" if comp else ""
+    unindexed = f"; unindexed: {', '.join(bits)}{composition}" if bits else ""
     return f"Coverage: {ok:,} of {total:,} C++ TUs indexed{unindexed}."

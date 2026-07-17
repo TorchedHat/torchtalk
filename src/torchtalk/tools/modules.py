@@ -3,12 +3,9 @@
 from __future__ import annotations
 
 from ..analysis.helpers import fuzzy_match
-from ..formatting import create_formatter, relative_path
+from ..formatting import create_formatter
 from ..indexer import _ensure_loaded, _state
-
-
-def _rel_path(path: str) -> str:
-    return relative_path(path, _state.pytorch_source)
+from .common import _rel_path
 
 
 async def _do_trace_module(module_name: str, focus: str = "methods") -> str:
@@ -16,6 +13,9 @@ async def _do_trace_module(module_name: str, focus: str = "methods") -> str:
 
     if not _state.py_classes:
         return "Python module analysis not available. Ensure PyTorch source is loaded."
+
+    if not module_name.strip():
+        return "Provide a module or class name."
 
     search_name = module_name.split(".")[-1]
 
@@ -89,21 +89,12 @@ async def _do_list_modules(category: str = "nn") -> str:
         modules = sorted(_state.nn_modules, key=lambda x: x.name)
         md.text(f"Found {len(modules)} nn.Module subclasses\n")
 
-        # Group by type
-        layers = [
-            m
-            for m in modules
-            if not any(x in m.name for x in ["Loss", "Container", "Sequential"])
-        ]
+        # Group by type — buckets must partition (no double-count)
+        container_markers = ["Container", "Sequential", "ModuleList", "ModuleDict"]
         losses = [m for m in modules if "Loss" in m.name]
-        containers = [
-            m
-            for m in modules
-            if any(
-                x in m.name
-                for x in ["Container", "Sequential", "ModuleList", "ModuleDict"]
-            )
-        ]
+        containers = [m for m in modules if any(x in m.name for x in container_markers)]
+        grouped = {m.name for m in losses} | {m.name for m in containers}
+        layers = [m for m in modules if m.name not in grouped]
 
         if layers:
             md.h3(f"Layers ({len(layers)})")
@@ -128,10 +119,14 @@ async def _do_list_modules(category: str = "nn") -> str:
             cls
             for name, classes in _state.py_classes.items()
             for cls in classes
-            if "optim" in cls.qualified_name.lower() and not name.startswith("_")
+            if cls.qualified_name.lower().startswith("torch.optim.")
+            and not name.startswith("_")
         ]
-        for cls in sorted(optim_classes, key=lambda x: x.name)[:20]:
+        ranked = sorted(optim_classes, key=lambda x: x.name)
+        for cls in ranked[:20]:
             md.item(f"`{cls.name}` - {cls.qualified_name}")
+        if len(ranked) > 20:
+            md.item(f"*... and {len(ranked) - 20} more.*")
 
     elif category == "all":
         md.h2("All Python Classes")

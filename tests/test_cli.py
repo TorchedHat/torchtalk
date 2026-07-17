@@ -143,3 +143,58 @@ class TestReadCacheStats:
         path = tmp_path / "cg.json"
         path.write_text("not json")
         assert _read_cache_stats(path) is None
+
+
+class TestMainExitCode:
+    """main() must propagate cmd_* return codes as process exit codes."""
+
+    def test_failing_command_exits_1(self, tmp_path, monkeypatch):
+        import pytest
+
+        from torchtalk import cli as cli_module
+        from torchtalk import snapshots
+
+        monkeypatch.setattr(snapshots, "SNAPSHOTS_DIR", tmp_path / "snapshots")
+        monkeypatch.setattr(
+            "sys.argv", ["torchtalk", "snapshot", "delete", "nonexistent"]
+        )
+        with pytest.raises(SystemExit) as exc:
+            cli_module.main()
+        assert exc.value.code == 1
+
+    def test_succeeding_command_exits_0(self, tmp_path, monkeypatch, capsys):
+        import pytest
+
+        from torchtalk import cli as cli_module
+        from torchtalk import snapshots
+
+        monkeypatch.setattr(snapshots, "SNAPSHOTS_DIR", tmp_path / "snapshots")
+        monkeypatch.setattr("sys.argv", ["torchtalk", "snapshot", "list"])
+        with pytest.raises(SystemExit) as exc:
+            cli_module.main()
+        assert exc.value.code == 0
+        assert "No snapshots found" in capsys.readouterr().out
+
+
+class TestFormatFlag:
+    def test_mcp_serve_wires_formatter_mode(self, monkeypatch):
+        from torchtalk import cli as cli_module
+        from torchtalk import formatting
+
+        monkeypatch.setattr("torchtalk.server.run_server", lambda **kw: None)
+        args = type(
+            "A",
+            (),
+            {
+                "harness": None,
+                "format": "markdown",
+                "pytorch_source": None,
+                "index": None,
+                "transport": "stdio",
+            },
+        )()
+        try:
+            cli_module.cmd_mcp_serve(args)
+            assert isinstance(formatting.create_formatter(), formatting.Markdown)
+        finally:
+            formatting.set_formatter_mode("compact")

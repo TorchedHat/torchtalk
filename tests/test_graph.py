@@ -40,14 +40,28 @@ class TestMaxDepth:
 
 
 class _FakeExtractor:
-    def __init__(self, edges: dict[str, list[dict]], fuzzy_only: set[str]):
+    def __init__(
+        self,
+        edges: dict[str, list[dict]],
+        fuzzy_only: set[str] | None = None,
+        coverage: dict[str, int] | None = None,
+        matches: dict[str, list[str]] | None = None,
+    ):
         self._edges = edges
-        self._fuzzy_only = fuzzy_only
+        self._fuzzy_only = fuzzy_only or set()
+        self._coverage = coverage or {}
+        self._matches = matches or {}
 
     def get_callers(self, name: str, fuzzy: bool = True) -> list[dict]:
         if name in self._fuzzy_only and not fuzzy:
             return []
         return self._edges.get(name, [])
+
+    def coverage_summary(self) -> dict[str, int]:
+        return self._coverage
+
+    def match_functions(self, name: str, fuzzy: bool = True) -> list[str]:
+        return self._matches.get(name, [name])
 
 
 @pytest.fixture
@@ -213,3 +227,189 @@ class TestImpactDepthClamp:
         out = asyncio.run(_do_impact("a", depth=10, fuzzy_all_levels=True))
         assert "`b`" in out and "`c`" in out and "`d`" in out
         assert "`e`" not in out and "`f`" not in out
+
+
+class TestCalledByCudaGap:
+    """_do_called_by must disclose unindexed .cu TUs instead of a confident
+    empty/narrow answer."""
+
+    def _setup(self, monkeypatch, edges, coverage):
+        indexer._state.cpp_extractor = _FakeExtractor(edges, coverage=coverage)
+        monkeypatch.setattr(graph_mod, "_cpp_status", lambda: "")
+        monkeypatch.setattr(graph_mod, "coverage_note", lambda _: "", raising=False)
+
+    def test_empty_result_mentions_cuda_gap(self, reset_extractor, monkeypatch):
+        self._setup(monkeypatch, {}, {"cu_unindexed": 397})
+        out = asyncio.run(graph_mod._do_called_by("GeluCUDAKernelImpl"))
+        assert "No inbound callers" in out
+        assert "397 .cu TUs unindexed" in out
+        assert "CUDA callers unknown" in out
+
+    def test_cuda_adjacent_result_mentions_gap(self, reset_extractor, monkeypatch):
+        edges = {
+            "gelu_out": [
+                {
+                    "caller": "GeluKernelImpl",
+                    "caller_file": "/src/aten/native/cuda/Gelu.cu",
+                    "caller_line": 5,
+                }
+            ]
+        }
+        self._setup(monkeypatch, edges, {"cu_unindexed": 10})
+        out = asyncio.run(graph_mod._do_called_by("gelu_out"))
+        assert "GeluKernelImpl" in out
+        assert "10 .cu TUs unindexed" in out
+
+    def test_cuda_named_query_mentions_gap(self, reset_extractor, monkeypatch):
+        edges = {
+            "launch_cuda_gemm": [
+                {"caller": "gemm_entry", "caller_file": "/a.cpp", "caller_line": 1}
+            ]
+        }
+        self._setup(monkeypatch, edges, {"cu_unindexed": 3})
+        out = asyncio.run(graph_mod._do_called_by("launch_cuda_gemm"))
+        assert "3 .cu TUs unindexed" in out
+
+    def test_non_cuda_result_omits_gap(self, reset_extractor, monkeypatch):
+        edges = {"foo": [{"caller": "bar", "caller_file": "/a.cpp", "caller_line": 1}]}
+        self._setup(monkeypatch, edges, {"cu_unindexed": 10})
+        out = asyncio.run(graph_mod._do_called_by("foo"))
+        assert "CUDA callers unknown" not in out
+
+    def test_no_gap_no_note(self, reset_extractor, monkeypatch):
+        self._setup(monkeypatch, {}, {})
+        out = asyncio.run(graph_mod._do_called_by("GeluCUDAKernelImpl"))
+        assert "CUDA callers unknown" not in out
+
+
+class TestFuzzyResolutionDisclosure:
+    """Fuzzy graph lookups disclose resolution instead of merging neighborhoods."""
+
+    def _setup(self, monkeypatch, ext):
+        indexer._state.cpp_extractor = ext
+        monkeypatch.setattr(graph_mod, "_cpp_status", lambda: "")
+        monkeypatch.setattr(graph_mod, "coverage_note", lambda _: "", raising=False)
+
+    def test_fuzzy_resolution_disclosed(self, reset_extractor, monkeypatch):
+        edges = {
+            "at::native::gemm": [
+                {"caller": "linear_fwd", "caller_file": "/a.cpp", "caller_line": 1}
+            ]
+        }
+        matches = {"gemm": ["at::native::gemm", "at::cpublas::gemm"]}
+        self._setup(monkeypatch, _FakeExtractor(edges, matches=matches))
+
+        out = asyncio.run(graph_mod._do_called_by("gemm"))
+        assert "Resolved 'gemm' → 'at::native::gemm' (fuzzy)" in out
+        assert "at::cpublas::gemm" in out
+        assert "linear_fwd" in out
+
+    def test_multiple_matches_not_merged(self, reset_extractor, monkeypatch):
+        edges = {
+            "at::native::gemm": [
+                {"caller": "linear_fwd", "caller_file": "/a.cpp", "caller_line": 1}
+            ],
+            "at::cpublas::gemm": [
+                {"caller": "blas_entry", "caller_file": "/b.cpp", "caller_line": 2}
+            ],
+        }
+        matches = {"gemm": ["at::native::gemm", "at::cpublas::gemm"]}
+        self._setup(monkeypatch, _FakeExtractor(edges, matches=matches))
+
+        out = asyncio.run(graph_mod._do_called_by("gemm"))
+        assert "linear_fwd" in out
+        assert "blas_entry" not in out
+
+    def test_exact_match_has_no_disclosure(self, reset_extractor, monkeypatch):
+        edges = {
+            "addmm": [{"caller": "linear", "caller_file": "/a.cpp", "caller_line": 1}]
+        }
+        self._setup(monkeypatch, _FakeExtractor(edges))
+
+        out = asyncio.run(graph_mod._do_called_by("addmm"))
+        assert "Resolved" not in out
+        assert "linear" in out
+
+    def test_impact_discloses_resolution(self, reset_extractor, monkeypatch):
+        edges = {
+            "at::native::gemm": [
+                {"caller": "linear_fwd", "caller_file": "/a.cpp", "caller_line": 1}
+            ]
+        }
+        matches = {"gemm": ["at::native::gemm"]}
+        self._setup(monkeypatch, _FakeExtractor(edges, matches=matches))
+
+        out = asyncio.run(_do_impact("gemm", depth=1))
+        assert "Resolved 'gemm' → 'at::native::gemm' (fuzzy)" in out
+        assert "linear_fwd" in out
+
+
+class TestResolutionSkipsEmptyCandidates:
+    def test_first_candidate_with_callers_wins(self, reset_extractor, monkeypatch):
+        # rank-1 candidate has no callers; rank-2 holds the real answer
+        edges = {
+            "std::at::addmm": [
+                {
+                    "caller": "at::native::linear",
+                    "caller_file": "/l.cpp",
+                    "caller_line": 9,
+                }
+            ]
+        }
+        matches = {"addmm": ["at::addmm", "std::at::addmm"]}
+        indexer._state.cpp_extractor = _FakeExtractor(edges, matches=matches)
+        monkeypatch.setattr(graph_mod, "_cpp_status", lambda: "")
+        monkeypatch.setattr(graph_mod, "coverage_note", lambda _: "", raising=False)
+
+        out = asyncio.run(graph_mod._do_called_by("addmm"))
+        assert "Resolved 'addmm' → 'std::at::addmm' (fuzzy)" in out
+        assert "at::native::linear" in out
+        assert "`at::addmm`" in out  # listed as another match, not merged
+
+    def test_empty_result_still_disclosed(self, reset_extractor, monkeypatch):
+        matches = {"addmm": ["at::addmm", "std::at::addmm"]}
+        indexer._state.cpp_extractor = _FakeExtractor({}, matches=matches)
+        monkeypatch.setattr(graph_mod, "_cpp_status", lambda: "")
+        monkeypatch.setattr(graph_mod, "coverage_note", lambda _: "", raising=False)
+
+        out = asyncio.run(graph_mod._do_called_by("addmm"))
+        assert "No inbound callers" in out
+        assert "Resolved 'addmm'" in out
+        assert "std::at::addmm" in out
+
+
+class TestImpactIncludesSeed:
+    def test_walk_python_includes_seed_edges(self, reset_extractor, monkeypatch):
+        # Seed has a Python source caller but zero C++ callers at depth>0.
+        edges = {
+            "at::native::gelu": [
+                {"caller": "gelu_meta", "caller_file": "/m.cpp", "caller_line": 1}
+            ]
+        }
+        indexer._state.cpp_extractor = _FakeExtractor(edges)
+        monkeypatch.setattr(
+            indexer._state,
+            "py_to_cpp_edges",
+            {
+                "aten::gelu": [
+                    {
+                        "caller_qualname": "torch.nn.GELU.forward",
+                        "file": "/g.py",
+                        "line": 7,
+                    }
+                ]
+            },
+        )
+        monkeypatch.setattr(
+            indexer._state,
+            "by_cpp_name",
+            {"gelu": [{"python_name": "aten.gelu", "cpp_name": "gelu"}]},
+        )
+        monkeypatch.setattr(graph_mod, "_cpp_status", lambda: "")
+        monkeypatch.setattr(graph_mod, "coverage_note", lambda _: "", raising=False)
+
+        out = asyncio.run(
+            _do_impact("at::native::gelu", depth=1, walk_python=True, focus="full")
+        )
+        assert "Python Source Callers" in out
+        assert "torch.nn.GELU.forward" in out
