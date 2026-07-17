@@ -48,7 +48,7 @@ class Binding:
             "cpp_name": self.cpp_name,
             "type": self.binding_type,
             "file_path": self.file_path,
-            "line": self.line_number,
+            "line_number": self.line_number,
             "dispatch_key": self.dispatch_key,
             "namespace": self.namespace,
             "cuda_kernel": self.cuda_kernel,
@@ -81,6 +81,18 @@ class BindingGraph:
     def add_cuda_kernel(self, kernel: CUDAKernel):
         self.cuda_kernels.append(kernel)
 
+
+_CPP_CONTROL_KEYWORDS = {
+    "if",
+    "for",
+    "while",
+    "switch",
+    "do",
+    "else",
+    "return",
+    "catch",
+    "sizeof",
+}
 
 _IMPL_WRAPPERS = ("TORCH_FN_BOXED", "TORCH_FN")
 _NO_IMPL_MARKERS = ("makeFallthrough", "makeNamedNotSupported")
@@ -190,7 +202,12 @@ class BindingDetector:
                 module_node, content, file_path, module_name, graph
             )
 
-        self._extract_standalone_pybind_patterns(content, file_path, graph)
+        # Regions already covered by a PYBIND11_MODULE body are skipped in the
+        # standalone pass — running both fabricates duplicate rows.
+        module_ranges = [(n.start_byte(), n.end_byte()) for _, n in modules]
+        self._extract_standalone_pybind_patterns(
+            content, file_path, graph, module_ranges
+        )
 
     def _find_pybind11_modules(self, node, content: str) -> list[tuple[str, Any]]:
         modules = []
@@ -238,12 +255,18 @@ class BindingDetector:
         )
 
     def _extract_standalone_pybind_patterns(
-        self, content: str, file_path: str, graph: BindingGraph
+        self,
+        content: str,
+        file_path: str,
+        graph: BindingGraph,
+        skip_ranges: list[tuple[int, int]] | None = None,
     ):
         # py::class_<CppClass>(m, "PyClass") or py::class_<CppClass>(parent, "PyClass")
         class_pattern = r'py::class_<([^>]+)>\s*\(\s*\w+\s*,\s*"([^"]+)"'
 
         for match in re.finditer(class_pattern, content):
+            if any(s <= match.start() < e for s, e in skip_ranges or []):
+                continue
             cpp_class = match.group(1).split(",")[0].strip()
             python_name = match.group(2)
             line_number = content[: match.start()].count("\n") + 1
@@ -257,15 +280,20 @@ class BindingDetector:
             )
             graph.add_binding(binding)
 
-            # Find chained .def() methods for this class
-            # Look for .def("name", ...) patterns after the class definition
+            # The .def() chain ends at the statement's semicolon (or the next
+            # py::class_, whichever comes first) — scanning to EOF fabricates
+            # methods belonging to later statements.
             class_end = match.end()
-            # Find the semicolon or next py::class_ to bound the search
             next_class = content.find("py::class_", class_end)
-            if next_class == -1:
-                next_class = len(content)
+            semicolon = content.find(";", class_end)
+            if semicolon == -1:
+                class_extent = len(content) if next_class == -1 else next_class
+            elif next_class == -1:
+                class_extent = semicolon
+            else:
+                class_extent = min(semicolon, next_class)
 
-            class_body = content[class_end:next_class]
+            class_body = content[class_end:class_extent]
 
             # .def("method", &Class::method) or .def("method", [...])
             method_pattern = r'\.def(?:_static|_readwrite|_readonly)?\s*\(\s*"([^"]+)"'
@@ -407,7 +435,13 @@ class BindingDetector:
                 block_content = content[block_start:block_end]
 
                 self._extract_torch_ops(
-                    block_content, line_number, file_path, namespace, None, graph
+                    block_content,
+                    line_number,
+                    file_path,
+                    namespace,
+                    None,
+                    graph,
+                    module_var=match.group(2),
                 )
 
         # TORCH_LIBRARY_IMPL(namespace, dispatch_key, m) { ... }
@@ -432,6 +466,7 @@ class BindingDetector:
                     namespace,
                     dispatch_key,
                     graph,
+                    module_var=match.group(3),
                 )
 
     def _extract_torch_ops(
@@ -442,12 +477,15 @@ class BindingDetector:
         namespace: str,
         dispatch_key: str | None,
         graph: BindingGraph,
+        module_var: str = "m",
     ):
-        # m.def("op_name(Tensor self) -> Tensor", ...)
-        # Also handles: m.def(TORCH_SELECTIVE_SCHEMA("aten::op_name(...)"))
+        # <m>.def("op_name(Tensor self) -> Tensor", ...) where <m> is the
+        # module variable named in the registration macro (vLLM uses `ops`).
+        # Also handles: <m>.def(TORCH_SELECTIVE_SCHEMA("aten::op_name(...)"))
+        mv = re.escape(module_var)
         def_patterns = [
-            r'm\.def\s*\(\s*"([^"]+)"',  # Direct string
-            r'm\.def\s*\(\s*TORCH_SELECTIVE_SCHEMA\s*\(\s*"([^"]+)"',  # Via macro
+            rf'{mv}\.def\s*\(\s*"([^"]+)"',  # Direct string
+            rf'{mv}\.def\s*\(\s*TORCH_SELECTIVE_SCHEMA\s*\(\s*"([^"]+)"',  # Via macro
         ]
 
         for def_pattern in def_patterns:
@@ -475,7 +513,7 @@ class BindingDetector:
         # m.impl("op_name", function_ptr) — function_ptr may be wrapped in
         # TORCH_FN(...), TORCH_FN_BOXED(...), prefixed with `&`, or namespaced
         # (`at::native::foo`). Capture the full target then strip wrappers.
-        impl_pattern = r'm\.impl\s*\(\s*"([^"]+)"\s*,\s*([^,;]+?)\s*(?:[,)]|;)'
+        impl_pattern = rf'{mv}\.impl\s*\(\s*"([^"]+)"\s*,\s*([^,;]+?)\s*(?:[,)]|;)'
         for match in re.finditer(impl_pattern, block_content):
             op_name = match.group(1)
             # Strip overload suffix (`abs.out` → `abs`) so cpp_name is searchable
@@ -595,10 +633,12 @@ class BindingDetector:
             r"(?:static\s+)?(?:inline\s+)?(?:\w+::)*(\w+)\s*\([^)]*\)\s*(?:const\s*)?\{"
         )
 
-        matches = list(re.finditer(func_pattern, search_region))
-        if matches:
-            # Return the last (most recent) match
-            return matches[-1].group(1)
+        # Most recent non-keyword match: `if (...) {` / `for (...) {` blocks
+        # match the pattern but are control flow, not enclosing functions.
+        for match in reversed(list(re.finditer(func_pattern, search_region))):
+            name = match.group(1)
+            if name not in _CPP_CONTROL_KEYWORDS:
+                return name
         return None
 
     def _get_node_text(self, node, content: str) -> str:

@@ -72,6 +72,48 @@ def _with_note(text: str) -> str:
     return f"{text}\n\n{note}" if note else text
 
 
+def _cuda_gap_note() -> str:
+    cu = _state.cpp_extractor.coverage_summary().get("cu_unindexed", 0)
+    return f"{cu:,} .cu TUs unindexed — CUDA callers unknown." if cu else ""
+
+
+def _cuda_adjacent(function_name: str, items: list[dict], file_key: str) -> bool:
+    if "cuda" in function_name.lower():
+        return True
+    return any(
+        (it.get(file_key) or "").lower().endswith((".cu", ".cuh"))
+        or "cuda" in (it.get(file_key) or "").lower()
+        for it in items
+    )
+
+
+def _resolve_function(
+    function_name: str, relation: str = "callers"
+) -> tuple[str | None, str]:
+    """Resolve a query to ONE call-graph symbol, disclosing fuzzy resolution.
+
+    Ranked candidates come from match_functions; the first one with any
+    relations in the requested direction wins (deterministic). Only that
+    symbol is queried — candidates are listed in the note instead of
+    silently merging every match's neighborhood.
+    """
+    ext = _state.cpp_extractor
+    matches = ext.match_functions(function_name, fuzzy=True)
+    if not matches:
+        return None, ""
+    getter = ext.get_callees if relation == "callees" else ext.get_callers
+    resolved = next((m for m in matches if getter(m, fuzzy=False)), matches[0])
+    if resolved == function_name:
+        return resolved, ""
+    note = f"Resolved '{function_name}' → '{resolved}' (fuzzy)."
+    others = [m for m in matches if m != resolved]
+    if others:
+        shown = ", ".join(f"`{m}`" for m in others[:8])
+        more = f", +{len(others) - 8} more" if len(others) > 8 else ""
+        note += f" Other matches: {shown}{more}."
+    return resolved, note
+
+
 def _format_call_item(md, item: dict, name_key: str, file_key: str, line_key: str):
     name = item[name_key]
     if file_path := item.get(file_key):
@@ -83,17 +125,27 @@ def _format_call_item(md, item: dict, name_key: str, file_key: str, line_key: st
 
 async def _do_calls(function_name: str) -> str:
     _ensure_loaded()
+    if not function_name.strip():
+        return "Provide a function name."
     if status := _cpp_status():
         return status
 
-    callees = _state.cpp_extractor.get_callees(function_name, fuzzy=True)
+    resolved, note = _resolve_function(function_name, relation="callees")
+    callees = (
+        _state.cpp_extractor.get_callees(resolved, fuzzy=False) if resolved else []
+    )
     if not callees:
-        return _with_note(f"No outbound calls found for '{function_name}'.")
+        msg = f"No outbound calls found for '{function_name}'."
+        if note:
+            msg = f"{msg}\n\n{note}"
+        return _with_note(msg)
 
     results = dedupe_by_key(callees, "callee")
 
     md = create_formatter()
     md.h2(f"Calls: `{function_name}`")
+    if note:
+        md.text(note)
     md.text("*Functions this calls (outbound dependencies):*\n")
 
     for item in results[:15]:
@@ -107,17 +159,29 @@ async def _do_calls(function_name: str) -> str:
 
 async def _do_called_by(function_name: str) -> str:
     _ensure_loaded()
+    if not function_name.strip():
+        return "Provide a function name."
     if status := _cpp_status():
         return status
 
-    callers = _state.cpp_extractor.get_callers(function_name, fuzzy=True)
+    resolved, note = _resolve_function(function_name)
+    callers = (
+        _state.cpp_extractor.get_callers(resolved, fuzzy=False) if resolved else []
+    )
     if not callers:
-        return _with_note(f"No inbound callers found for '{function_name}'.")
+        msg = f"No inbound callers found for '{function_name}'."
+        if note:
+            msg = f"{msg}\n\n{note}"
+        if gap := _cuda_gap_note():
+            msg = f"{msg}\n\n{gap}"
+        return _with_note(msg)
 
     results = dedupe_by_key(callers, "caller")
 
     md = create_formatter()
     md.h2(f"Called by: `{function_name}`")
+    if note:
+        md.text(note)
     md.text("*Functions that call this (inbound dependents):*\n")
 
     for item in results[:15]:
@@ -125,6 +189,12 @@ async def _do_called_by(function_name: str) -> str:
 
     if len(results) > 15:
         md.text(f"\n*Showing 15 of {len(results)} callers.*")
+
+    if _cuda_adjacent(function_name, results, "caller_file") and (
+        gap := _cuda_gap_note()
+    ):
+        md.blank()
+        md.text(gap)
 
     return _with_note(md.build())
 
@@ -137,13 +207,19 @@ async def _do_impact(
     walk_python: bool = False,
 ) -> str:
     _ensure_loaded()
+    if not function_name.strip():
+        return "Provide a function name."
     if status := _cpp_status():
         return status
 
     depth = min(max(depth, 1), _max_depth())
 
+    resolved, note = _resolve_function(function_name)
+    if resolved is None:
+        return _with_note(f"No callers found for '{function_name}'.")
+
     visited = set()
-    current_level = {function_name}
+    current_level = {resolved}
     callers_by_depth: dict[int, list[dict]] = {}
 
     for level in range(1, depth + 1):
@@ -151,10 +227,11 @@ async def _do_impact(
         level_callers = []
 
         for func in current_level:
-            fuzzy = fuzzy_all_levels or level == 1
+            # Level 1 fuzziness is handled by the up-front resolution.
+            fuzzy = fuzzy_all_levels and level > 1
             for item in _state.cpp_extractor.get_callers(func, fuzzy=fuzzy):
                 caller = item["caller"]
-                if caller not in visited and caller != function_name:
+                if caller not in visited and caller not in (function_name, resolved):
                     visited.add(caller)
                     next_level.add(caller)
                     level_callers.append(item)
@@ -166,10 +243,15 @@ async def _do_impact(
             break
 
     if not callers_by_depth:
-        return _with_note(f"No callers found for '{function_name}'.")
+        msg = f"No callers found for '{function_name}'."
+        if note:
+            msg = f"{msg}\n\n{note}"
+        return _with_note(msg)
 
     md = create_formatter()
     md.h2(f"Impact Analysis: `{function_name}`")
+    if note:
+        md.text(note)
     md.text(f"*Tracing callers up to {depth} levels deep*\n")
 
     total = 0
@@ -185,6 +267,10 @@ async def _do_impact(
             md.item(f"*... and {len(unique) - 15} more*")
         md.blank()
 
+    # Both Python-facing sections must include the seed itself — a query on
+    # `at::native::gelu` has entry points/py-callers even with zero C++ callers.
+    impact_set = visited | {function_name, resolved}
+
     if focus == "full":
         python_entries = [
             {
@@ -192,7 +278,7 @@ async def _do_impact(
                 "cpp": c,
                 "dispatch": b.get("dispatch_key", ""),
             }
-            for c in visited
+            for c in impact_set
             if c in _state.by_cpp_name
             for b in _state.by_cpp_name[c][:1]
         ]
@@ -210,7 +296,7 @@ async def _do_impact(
         # Python wrappers that don't go through a registered binding.
         seen_callers: set[tuple[str, str, int]] = set()
         py_callers: list[dict] = []
-        for cpp in visited:
+        for cpp in impact_set:
             for hit in _python_callers_for(cpp):
                 key = (hit["caller_qualname"], hit["file"], hit["line"])
                 if key in seen_callers:

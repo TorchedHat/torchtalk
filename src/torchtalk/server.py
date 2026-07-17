@@ -64,6 +64,13 @@ async def get_status() -> str:
         )
     if _state.derivatives:
         md.bold("Derivatives", f"{len(_state.derivatives):,} formulas")
+    if _state.registrations:
+        md.bold(
+            "Registrations",
+            f"{len(_state.registrations.get('records', [])):,} records, "
+            f"{len(_state.registrations.get('candidate_edges', [])):,} "
+            "candidate edges",
+        )
     md.blank()
 
     md.h3("C++ Call Graph")
@@ -232,7 +239,8 @@ async def graph(
 
     mode='callers' for inbound, 'calls' for outbound, 'impact' for transitive
     callers. `depth`, `fuzzy_all_levels`, `walk_python`, and `focus` apply to
-    mode='impact' only and are ignored otherwise. `focus='full'` adds a
+    mode='impact' only and are ignored otherwise. `depth` is clamped to 5
+    (raise via TORCHTALK_GRAPH_MAX_DEPTH, hard cap 10). `focus='full'` adds a
     Python Entry Points section listing each walked C++ symbol's binding.
     """
     if mode == "calls":

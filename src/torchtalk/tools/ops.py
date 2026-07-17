@@ -66,6 +66,8 @@ async def trace(
 ) -> str:
     """Trace a PyTorch op from Python to C++ implementation with file:line locations."""
     _ensure_loaded()
+    if not function_name.strip():
+        return "Provide a function name to trace."
 
     md = create_formatter()
     md.h2(f"Trace: `{function_name}`")
@@ -106,6 +108,8 @@ async def trace(
                 md.item(f"`{input_name}`: `{truncate(formula, 60)}`")
             md.blank()
 
+    bindings: list[dict] = []
+    fuzzy_bindings = False
     if focus in ("full", "dispatch"):
         # From binding detector (TORCH_LIBRARY_IMPL registrations)
         bindings = _state.by_python_name.get(function_name, [])
@@ -115,9 +119,13 @@ async def trace(
             found = _fuzzy_find(function_name, _state.by_python_name)
             if found:
                 bindings = found
+                fuzzy_bindings = True
 
         if bindings:
-            md.h3("Dispatch Registrations (TORCH_LIBRARY_IMPL)")
+            title = "Dispatch Registrations (TORCH_LIBRARY_IMPL)"
+            if fuzzy_bindings:
+                title += " — fuzzy match"
+            md.h3(title)
             rows = []
             seen = set()
             for b in bindings:
@@ -176,9 +184,11 @@ async def trace(
                 impls.append(impl)
 
         if impls:
-            md.h3("C++ Implementations")
+            # Dedupe BEFORE slicing: dispatch `.values()` repeats the same
+            # impl per dispatch key, which starved the visible list.
             seen = set()
-            for impl in impls[:10]:
+            unique_impls = []
+            for impl in impls:
                 key = (
                     impl["function_name"],
                     impl.get("file_path"),
@@ -187,16 +197,18 @@ async def trace(
                 if key in seen:
                     continue
                 seen.add(key)
+                unique_impls.append(impl)
 
+            md.h3("C++ Implementations")
+            for impl in unique_impls[:10]:
                 path = _rel_path(impl.get("file_path", ""))
                 line = impl.get("line_number", "")
                 md.item(f"`{impl['function_name']}` → `{path}:{line}`")
+            if len(unique_impls) > 10:
+                md.item(f"*... and {len(unique_impls) - 10} more*")
             md.blank()
 
-    bindings_found = _state.by_python_name.get(function_name) or _state.by_cpp_name.get(
-        function_name
-    )
-    found_anything = native or bindings_found or impls
+    found_anything = native or bindings or impls
 
     if not found_anything:
         similar = _similar_functions(function_name)
@@ -213,6 +225,7 @@ async def trace(
 
 async def _do_cuda_kernels(query: str = "", limit: int = 15) -> str:
     _ensure_loaded()
+    limit = max(1, limit)
 
     md = create_formatter()
     title = f"CUDA Kernels: '{query}'" if query else "CUDA Kernels"
@@ -248,6 +261,9 @@ async def _do_cuda_kernels(query: str = "", limit: int = 15) -> str:
 
 async def _do_search_bindings(query: str, backend: str = "", limit: int = 10) -> str:
     _ensure_loaded()
+    if not query.strip():
+        return "Provide a query string to search bindings."
+    limit = max(1, limit)
 
     query_lower = query.lower()
     backend_lower = backend.lower() if backend else ""

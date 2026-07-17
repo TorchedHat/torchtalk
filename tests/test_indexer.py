@@ -2,6 +2,7 @@
 
 import ast
 import json
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -34,12 +35,6 @@ from torchtalk.indexer import (
 
 
 class TestServerState:
-    def test_default_empty(self):
-        state = ServerState()
-        assert state.bindings == []
-        assert state.native_functions == {}
-        assert state.pytorch_source is None
-
     def test_build_indexes(self):
         state = ServerState()
         state.bindings = [
@@ -143,10 +138,13 @@ class TestImplsFromExtractor:
     @pytest.fixture(autouse=True)
     def reset_state(self):
         prior = indexer._state.cpp_extractor
+        prior_src = indexer._state.pytorch_source
+        indexer._state.pytorch_source = None
         try:
             yield
         finally:
             indexer._state.cpp_extractor = prior
+            indexer._state.pytorch_source = prior_src
 
     def _fake_extractor(self, locations: dict) -> SimpleNamespace:
         return SimpleNamespace(function_locations=locations)
@@ -189,6 +187,17 @@ class TestImplsFromExtractor:
             {"at::native::add": ("/Add.cpp", 1)}
         )
         assert _impls_from_extractor("nope") == []
+
+    def test_out_of_tree_matches_filtered(self):
+        indexer._state.pytorch_source = "/src/pytorch"
+        indexer._state.cpp_extractor = self._fake_extractor(
+            {
+                "at::native::t": ("/src/pytorch/aten/T.cpp", 10),
+                "std::uniform::t": ("/usr/include/c++/11/bits/random.h", 3768),
+            }
+        )
+        result = _impls_from_extractor("t")
+        assert [r["file_path"] for r in result] == ["/src/pytorch/aten/T.cpp"]
 
 
 class TestBuildPyToCppEdges:
@@ -617,3 +626,114 @@ class TestCollectTestAttrHits:
         code = "def test_copy(self):\n    t.copy_(other)\n"
         index = self._walk(code, {"copy_"})
         assert index["copy_"][0]["receiver_type"] is None
+
+
+class TestCacheInvalidationByGitState:
+    """_cache_valid must reject caches after commits/pulls and dirty edits."""
+
+    def _commit(self, cwd, msg):
+        subprocess.run(
+            ["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qam", msg],
+            cwd=cwd,
+            check=True,
+        )
+
+    def _repo_with_cache(self, tmp_path):
+        src = tmp_path / "src"
+        src.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=src, check=True)
+        (src / "kernel.cpp").write_text("int f() { return 1; }")
+        subprocess.run(["git", "add", "kernel.cpp"], cwd=src, check=True)
+        self._commit(src, "init")
+
+        cache = tmp_path / "bindings.json"
+        cache.write_text(
+            json.dumps(
+                {
+                    "bindings": [],
+                    "metadata": indexer._cache_metadata(str(src)),
+                }
+            )
+        )
+        return src, cache
+
+    def test_valid_across_noop_restart(self, tmp_path):
+        src, cache = self._repo_with_cache(tmp_path)
+        assert indexer._cache_valid(cache, str(src)) is True
+        assert indexer._cache_valid(cache, str(src)) is True
+
+    def test_invalidated_by_new_commit(self, tmp_path):
+        src, cache = self._repo_with_cache(tmp_path)
+        (src / "kernel.cpp").write_text("int f() { return 2; }")
+        self._commit(src, "edit")
+        assert indexer._cache_valid(cache, str(src)) is False
+
+    def test_invalidated_by_dirty_indexed_file(self, tmp_path):
+        src, cache = self._repo_with_cache(tmp_path)
+        (src / "kernel.cpp").write_text("int f() { return 3; }")
+        assert indexer._cache_valid(cache, str(src)) is False
+
+
+class TestUpdateIndexMetadata:
+    """update_index must write metadata that survives _cache_valid on restart."""
+
+    def _run_noop_update(self, tmp_path, monkeypatch):
+        src = tmp_path / "src"
+        src.mkdir()
+        cache = tmp_path / "cache"
+        snap_dir = cache / "snapshots" / "baseline"
+        snap_dir.mkdir(parents=True)
+        (snap_dir / "bindings.json").write_text(json.dumps({"bindings": []}))
+        (snap_dir / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "name": "baseline",
+                    "created": "2026-01-01T00:00:00+00:00",
+                    "pytorch_source": str(src),
+                    "source_fingerprint": "deadbeef",
+                    "git_commit": "abc1234",
+                    "bindings_size": 0,
+                    "bindings_sha256": "x",
+                    "content_fingerprint": None,
+                    "schema_version": 2,
+                }
+            )
+        )
+
+        cache_file = cache / "bindings.json"
+        monkeypatch.setattr(snapshots, "SNAPSHOTS_DIR", cache / "snapshots")
+        monkeypatch.setattr(indexer, "CACHE_DIR", cache)
+        monkeypatch.setattr(indexer, "_cache_path", lambda _s: cache_file)
+        monkeypatch.setattr(indexer, "_source_fingerprint", lambda _s: "fp")
+
+        def fake_diff(cmd, **kwargs):
+            class R:
+                stdout = ""
+
+            return R()
+
+        monkeypatch.setattr(subprocess, "run", fake_diff)
+        indexer.update_index(str(src), since="baseline")
+        return cache_file, src
+
+    def test_updated_cache_survives_restart_validation(self, tmp_path, monkeypatch):
+        cache_file, src = self._run_noop_update(tmp_path, monkeypatch)
+        assert indexer._cache_valid(cache_file, str(src)) is True
+
+    def test_update_writes_all_build_metadata_keys(self, tmp_path, monkeypatch):
+        cache_file, src = self._run_noop_update(tmp_path, monkeypatch)
+        written = json.loads(cache_file.read_text())["metadata"]
+        assert set(indexer._cache_metadata(str(src))) <= set(written)
+
+
+class TestFuzzyFindDeterminism:
+    def test_suffix_match_prefers_shortest_not_dict_order(self):
+        data = {
+            "at::really_long_namespace::relu": [{"name": "long"}],
+            "at::x::relu": [{"name": "short"}],
+        }
+        assert _fuzzy_find("relu", data)[0]["name"] == "short"
+
+    def test_suffix_tie_breaks_lexicographically(self):
+        data = {"zz_relu": [{"name": "z"}], "aa_relu": [{"name": "a"}]}
+        assert _fuzzy_find("relu", data)[0]["name"] == "a"

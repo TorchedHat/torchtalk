@@ -83,7 +83,17 @@ def _cache_path(source: str) -> Path:
 
 
 def _source_fingerprint(source: str) -> str:
-    """Fingerprint source to detect changes."""
+    """Fingerprint source to detect changes.
+
+    Git checkouts get a content fingerprint (HEAD tree + dirty diff), so
+    commits, pulls, and uncommitted edits all invalidate caches. Non-git
+    checkouts fall back to mtime/size of version files.
+    """
+    from .snapshots import _content_fingerprint
+
+    fp = _content_fingerprint(source) if source else None
+    if fp:
+        return fp
     src = Path(source)
     files = [
         src / "version.txt",
@@ -99,8 +109,18 @@ def _source_fingerprint(source: str) -> str:
 
 
 # Bump when the bindings-cache schema changes (e.g. a new field added to
-# `native_functions` entries). v2 introduced `python_module`.
-_BINDINGS_CACHE_FORMAT_VERSION = 2
+# `native_functions` entries). v2 introduced `python_module`; v3 renamed
+# binding "line" -> "line_number".
+_BINDINGS_CACHE_FORMAT_VERSION = 3
+
+
+def _cache_metadata(source: str) -> dict:
+    """Metadata every bindings-cache writer must emit; `_cache_valid` checks it."""
+    return {
+        "source_path": source,
+        "source_fingerprint": _source_fingerprint(source),
+        "format_version": _BINDINGS_CACHE_FORMAT_VERSION,
+    }
 
 
 def _cache_valid(cache: Path, source: str) -> bool:
@@ -237,14 +257,20 @@ def _impls_from_extractor(target: str) -> list[dict]:
 
     Hybrid path: catches definitions the regex pre-filter misses (deeply
     templated returns, signatures whose layout the regex can't span).
-    Returns [] when the extractor isn't ready.
+    Returns [] when the extractor isn't ready. Matches outside the indexed
+    source tree (stdlib/system headers the TU pulled in) are dropped.
     """
     extractor = _state.cpp_extractor
     if not extractor:
         return []
+    src_prefix = (
+        (_state.pytorch_source.rstrip("/") + "/") if _state.pytorch_source else None
+    )
     out: list[dict] = []
     for qname, (file, line) in extractor.function_locations.items():
         if qname.rsplit("::", 1)[-1] != target:
+            continue
+        if src_prefix and not file.startswith(src_prefix):
             continue
         out.append(
             {
@@ -344,13 +370,19 @@ def _fuzzy_find(name: str, data: dict[str, Any]) -> list[Any] | None:
 
     name_lower = name.lower()
 
-    for key in data:
-        if key.lower().endswith(name_lower) or key.lower().endswith(f"_{name_lower}"):
-            return data[key] if isinstance(data[key], list) else [data[key]]
+    suffix_keys = [
+        k
+        for k in data
+        if k.lower().endswith(name_lower) or k.lower().endswith(f"_{name_lower}")
+    ]
+    if suffix_keys:
+        # Deterministic: shortest key, lexicographic tiebreak (not dict order)
+        key = min(suffix_keys, key=lambda k: (len(k), k))
+        return data[key] if isinstance(data[key], list) else [data[key]]
 
     matches = [(k, v) for k, v in data.items() if name_lower in k.lower()]
     if matches:
-        matches.sort(key=lambda x: len(x[0]))
+        matches.sort(key=lambda x: (len(x[0]), x[0]))
         v = matches[0][1]
         return v if isinstance(v, list) else [v]
 
@@ -359,12 +391,12 @@ def _fuzzy_find(name: str, data: dict[str, Any]) -> list[Any] | None:
         for key in data:
             if abs(len(key) - len(name)) <= 3:
                 dist = levenshtein_distance(name_lower, key.lower())
-                max_dist = max(2, len(name) // 3)
+                max_dist = min(3, max(2, len(name) // 3))
                 if dist <= max_dist:
                     candidates.append((dist, key, data[key]))
 
         if candidates:
-            candidates.sort(key=lambda x: x[0])
+            candidates.sort(key=lambda x: (x[0], len(x[1]), x[1]))
             v = candidates[0][2]
             return v if isinstance(v, list) else [v]
 
@@ -392,11 +424,7 @@ def _build_index(source: str) -> dict[str, Any]:
         "derivatives": derivatives,
         "native_implementations": implementations,
         "symbol_to_file": symbol_to_file,
-        "metadata": {
-            "source_path": source,
-            "source_fingerprint": _source_fingerprint(source),
-            "format_version": _BINDINGS_CACHE_FORMAT_VERSION,
-        },
+        "metadata": _cache_metadata(source),
     }
 
     cache = _cache_path(source)
@@ -479,7 +507,9 @@ def _init_cpp_call_graph(source: str):
         cache_key = f"pytorch_callgraph_parallel_{source_hash(source)}"
 
         extractor = CppCallGraphExtractor(cache_dir=cg_cache_dir)
-        if extractor.load_cache(cache_key):
+        if extractor.load_cache(
+            cache_key, expect_fingerprint=_source_fingerprint(source)
+        ):
             _state.cpp_extractor = extractor
             log.info(
                 f"Loaded C++ call graph from cache "
@@ -495,7 +525,7 @@ def _init_cpp_call_graph(source: str):
             try:
                 ext = CppCallGraphExtractor(cache_dir=cg_cache_dir)
                 ext.extract_from_pytorch_parallel(source)
-                ext.save_cache(cache_key)
+                ext.save_cache(cache_key, fingerprint=_source_fingerprint(source))
                 _state.cpp_extractor = ext
                 log.info(
                     f"C++ call graph ready: {len(ext.function_locations)} functions"
@@ -1285,8 +1315,7 @@ def update_index(source: str, since: str, on_uncovered: str = "warn") -> dict:
         "native_implementations": implementations,
         "symbol_to_file": symbol_to_file,
         "metadata": {
-            "source_path": source,
-            "source_fingerprint": _source_fingerprint(source),
+            **_cache_metadata(source),
             "updated_since": since,
             "updated_commit": manifest.git_commit,
         },
@@ -1460,7 +1489,7 @@ def _update_call_graph(
     if uncovered and on_uncovered == "fail":
         stats["uncovered_fail"] = True
 
-    extractor.save_cache(cache_key)
+    extractor.save_cache(cache_key, fingerprint=_source_fingerprint(source))
     return stats
 
 

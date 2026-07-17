@@ -139,9 +139,14 @@ def _translate_args(
     file_path: str, compile_args: list[str], cuda_env: dict | None
 ) -> list[str]:
     """Pick the libclang arg set for a TU based on extension and CUDA availability."""
-    if file_path.endswith(".cu") and cuda_env:
-        return _cu_args(compile_args, cuda_env)
-    return [a for a in compile_args if a.startswith(("-I", "-D", "-std"))]
+    keep = [a for a in compile_args if a.startswith(("-I", "-D", "-std"))]
+    if file_path.endswith(".cu"):
+        if cuda_env:
+            return _cu_args(compile_args, cuda_env)
+        # No CUDA toolchain: best-effort host-side parse as C++ so clang
+        # recovers past device-only constructs instead of dropping the TU.
+        return ["-x", "c++", *keep]
+    return keep
 
 
 def _synthesize_missing_cu_entries(
@@ -334,7 +339,7 @@ class CppCallGraphExtractor:
         self.include_dirs = _collect_include_dirs(compile_db, str(source))
 
         cuda_env = _discover_cuda_env()
-        supported_exts = (".cpp", ".cu") if cuda_env else (".cpp",)
+        supported_exts = (".cpp", ".cc", ".cxx", ".cu")
 
         # Filter to relevant files using configurable patterns
         entries = []
@@ -578,6 +583,19 @@ class CppCallGraphExtractor:
             else:
                 results = [_parse_single_file(e) for e in translated]
 
+            # Records are keyed by DEFINING file, so header-defined (inline/
+            # template) functions live under the header's record — which the
+            # TU-path eviction above never touches. Evict every record this
+            # parse re-observes, or stale edges union back in on merge.
+            observed_owners: set[str] = set()
+            for result in results:
+                if result["success"]:
+                    for loc in result.get("function_locations", {}).values():
+                        if loc:
+                            observed_owners.add(loc[0])
+            for owner in observed_owners:
+                self.file_records.pop(owner, None)
+
             for result in results:
                 rel = (
                     _rel_to_root(result.get("file", ""), source_root)
@@ -629,10 +647,15 @@ class CppCallGraphExtractor:
         return result
 
     def coverage_summary(self) -> dict[str, int]:
-        """Count TUs per status bucket from tu_status."""
+        """Count TUs per status bucket, plus unindexed .cu/.cc composition."""
         summary: dict[str, int] = defaultdict(int)
-        for status in self.tu_status.values():
+        for tu, status in self.tu_status.items():
             summary[status] += 1
+            if status in ("parse_failed", "unsupported_language"):
+                if tu.endswith(".cu"):
+                    summary["cu_unindexed"] += 1
+                elif tu.endswith((".cc", ".cxx")):
+                    summary["cc_unindexed"] += 1
         return dict(summary)
 
     def load_from_path(self, cache_path: Path) -> bool:
@@ -704,6 +727,10 @@ class CppCallGraphExtractor:
         """Get functions that call this function (inbound)."""
         return self._get_relations(function_name, "callers", fuzzy)
 
+    def match_functions(self, name: str, fuzzy: bool = True) -> list[str]:
+        """Resolve a query to indexed symbols, ranked (exact, then fuzzy)."""
+        return self._find_matching_functions(name, fuzzy)
+
     def _find_matching_functions(self, name: str, fuzzy: bool) -> list[str]:
         all_funcs = (
             set(self.callees.keys())
@@ -721,7 +748,7 @@ class CppCallGraphExtractor:
         # 2. Namespace suffix match (at::native::gemm matches "gemm")
         matches = [f for f in all_funcs if f.endswith("::" + name) or f == name]
         if matches:
-            return matches
+            return sorted(matches, key=lambda f: (len(f), f))
 
         # 3. Case-insensitive substring match
         name_lower = name.lower()
@@ -743,7 +770,9 @@ class CppCallGraphExtractor:
                 base = f.split("::")[-1] if "::" in f else f
                 if abs(len(base) - len(name)) <= 3:
                     dist = levenshtein_distance(name_lower, base.lower())
-                    if dist <= max(2, len(name) // 3):
+                    # Absolute cap: len//3 alone allows 12 edits on long
+                    # kernel names, cross-matching unrelated ops.
+                    if dist <= min(3, max(2, len(name) // 3)):
                         levenshtein_matches.append((dist, f))
             levenshtein_matches.sort(key=lambda x: x[0])
             levenshtein_matches = [f for _, f in levenshtein_matches[:10]]
@@ -757,25 +786,33 @@ class CppCallGraphExtractor:
                     seen.add(m)
                     result.append(m)
 
-        # Sort by length (prefer shorter/more specific matches)
-        result.sort(key=len)
+        # Shortest first, lexicographic tiebreak — deterministic across runs
+        result.sort(key=lambda f: (len(f), f))
         return result[:20]
 
-    def save_cache(self, cache_key: str) -> Path:
+    def save_cache(self, cache_key: str, fingerprint: str | None = None) -> Path:
         cache_path = self.cache_dir / f"{cache_key}.json"
         data = self.get_call_graph_data()
+        if fingerprint:
+            data["source_fingerprint"] = fingerprint
         with open(cache_path, "w") as f:
             json.dump(data, f)
         log.info(f"Saved call graph cache to {cache_path}")
         return cache_path
 
-    def load_cache(self, cache_key: str) -> bool:
+    def load_cache(self, cache_key: str, expect_fingerprint: str | None = None) -> bool:
         cache_path = self.cache_dir / f"{cache_key}.json"
         if not cache_path.exists():
             return False
         try:
             with open(cache_path) as f:
                 data = json.load(f)
+            if (
+                expect_fingerprint
+                and data.get("source_fingerprint") != expect_fingerprint
+            ):
+                log.info("Call graph cache stale (source changed); rebuilding")
+                return False
             self._apply_loaded_data(data)
             log.info(f"Loaded call graph cache from {cache_path}")
             return True

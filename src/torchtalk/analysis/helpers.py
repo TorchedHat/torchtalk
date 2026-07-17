@@ -75,3 +75,23 @@ def dedupe_by_key(items: list[dict], key: str) -> list[dict]:
             seen.add(val)
             result.append(item)
     return result
+
+
+def word_match(query_lower: str, name_lower: str) -> bool:
+    """Match on word boundaries to avoid 'add' matching 'padding'.
+
+    Every occurrence is tried: `test_padding_add` must match "add" even
+    though its first occurrence (inside "padding") fails the boundary check.
+    """
+    idx = name_lower.find(query_lower)
+    while idx != -1:
+        before = name_lower[idx - 1] if idx > 0 else "_"
+        after = (
+            name_lower[idx + len(query_lower)]
+            if idx + len(query_lower) < len(name_lower)
+            else "_"
+        )
+        if not before.isalpha() and not after.isalpha():
+            return True
+        idx = name_lower.find(query_lower, idx + 1)
+    return False
