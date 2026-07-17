@@ -159,11 +159,7 @@ def relative_path(full_path: str, base: str | None = None) -> str:
 
     prefixes = ["pytorch/"]
     if base:
-        base_clean = base.rstrip("/")
-        prefixes.insert(0, base_clean + "/")
-        checkout_name = base_clean.rsplit("/", 1)[-1]
-        if checkout_name and f"{checkout_name}/" not in prefixes:
-            prefixes.append(f"{checkout_name}/")
+        prefixes.insert(0, base.rstrip("/") + "/")
 
     for prefix in prefixes:
         if full_path.startswith(prefix):
