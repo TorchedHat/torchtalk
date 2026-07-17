@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import CACHE_DIR, cache_paths, resolve_pytorch_source
+from .symbols import content_fingerprint as _content_fingerprint
 
 SNAPSHOTS_DIR = CACHE_DIR / "snapshots"
 MANIFEST_NAME = "manifest.json"
@@ -142,40 +143,6 @@ def _git_commit(source: str) -> str | None:
         subprocess.TimeoutExpired,
     ):
         return None
-
-
-def _content_fingerprint(source: str) -> str | None:
-    """Merkle-style hash over HEAD tree + any uncommitted diff.
-
-    Uses git's own tree hash (a content-addressed Merkle over all tracked files)
-    combined with a hash of `git diff HEAD` to cover dirty trees. Two checkouts
-    with identical content produce the same fingerprint regardless of path.
-    Returns None when source is not a git working tree.
-    """
-    try:
-        tree = subprocess.run(
-            ["git", "-C", source, "rev-parse", "HEAD^{tree}"],
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=5,
-        ).stdout.strip()
-        diff = subprocess.run(
-            ["git", "-C", source, "diff", "HEAD"],
-            capture_output=True,
-            check=True,
-            timeout=15,
-        ).stdout
-    except (
-        subprocess.CalledProcessError,
-        FileNotFoundError,
-        subprocess.TimeoutExpired,
-    ):
-        return None
-
-    h = hashlib.blake2b(tree.encode(), digest_size=16)
-    h.update(diff)
-    return h.hexdigest()
 
 
 def _is_ancestor(source: str, ancestor: str, descendant: str) -> bool:
