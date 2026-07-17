@@ -9,7 +9,7 @@ from multiprocessing import Pool, cpu_count
 from pathlib import Path
 from typing import Any
 
-from .helpers import levenshtein_distance
+from .helpers import fuzzy_distance_limit, levenshtein_distance
 from .patterns import CPP_SEARCH_DIRS, should_exclude, should_include_dir
 
 log = logging.getLogger(__name__)
@@ -770,9 +770,7 @@ class CppCallGraphExtractor:
                 base = f.split("::")[-1] if "::" in f else f
                 if abs(len(base) - len(name)) <= 3:
                     dist = levenshtein_distance(name_lower, base.lower())
-                    # Absolute cap: len//3 alone allows 12 edits on long
-                    # kernel names, cross-matching unrelated ops.
-                    if dist <= min(3, max(2, len(name) // 3)):
+                    if dist <= fuzzy_distance_limit(name):
                         levenshtein_matches.append((dist, f))
             levenshtein_matches.sort(key=lambda x: x[0])
             levenshtein_matches = [f for _, f in levenshtein_matches[:10]]

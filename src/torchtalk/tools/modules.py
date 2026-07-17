@@ -3,12 +3,9 @@
 from __future__ import annotations
 
 from ..analysis.helpers import fuzzy_match
-from ..formatting import create_formatter, relative_path
+from ..formatting import create_formatter
 from ..indexer import _ensure_loaded, _state
-
-
-def _rel_path(path: str) -> str:
-    return relative_path(path, _state.pytorch_source)
+from .common import _rel_path
 
 
 async def _do_trace_module(module_name: str, focus: str = "methods") -> str:

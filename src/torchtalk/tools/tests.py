@@ -5,12 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from ..analysis.helpers import word_match as _word_match
-from ..formatting import create_formatter, relative_path
+from ..formatting import create_formatter
 from ..indexer import _ensure_loaded, _state
-
-
-def _rel_path(path: str) -> str:
-    return relative_path(path, _state.pytorch_source)
 
 
 async def _do_find_similar_tests(

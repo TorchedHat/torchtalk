@@ -5,7 +5,7 @@ from __future__ import annotations
 from ..analysis.affected import affected_tests
 from ..formatting import create_formatter
 from ..indexer import _cpp_status, _ensure_loaded, _state
-from .graph import _max_depth
+from .graph import _clamp_depth
 
 
 def _split_funcs(funcs: str) -> list[str]:
@@ -36,7 +36,7 @@ async def _do_affected(funcs: str, depth: int = 3) -> str:
     if not func_list:
         return "No functions provided."
 
-    depth = min(max(depth, 1), _max_depth())
+    depth = _clamp_depth(depth)
 
     result = affected_tests(
         funcs=func_list,

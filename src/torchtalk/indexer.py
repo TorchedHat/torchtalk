@@ -11,7 +11,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .analysis.helpers import levenshtein_distance, truncate
+from .analysis.helpers import fuzzy_distance_limit, levenshtein_distance, truncate
 from .analysis.patterns import (
     CPP_SEARCH_DIRS,
     PYTHON_SEARCH_DIRS,
@@ -391,8 +391,7 @@ def _fuzzy_find(name: str, data: dict[str, Any]) -> list[Any] | None:
         for key in data:
             if abs(len(key) - len(name)) <= 3:
                 dist = levenshtein_distance(name_lower, key.lower())
-                max_dist = min(3, max(2, len(name) // 3))
-                if dist <= max_dist:
+                if dist <= fuzzy_distance_limit(name):
                     candidates.append((dist, key, data[key]))
 
         if candidates:

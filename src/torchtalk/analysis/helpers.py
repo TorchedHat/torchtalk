@@ -3,6 +3,12 @@
 from typing import Any
 
 
+def fuzzy_distance_limit(name: str) -> int:
+    """Max edit distance for a fuzzy match; len//3 alone allows 12 edits on
+    long kernel names, cross-matching unrelated ops."""
+    return min(3, max(2, len(name) // 3))
+
+
 def levenshtein_distance(s1: str, s2: str) -> int:
     """Compute Levenshtein edit distance between two strings."""
     if len(s1) < len(s2):

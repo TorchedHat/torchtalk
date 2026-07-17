@@ -5,17 +5,9 @@ from __future__ import annotations
 from typing import Literal
 
 from ..analysis.helpers import safe_sort_key, truncate
-from ..formatting import coverage_note, create_formatter, relative_path
+from ..formatting import create_formatter
 from ..indexer import _ensure_loaded, _fuzzy_find, _impls_from_extractor, _state
-
-
-def _with_note(text: str) -> str:
-    note = coverage_note(_state.cpp_extractor)
-    return f"{text}\n\n{note}" if note else text
-
-
-def _rel_path(path: str) -> str:
-    return relative_path(path, _state.pytorch_source)
+from .common import _rel_path, _with_note
 
 
 def _get_native_func(name: str) -> dict | None:

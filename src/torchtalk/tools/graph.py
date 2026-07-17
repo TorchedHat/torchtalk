@@ -5,8 +5,9 @@ from __future__ import annotations
 import os
 
 from ..analysis.helpers import dedupe_by_key
-from ..formatting import coverage_note, create_formatter, relative_path
+from ..formatting import create_formatter
 from ..indexer import _cpp_status, _ensure_loaded, _state
+from .common import _rel_path, _with_note
 
 # Hard ceiling on impact-walk depth. Power users can raise the soft default
 # via the TORCHTALK_GRAPH_MAX_DEPTH env var, but never above this cap —
@@ -22,6 +23,10 @@ def _max_depth() -> int:
         return max(1, min(int(raw), _GRAPH_HARD_DEPTH_CAP))
     except ValueError:
         return 5
+
+
+def _clamp_depth(depth: int) -> int:
+    return min(max(depth, 1), _max_depth())
 
 
 def _py_name_to_cpp_symbol(py_name: str) -> str:
@@ -61,15 +66,6 @@ def _python_callers_for(cpp_func: str) -> list[dict]:
         seen_keys.add(key)
         out.extend(edges.get(key, []))
     return out
-
-
-def _rel_path(path: str) -> str:
-    return relative_path(path, _state.pytorch_source)
-
-
-def _with_note(text: str) -> str:
-    note = coverage_note(_state.cpp_extractor)
-    return f"{text}\n\n{note}" if note else text
 
 
 def _cuda_gap_note() -> str:
@@ -212,7 +208,7 @@ async def _do_impact(
     if status := _cpp_status():
         return status
 
-    depth = min(max(depth, 1), _max_depth())
+    depth = _clamp_depth(depth)
 
     resolved, note = _resolve_function(function_name)
     if resolved is None:
