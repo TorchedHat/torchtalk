@@ -58,6 +58,7 @@ async def _do_affected(funcs: str, depth: int = 3) -> str:
         bindings_by_file=_state.bindings_by_file or None,
         ops_by_file=_state.ops_by_file or None,
         symbol_to_file=_state.symbol_to_file or None,
+        test_functions=_state.test_functions or None,
         depth=depth,
     )
 
@@ -94,21 +95,41 @@ async def _do_affected(funcs: str, depth: int = 3) -> str:
     md.blank()
 
     runs = result["test_runs"]
-    if not runs:
+    opinfo_runs = result.get("opinfo_runs", [])
+    if not runs and not opinfo_runs:
         md.text("*No matching test runs found.*")
         return md.build()
 
-    md.h3(f"Test runs ({len(runs)} files)")
-    for tr in runs[:30]:
+    # Pytest node IDs: file::Class, refined to ::Class::function where the
+    # test_functions join found exact matches.
+    function_hits = result.get("function_hits", {})
+    node_ids: list[str] = []
+    for tr in runs:
+        file = tr["file"]
         classes = tr["included_classes"]
-        if classes:
-            md.item(f"`{tr['file']}` — {', '.join(classes[:5])}")
-            if len(classes) > 5:
-                md.item(f"...and {len(classes) - 5} more", 1)
-        else:
-            md.item(f"`{tr['file']}` *(whole file)*")
+        if not classes:
+            node_ids.append(file)
+            continue
+        for cls in classes:
+            funcs_in_cls = function_hits.get(file, {}).get(cls, [])
+            if funcs_in_cls:
+                node_ids.extend(f"{file}::{cls}::{fn}" for fn in funcs_in_cls)
+            else:
+                node_ids.append(f"{file}::{cls}")
 
-    if len(runs) > 30:
-        md.text(f"\n*Showing 30 of {len(runs)} files.*")
+    md.h3(f"Test runs ({len(runs) + len(opinfo_runs)} selections)")
+    for nid in node_ids:
+        md.item(f"`{nid}`")
+    for orun in opinfo_runs:
+        md.item(f'`{" ".join(orun["files"])} -k "{orun["k"]}"`')
+
+    lines = []
+    if node_ids:
+        lines.append("pytest " + " ".join(node_ids))
+    lines.extend(
+        f'pytest {" ".join(orun["files"])} -k "{orun["k"]}"' for orun in opinfo_runs
+    )
+    md.blank()
+    md.codeblock("\n".join(lines))
 
     return md.build()

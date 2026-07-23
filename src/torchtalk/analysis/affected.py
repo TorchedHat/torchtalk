@@ -11,6 +11,7 @@ import re
 from typing import Any
 
 from .cpp_call_graph import CppCallGraphExtractor
+from .helpers import word_match
 from .patterns import is_vendor_path
 
 _OVERLOAD_TAG_LITERALS = {"int", "default", "out", "self"}
@@ -99,6 +100,30 @@ def _strip_impl_suffix(name: str) -> list[str]:
         if name.endswith(suffix):
             return [name[: -len(suffix)]]
     return []
+
+
+_STRUCTURED_BACKEND_TAGS = ("_cpu", "_cuda", "_mps", "_meta", "_xpu")
+
+
+def _structured_impl_candidates(qualified: str) -> list[str]:
+    """`...::structured_avg_pool2d_backward_out_cuda::impl` → op-name stems.
+
+    Structured kernels live in generated `structured_<op>[_out]_<backend>`
+    classes; walking a kernel lands on their `::impl` member, whose bare name
+    is useless. Caller must verify candidates against native_functions.
+    """
+    seg = next((p for p in qualified.split("::") if p.startswith("structured_")), None)
+    if seg is None:
+        return []
+    stem = seg[len("structured_") :]
+    for tag in _STRUCTURED_BACKEND_TAGS:
+        if stem.endswith(tag):
+            stem = stem[: -len(tag)]
+            break
+    out = [stem]
+    if stem.endswith("_out"):
+        out.append(stem[: -len("_out")])
+    return out
 
 
 _PLATFORM_TAGS = ("CUDA", "CPU", "MPS")
@@ -304,13 +329,19 @@ def _bindings_for(
             base,
             *_strip_impl_suffix(bare),
             *_pascal_kernel_impl_candidates(bare),
+            *_structured_impl_candidates(fn),
         ]
-        for key in keys:
-            if (native_implementations and key in native_implementations) or (
-                native_functions and key in native_functions
-            ):
-                _tag_apis(api_sources, [key], "call_graph")
-                break
+        # Real YAML ops beat impl-symbol hits across ALL candidates:
+        # `cummax_out` is in native_implementations, but its stripped stem
+        # `cummax` is the actual op (and the OpInfo key).
+        hit = next(
+            (k for k in keys if native_functions and k in native_functions), None
+        ) or next(
+            (k for k in keys if native_implementations and k in native_implementations),
+            None,
+        )
+        if hit is not None:
+            _tag_apis(api_sources, [hit], "call_graph")
         else:
             # Fallback B: bare symbol is a CPU/CUDA kernel impl registered via
             # REGISTER_DISPATCH(stub, &kernel) — resolve via stub-to-op map.
@@ -353,10 +384,17 @@ def _tests_for_apis(
 
 
 def api_attr_variants(api: str) -> set[str]:
-    """API-name forms a test source might reference as an attribute access."""
+    """API-name forms a test source might reference as an attribute access.
+
+    Includes the nn-Module wrapper spelling (`avg_pool2d` ↔ `AvgPool2d`) —
+    tests often exercise an op only through its module class.
+    """
     base = api.rstrip("_")
     leaf = base.rsplit(".", 1)[-1] if "." in base else base
     variants = {api, base, leaf, leaf + "_"}
+    pascal = "".join(p.capitalize() for p in leaf.split("_") if p)
+    if pascal != leaf:
+        variants.add(pascal)
     return {v for v in variants if v}
 
 
@@ -400,6 +438,45 @@ def _tests_via_profiling(
     return by_file
 
 
+def _k_expr(ops) -> str:
+    """Pytest -k expression matching parametrized OpInfo test names."""
+    return " or ".join(sorted({op.replace(".", "_") for op in ops}))
+
+
+def _function_level_hits(
+    apis: set[str],
+    test_functions: dict[str, list[dict]],
+    selected_files: set[str],
+) -> dict[str, dict[str, list[str]]]:
+    """file → class → test functions word-matching an API (leaf len ≥ 4).
+
+    Refines already-selected files to `::Class::function` granularity; short
+    leaves are skipped so generic names never flood the join.
+    """
+    queries: set[str] = set()
+    for api in apis:
+        leaf = api.rstrip("_").rsplit(".", 1)[-1]
+        if len(leaf) >= 4:
+            queries.add(leaf.lower())
+    hits: dict[str, dict[str, list[str]]] = {}
+    if not queries:
+        return hits
+    for fname, locs in test_functions.items():
+        low = fname.lower()
+        if not any(word_match(q, low) for q in queries):
+            continue
+        for loc in locs:
+            file, cls = loc.get("file"), loc.get("class")
+            if file in selected_files and cls:
+                bucket = hits.setdefault(file, {}).setdefault(cls, [])
+                if fname not in bucket:
+                    bucket.append(fname)
+    for classes in hits.values():
+        for names in classes.values():
+            names.sort()
+    return hits
+
+
 def _tests_mentioning_apis(
     apis: set[str],
     test_attr_index: dict[str, list[dict]],
@@ -408,11 +485,12 @@ def _tests_mentioning_apis(
 ) -> tuple[dict[str, set[str]], set[str]]:
     """Map test file → classes whose `test_*` methods reference any of `apis`.
 
-    Drops an API's mention-only contribution entirely when it would exceed
-    `per_api_cap`. Generic names like `add` mention-match thousands of unrelated
-    tests; over-cap APIs are too low-specificity to be a reliable signal. Pass
-    `per_api_cap=None` to disable the cap. The class-name match path
-    (`_tests_for_apis`) is unaffected.
+    Drops an API's mention-only contribution entirely when its hits spread
+    across more than `per_api_cap` distinct files. Generic names like `add`
+    mention-match hundreds of unrelated files; over-cap APIs are too
+    low-specificity to be a reliable signal. Pass `per_api_cap=None` to
+    disable the cap. The class-name match path (`_tests_for_apis`) is
+    unaffected.
 
     Returns (by_file, contributing_apis) where contributing_apis is the subset
     of `apis` that actually placed a hit into `by_file` (post-cap).
@@ -429,7 +507,9 @@ def _tests_mentioning_apis(
                     continue
                 if cls := hit.get("class"):
                     api_hits.append((hit["file"], cls))
-        if per_api_cap is not None and len(api_hits) > per_api_cap:
+        # Specificity = spread, not frequency: `avg_pool2d` has 55 hits in 14
+        # files (keep); `add` has 2,864 across ~300 files (drop).
+        if per_api_cap is not None and len({p for p, _ in api_hits}) > per_api_cap:
             continue
         for path, cls in api_hits:
             by_file.setdefault(path, set()).add(cls)
@@ -457,6 +537,7 @@ def affected_tests(
     bindings_by_file: dict[str, list[dict]] | None = None,
     ops_by_file: dict[str, set[str]] | None = None,
     symbol_to_file: dict[str, str] | None = None,
+    test_functions: dict[str, list[dict]] | None = None,
     depth: int = 3,
     mention_cap: int | None = 50,
     cohort_cap: int = 15,
@@ -525,10 +606,34 @@ def affected_tests(
         _tag_apis(api_sources, mention_apis, "mention")
 
     # An API matches OpInfo directly OR via an `aliases=`/`aten_name=` link.
+    # Dotted registry keys (`torch.ops.aten.foo`) are reachable via their leaf.
+    # Only precise-tier APIs may trigger OpInfo expansion — fuzzy cohort noise
+    # (`max`/`min` binding artifacts) used to pull in the whole 48-file blanket.
     opinfo_keys: set[str] = set(opinfo_registry or {}) | set(opinfo_alias_map or {})
-    if opinfo_test_files and apis & opinfo_keys:
-        for path in opinfo_test_files:
-            by_file.setdefault(path, set())
+    opinfo_leaf: dict[str, str] = {}
+    for k in opinfo_keys:
+        if "." in k:
+            opinfo_leaf.setdefault(k.rsplit(".", 1)[-1], k)
+
+    precise_apis = {a for a, tags in api_sources.items() if tags & _PRECISE_TAGS}
+    matched_ops: dict[str, str] = {}
+    for api in precise_apis:
+        if api in opinfo_keys:
+            matched_ops[api] = api
+        elif api in opinfo_leaf:
+            matched_ops[api] = opinfo_leaf[api]
+
+    canonical = [
+        f
+        for f in ("test/test_ops.py", "test/test_meta.py", "test/test_decomp.py")
+        if f in (opinfo_test_files or set())
+    ]
+    opinfo_runs: list[dict[str, Any]] = []
+    if matched_ops and canonical:
+        # OpInfo-parametrized test names embed the op name — `-k` gives
+        # function-level precision instead of 48 whole-file runs.
+        opinfo_runs.append({"files": canonical, "k": _k_expr(matched_ops.values())})
+        _tag_apis(api_sources, matched_ops, "opinfo")
 
     # PyTorch CI's coverage-based map adds whole-file runs for tests that
     # touched the API's Python source file at runtime.
@@ -536,15 +641,22 @@ def affected_tests(
         for path in _tests_via_profiling(apis, python_profiling, test_files):
             by_file.setdefault(path, set())
 
-    # Catch-all: APIs resolved but no test file matched anywhere. Internal
-    # ops (`convolution_overrideable`, `_safe_softmax`) often have no dedicated
-    # test class and aren't in OpInfo, but they're exercised transitively from
-    # the catch-all `@ops(op_db)` test classes in test_ops.py / test_meta.py.
-    # Cost is low (parametrized tests skip non-matching ops).
-    if apis and not by_file and opinfo_test_files:
-        for path in opinfo_test_files:
-            by_file.setdefault(path, set())
-        _tag_apis(api_sources, apis, "opinfo_catchall")
+    # Catch-all, precise-gated and `-k`-bounded: internal ops with no dedicated
+    # test class are exercised transitively via `@ops(op_db)` in test_ops.py.
+    if precise_apis and not by_file and not opinfo_runs and canonical:
+        opinfo_runs.append({"files": canonical, "k": _k_expr(precise_apis)})
+        _tag_apis(api_sources, precise_apis, "opinfo_catchall")
+
+    # Derivatives-aware: `*_backward` inputs exercise gradcheck through the
+    # forward op's OpInfo entry (TestBwdGradients).
+    grad_file = "test/test_ops_gradients.py"
+    backward_fwd = {a for a, tags in api_sources.items() if "backward_alias" in tags}
+    if backward_fwd and grad_file in test_files:
+        opinfo_runs.append({"files": [grad_file], "k": _k_expr(backward_fwd)})
+
+    function_hits: dict[str, dict[str, list[str]]] = {}
+    if test_functions and by_file:
+        function_hits = _function_level_hits(precise_apis, test_functions, set(by_file))
 
     return {
         "input_functions": list(funcs),
@@ -564,6 +676,8 @@ def affected_tests(
             {"file": f, "included_classes": sorted(classes)}
             for f, classes in sorted(by_file.items())
         ],
+        "opinfo_runs": opinfo_runs,
+        "function_hits": function_hits,
     }
 
 

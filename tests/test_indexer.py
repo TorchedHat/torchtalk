@@ -3,6 +3,7 @@
 import ast
 import json
 import subprocess
+from dataclasses import asdict
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -15,6 +16,7 @@ from torchtalk.analysis.python_analyzer import (
     PyFunction,
     PyModule,
 )
+from torchtalk.harness import ConventionManifest
 from torchtalk.indexer import (
     _FREE_FUNC_RE,
     _METHOD_FUNC_RE,
@@ -32,6 +34,7 @@ from torchtalk.indexer import (
     _save_py_cpp_edges_cache,
     update_index,
 )
+from torchtalk.symbols import PackageIdentity
 
 
 class TestServerState:
@@ -384,12 +387,74 @@ class TestUpdateIndex:
         with pytest.raises(ValueError, match="no git_commit"):
             update_index(str(tmp_path / "src"), since="baseline")
 
+    def test_raises_on_cross_package_snapshot(self, tmp_path, monkeypatch):
+        cache = tmp_path / "cache"
+        snap_dir = cache / "snapshots" / "baseline"
+        snap_dir.mkdir(parents=True)
+        (snap_dir / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "name": "baseline",
+                    "created": "2026-01-01T00:00:00+00:00",
+                    "pytorch_source": str(tmp_path / "src"),
+                    "source_fingerprint": "deadbeef",
+                    "git_commit": "abc1234",
+                    "bindings_size": 0,
+                    "bindings_sha256": "x",
+                    "content_fingerprint": None,
+                    "package": "vllm",
+                    "schema_version": 3,
+                }
+            )
+        )
+        (snap_dir / "bindings.json").write_text(json.dumps({"bindings": []}))
+        monkeypatch.setattr(snapshots, "SNAPSHOTS_DIR", cache / "snapshots")
+
+        with pytest.raises(ValueError, match="'vllm' harness"):
+            update_index(str(tmp_path / "src"), since="baseline")
+
+    def test_raises_on_old_format_baseline(self, tmp_path, monkeypatch):
+        cache = tmp_path / "cache"
+        snap_dir = cache / "snapshots" / "baseline"
+        snap_dir.mkdir(parents=True)
+        (snap_dir / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "name": "baseline",
+                    "created": "2026-01-01T00:00:00+00:00",
+                    "pytorch_source": str(tmp_path / "src"),
+                    "source_fingerprint": "deadbeef",
+                    "git_commit": "abc1234",
+                    "bindings_size": 0,
+                    "bindings_sha256": "x",
+                    "content_fingerprint": None,
+                    "schema_version": 2,
+                }
+            )
+        )
+        (snap_dir / "bindings.json").write_text(
+            json.dumps({"bindings": [], "metadata": {"format_version": 2}})
+        )
+        monkeypatch.setattr(snapshots, "SNAPSHOTS_DIR", cache / "snapshots")
+
+        with pytest.raises(ValueError, match="cache format v2"):
+            update_index(str(tmp_path / "src"), since="baseline")
+
     def test_drops_and_reindexes_changed_files(self, tmp_path, monkeypatch):
-        """Stale bindings for changed files are dropped; re-detected entries added."""
+        """Stale bindings for changed files are dropped; re-detected entries added.
+
+        Changed files outside the manifest's C++ search dirs lose their stale
+        bindings but are not re-detected (harness boundary).
+        """
         import subprocess
 
         src = tmp_path / "src"
-        src.mkdir()
+        changed_rel = "aten/src/ATen/native/changed.cpp"
+        outside_rel = "tools/outside.cpp"
+        excluded_rel = "aten/src/ATen/native/test_helper.cpp"
+        unpatterned_rel = "aten/src/ATen/native/plain.cpp"
+        (src / changed_rel).parent.mkdir(parents=True)
+        (src / outside_rel).parent.mkdir(parents=True)
         cache = tmp_path / "cache"
         snap_dir = cache / "snapshots" / "baseline"
         snap_dir.mkdir(parents=True)
@@ -400,7 +465,7 @@ class TestUpdateIndex:
                     "python_name": "stale",
                     "cpp_name": "at::stale",
                     "dispatch_key": "CPU",
-                    "file_path": str(src / "changed.cpp"),
+                    "file_path": str(src / changed_rel),
                     "line_number": 1,
                 },
                 {
@@ -410,11 +475,19 @@ class TestUpdateIndex:
                     "file_path": str(src / "untouched.cpp"),
                     "line_number": 2,
                 },
+                {
+                    "python_name": "outside",
+                    "cpp_name": "at::outside",
+                    "dispatch_key": "CPU",
+                    "file_path": str(src / outside_rel),
+                    "line_number": 3,
+                },
             ],
             "cuda_kernels": [],
             "native_functions": {},
             "derivatives": {},
             "native_implementations": {},
+            "metadata": {"format_version": indexer._BINDINGS_CACHE_FORMAT_VERSION},
         }
         (snap_dir / "bindings.json").write_text(json.dumps(baseline_bindings))
         (snap_dir / "manifest.json").write_text(
@@ -432,16 +505,27 @@ class TestUpdateIndex:
                 }
             )
         )
-        (src / "changed.cpp").write_text("// new content")
+        (src / changed_rel).write_text("TORCH_LIBRARY(aten, m) {}")
+        (src / outside_rel).write_text("TORCH_LIBRARY(aten, m) {}")
+        (src / excluded_rel).write_text("TORCH_LIBRARY(aten, m) {}")
+        (src / unpatterned_rel).write_text("// no binding patterns here")
 
         monkeypatch.setattr(snapshots, "SNAPSHOTS_DIR", cache / "snapshots")
         monkeypatch.setattr(indexer, "CACHE_DIR", cache)
         monkeypatch.setattr(indexer, "_cache_path", lambda _s: cache / "bindings.json")
         monkeypatch.setattr(indexer, "_source_fingerprint", lambda _s: "newfp")
+        monkeypatch.setattr(
+            indexer,
+            "detect_package_identity",
+            lambda _s, _n: PackageIdentity("pytorch", "abc123def456"),
+        )
 
         def fake_diff(cmd, **kwargs):
             class R:
-                stdout = "M\tchanged.cpp\n"
+                stdout = (
+                    f"M\t{changed_rel}\nM\t{outside_rel}\n"
+                    f"M\t{excluded_rel}\nM\t{unpatterned_rel}\n"
+                )
 
             return R()
 
@@ -455,7 +539,7 @@ class TestUpdateIndex:
                             "python_name": "reindexed",
                             "cpp_name": "at::reindexed",
                             "dispatch_key": "CPU",
-                            "file_path": str(src / "changed.cpp"),
+                            "file_path": str(src / changed_rel),
                             "line_number": 5,
                         }
 
@@ -463,6 +547,9 @@ class TestUpdateIndex:
                 self.cuda_kernels = []
 
         class FakeDetector:
+            def __init__(self, **_kwargs):
+                pass
+
             def detect_bindings(self, _path, _content):
                 return FakeBindingGraph()
 
@@ -472,8 +559,10 @@ class TestUpdateIndex:
 
         stats = update_index(str(src), since="baseline")
 
-        assert stats["cpp_files_changed"] == 1
-        assert stats["bindings_total"] == 2  # stable + reindexed, stale dropped
+        assert stats["cpp_files_changed"] == 4
+        # stable + reindexed; stale dropped; the out-of-bounds, excluded, and
+        # pattern-free changed files are not re-detected
+        assert stats["bindings_total"] == 2
 
         written = json.loads(Path(cache / "bindings.json").read_text())
         names = {b["python_name"] for b in written["bindings"]}
@@ -628,6 +717,74 @@ class TestCollectTestAttrHits:
         assert index["copy_"][0]["receiver_type"] is None
 
 
+class TestCacheValidPackageIdentity:
+    @pytest.fixture(autouse=True)
+    def stub_identity(self, monkeypatch):
+        monkeypatch.setattr(indexer, "_source_fingerprint", lambda _s: "fp")
+        monkeypatch.setattr(
+            indexer,
+            "detect_package_identity",
+            lambda _s, _n: PackageIdentity("pytorch", "abc123def456"),
+        )
+
+    def _write(self, tmp_path, meta):
+        cache = tmp_path / "bindings.json"
+        cache.write_text(json.dumps({"bindings": [], "metadata": meta}))
+        return cache
+
+    def _meta(self, **overrides):
+        meta = {
+            "format_version": indexer._BINDINGS_CACHE_FORMAT_VERSION,
+            "source_fingerprint": "fp",
+            "package": {"name": "pytorch", "revision": "abc123def456"},
+        }
+        meta.update(overrides)
+        return meta
+
+    def test_accepts_matching_metadata(self, tmp_path):
+        assert indexer._cache_valid(self._write(tmp_path, self._meta()), "/src") is True
+
+    def test_rejects_revision_mismatch(self, tmp_path):
+        meta = self._meta(package={"name": "pytorch", "revision": "fff000fff000"})
+        assert indexer._cache_valid(self._write(tmp_path, meta), "/src") is False
+
+    def test_rejects_missing_package(self, tmp_path):
+        meta = self._meta()
+        del meta["package"]
+        assert indexer._cache_valid(self._write(tmp_path, meta), "/src") is False
+
+    def test_rejects_old_format_version(self, tmp_path):
+        meta = self._meta(format_version=indexer._BINDINGS_CACHE_FORMAT_VERSION - 1)
+        assert indexer._cache_valid(self._write(tmp_path, meta), "/src") is False
+
+
+class TestBuildIndexPackageMetadata:
+    def test_metadata_carries_package_identity(self, tmp_path, monkeypatch):
+        src = tmp_path / "src"
+        src.mkdir()
+        cache_dir = tmp_path / "cache"
+        cache_dir.mkdir()
+        monkeypatch.setattr(indexer, "CACHE_DIR", cache_dir)
+        monkeypatch.setattr(
+            indexer, "_cache_path", lambda _s: cache_dir / "bindings.json"
+        )
+        monkeypatch.setattr(
+            indexer,
+            "detect_package_identity",
+            lambda _s, _n: PackageIdentity("pytorch", "abc123def456"),
+        )
+
+        data = indexer._build_index(str(src))
+
+        assert data["metadata"]["package"] == {
+            "name": "pytorch",
+            "revision": "abc123def456",
+        }
+        assert (
+            data["metadata"]["format_version"] == indexer._BINDINGS_CACHE_FORMAT_VERSION
+        )
+
+
 class TestCacheInvalidationByGitState:
     """_cache_valid must reject caches after commits/pulls and dirty edits."""
 
@@ -651,7 +808,13 @@ class TestCacheInvalidationByGitState:
             json.dumps(
                 {
                     "bindings": [],
-                    "metadata": indexer._cache_metadata(str(src)),
+                    "metadata": {
+                        "format_version": indexer._BINDINGS_CACHE_FORMAT_VERSION,
+                        "source_fingerprint": indexer._source_fingerprint(str(src)),
+                        "package": asdict(
+                            indexer.detect_package_identity(str(src), "pytorch")
+                        ),
+                    },
                 }
             )
         )
@@ -683,7 +846,16 @@ class TestUpdateIndexMetadata:
         cache = tmp_path / "cache"
         snap_dir = cache / "snapshots" / "baseline"
         snap_dir.mkdir(parents=True)
-        (snap_dir / "bindings.json").write_text(json.dumps({"bindings": []}))
+        (snap_dir / "bindings.json").write_text(
+            json.dumps(
+                {
+                    "bindings": [],
+                    "metadata": {
+                        "format_version": indexer._BINDINGS_CACHE_FORMAT_VERSION
+                    },
+                }
+            )
+        )
         (snap_dir / "manifest.json").write_text(
             json.dumps(
                 {
@@ -705,6 +877,11 @@ class TestUpdateIndexMetadata:
         monkeypatch.setattr(indexer, "CACHE_DIR", cache)
         monkeypatch.setattr(indexer, "_cache_path", lambda _s: cache_file)
         monkeypatch.setattr(indexer, "_source_fingerprint", lambda _s: "fp")
+        monkeypatch.setattr(
+            indexer,
+            "detect_package_identity",
+            lambda _s, _n: PackageIdentity("pytorch", "abc123def456"),
+        )
 
         def fake_diff(cmd, **kwargs):
             class R:
@@ -724,6 +901,62 @@ class TestUpdateIndexMetadata:
         cache_file, src = self._run_noop_update(tmp_path, monkeypatch)
         written = json.loads(cache_file.read_text())["metadata"]
         assert set(indexer._cache_metadata(str(src))) <= set(written)
+
+
+class TestBuildIndexRegistrations:
+    def test_registration_records_land_in_index_and_cache(self, tmp_path, monkeypatch):
+        src = tmp_path / "src"
+        (src / "pkg").mkdir(parents=True)
+        (src / "pkg" / "ops.py").write_text(
+            "@CustomOp.register('silu')\nclass Silu:\n    pass\n"
+        )
+        cache_dir = tmp_path / "cache"
+        cache_dir.mkdir()
+        monkeypatch.setattr(indexer, "CACHE_DIR", cache_dir)
+        monkeypatch.setattr(
+            indexer, "_cache_path", lambda _s: cache_dir / "bindings.json"
+        )
+        monkeypatch.setattr(
+            indexer,
+            "detect_package_identity",
+            lambda _s, _n: PackageIdentity("fake", "abc123def456"),
+        )
+        m = ConventionManifest(
+            package="fake",
+            cpp_search_dirs=(),
+            python_search_dirs=("pkg",),
+            decorator_registries={"CustomOp.register": "custom_ops"},
+        )
+
+        data = indexer._build_index(str(src), manifest=m)
+
+        (rec,) = data["registrations"]["records"]
+        assert rec["key"] == "silu"
+        assert rec["target"] == "pkg.ops.Silu"
+        assert rec["kind"] == "resolved"
+        cached = json.loads((cache_dir / "bindings.json").read_text())
+        assert cached["registrations"]["records"] == [rec]
+
+
+class TestManifestYamlSources:
+    def test_custom_yaml_path_honored(self, tmp_path):
+        (tmp_path / "defs").mkdir()
+        (tmp_path / "defs" / "ops.yaml").write_text("- func: foo() -> Tensor\n")
+        m = ConventionManifest(
+            package="fake", cpp_search_dirs=(), native_functions_yaml="defs/ops.yaml"
+        )
+        functions, derivatives = indexer._parse_native_functions(str(tmp_path), m)
+        assert "foo" in functions
+        assert derivatives == {}
+
+    def test_undeclared_yaml_sources_are_skipped(self, tmp_path):
+        nf = tmp_path / "aten/src/ATen/native/native_functions.yaml"
+        nf.parent.mkdir(parents=True)
+        nf.write_text("- func: bar() -> Tensor\n")
+        m = ConventionManifest(package="fake", cpp_search_dirs=())
+        functions, derivatives = indexer._parse_native_functions(str(tmp_path), m)
+        assert functions == {}
+        assert derivatives == {}
 
 
 class TestFuzzyFindDeterminism:

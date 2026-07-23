@@ -3,7 +3,7 @@
 TorchTalk CLI - Cross-language binding analysis for PyTorch codebases.
 
 Quick start:
-    torchtalk init --pytorch-source /path/to/pytorch
+    torchtalk init --source /path/to/pytorch
     claude mcp add torchtalk -s user -- torchtalk mcp-serve
 
 The MCP server automatically builds and caches the binding index on first run.
@@ -19,30 +19,57 @@ from pathlib import Path
 log = logging.getLogger(__name__)
 
 
+def _activate_harness(name: str | None) -> bool:
+    """Activate the named harness, or the configured default when name is None.
+
+    Returns False (after logging) when the harness is not registered.
+    """
+    from torchtalk.config import default_harness
+    from torchtalk.harness import set_active_harness
+
+    target = name or default_harness()
+    if not target:
+        return True
+    try:
+        set_active_harness(target)
+    except KeyError as e:
+        log.error(str(e))
+        return False
+    return True
+
+
 def cmd_init(args):
-    """Configure TorchTalk with PyTorch source path."""
-    from torchtalk.config import load_config, save_config, validate_pytorch_path
+    """Configure TorchTalk with a source path for a harness."""
+    from torchtalk.config import set_source, validate_source_path
+    from torchtalk.harness import get_harness
 
-    source_path = str(Path(args.pytorch_source).resolve())
+    try:
+        manifest = get_harness(args.harness).manifest
+    except KeyError as e:
+        log.error(str(e))
+        sys.exit(1)
 
-    valid, msg = validate_pytorch_path(source_path)
+    source_path = str(Path(args.source).resolve())
+
+    valid, msg = validate_source_path(source_path, manifest)
     if not valid:
         log.error(msg)
         sys.exit(1)
 
-    config = load_config()
-    config.setdefault("source", {})["pytorch_source"] = source_path
-    path = save_config(config)
+    path = set_source(args.harness, source_path, make_default=args.set_default)
 
+    default_note = f"  default harness = {args.harness}\n" if args.set_default else ""
     log.info(
         "Config saved to %s\n"
-        "  pytorch_source = %s\n\n"
+        "  sources.%s = %s\n%s\n"
         "Next steps:\n"
         "  claude mcp add torchtalk -s user -- torchtalk mcp-serve\n\n"
         "Verify with:\n"
         "  torchtalk status",
         path,
+        args.harness,
         source_path,
+        default_note,
     )
 
 
@@ -70,108 +97,108 @@ def _format_coverage(cov: dict[str, int]) -> str:
     return " / ".join(parts + extras) if (parts or extras) else "unknown"
 
 
-def cmd_status(args):
-    """Show TorchTalk configuration and cache status."""
+def _configured_sources(config: dict) -> dict[str, str]:
+    """Harness → source path from config, folding in the legacy pytorch key."""
+    sources = dict(config.get("sources", {}))
+    legacy = config.get("source", {}).get("pytorch_source")
+    if legacy and "pytorch" not in sources:
+        sources["pytorch"] = legacy
+    return sources
+
+
+def _harness_status_lines(harness: str, config_source: str) -> tuple[list[str], bool]:
+    """Status lines for one configured harness; returns (lines, is_valid)."""
     from datetime import datetime
 
-    from torchtalk import __version__
-    from torchtalk.config import (
-        CACHE_DIR,
-        CONFIG_FILE,
-        cache_paths,
-        load_config,
-        resolve_pytorch_source,
-        validate_pytorch_path,
+    from torchtalk.config import cache_paths, validate_source_path
+    from torchtalk.harness import get_harness
+
+    lines = [f"Harness: {harness}"]
+    try:
+        manifest = get_harness(harness).manifest
+    except KeyError:
+        lines.append(f"  Source:          {config_source} (UNREGISTERED harness)")
+        return lines, False
+
+    valid, msg = validate_source_path(config_source, manifest)
+    lines.append(
+        f"  Source:          {config_source} ({'valid' if valid else 'INVALID'})"
     )
+    if not valid:
+        lines.append(f"                   {msg}")
+        return lines, False
+
+    paths = cache_paths(config_source, package=manifest.package)
+    for key, label in [("bindings", "Bindings index"), ("callgraph", "Call graph")]:
+        p = paths[key]
+        if p.exists():
+            size_mb = p.stat().st_size / (1024 * 1024)
+            mtime = datetime.fromtimestamp(p.stat().st_mtime)
+            lines.append(
+                f"  {label + ':':18s} {p.name} "
+                f"({size_mb:.1f} MB, {mtime:%Y-%m-%d %H:%M})"
+            )
+            if key == "callgraph":
+                stats = _read_cache_stats(p) or {}
+                cov = stats.get("coverage")
+                if cov:
+                    lines.append(f"  {'TU coverage:':18s} " + _format_coverage(cov))
+                idirs = stats.get("include_dirs_count")
+                if isinstance(idirs, int) and idirs > 0:
+                    lines.append(f"  {'-I dirs tracked:':18s} {idirs}")
+        else:
+            lines.append(f"  {label + ':':18s} not built")
+
+    compile_cmds = Path(config_source) / "build" / "compile_commands.json"
+    if not compile_cmds.exists():
+        compile_cmds = Path(config_source) / "compile_commands.json"
+    found = "found" if compile_cmds.exists() else "not found (call graph unavailable)"
+    lines.append(f"  compile_commands.json: {found}")
+    return lines, True
+
+
+def cmd_status(args):
+    """Show TorchTalk configuration and cache status."""
+    from torchtalk import __version__
+    from torchtalk.config import CACHE_DIR, CONFIG_FILE, default_harness, load_config
 
     lines = [f"TorchTalk v{__version__}", ""]
 
-    # Config file
     lines.append("Configuration:")
     if not CONFIG_FILE.exists():
         lines.append(f"  Config file:     {CONFIG_FILE} (not found)")
         lines.append("")
-        lines.append(
-            "Run 'torchtalk init --pytorch-source /path/to/pytorch' to configure."
-        )
+        lines.append("Run 'torchtalk init --source /path/to/pytorch' to configure.")
         print("\n".join(lines))
         sys.exit(1)
 
     lines.append(f"  Config file:     {CONFIG_FILE}")
+    lines.append(f"  Cache directory: {CACHE_DIR}")
+    default = default_harness()
+    if default:
+        lines.append(f"  Default harness: {default}")
 
-    # PyTorch source — show raw config value for diagnostics, even if stale
-    config = load_config()
-    config_source = config.get("source", {}).get("pytorch_source")
-
-    if not config_source:
-        lines.append("  PyTorch source:  not configured")
+    # Show raw config values for diagnostics, even if stale
+    sources = _configured_sources(load_config())
+    if not sources:
+        lines.append("  Sources:         not configured")
         lines.append("")
-        lines.append(
-            "Run 'torchtalk init --pytorch-source /path/to/pytorch' to configure."
-        )
+        lines.append("Run 'torchtalk init --source /path/to/pytorch' to configure.")
         print("\n".join(lines))
         sys.exit(1)
 
-    valid, msg = validate_pytorch_path(config_source)
-    lines.append(
-        f"  PyTorch source:  {config_source} ({'valid' if valid else 'INVALID'})"
-    )
-    if not valid:
-        lines.append(f"                   {msg}")
+    all_valid = True
+    for harness in sorted(sources):
         lines.append("")
-        lines.append(
-            "Run 'torchtalk init --pytorch-source /path/to/pytorch' to reconfigure."
-        )
+        harness_lines, valid = _harness_status_lines(harness, sources[harness])
+        lines.extend(harness_lines)
+        all_valid = all_valid and valid
+
+    lines.append("")
+    if not all_valid:
+        lines.append("Status: NOT READY (fix the entries above or re-run init)")
         print("\n".join(lines))
         sys.exit(1)
-
-    source = resolve_pytorch_source()
-
-    # Cache
-    lines.append("")
-    lines.append("Cache:")
-    lines.append(f"  Cache directory:  {CACHE_DIR}")
-
-    if CACHE_DIR.exists():
-        paths = cache_paths(source)
-        for key, label in [("bindings", "Bindings index"), ("callgraph", "Call graph")]:
-            p = paths[key]
-            if p.exists():
-                size_mb = p.stat().st_size / (1024 * 1024)
-                mtime = datetime.fromtimestamp(p.stat().st_mtime)
-                lines.append(
-                    f"  {label + ':':18s} {p.name} "
-                    f"({size_mb:.1f} MB, {mtime:%Y-%m-%d %H:%M})"
-                )
-                if key == "callgraph":
-                    stats = _read_cache_stats(p) or {}
-                    cov = stats.get("coverage")
-                    if cov:
-                        lines.append(f"  {'TU coverage:':18s} " + _format_coverage(cov))
-                    idirs = stats.get("include_dirs_count")
-                    if isinstance(idirs, int) and idirs > 0:
-                        lines.append(f"  {'-I dirs tracked:':18s} {idirs}")
-            else:
-                lines.append(f"  {label + ':':18s} not built")
-    else:
-        lines.append("  Cache directory:  not created yet")
-
-    # compile_commands.json
-    if source:
-        compile_cmds = Path(source) / "build" / "compile_commands.json"
-        lines.append("")
-        lines.append("Build artifacts:")
-        if compile_cmds.exists():
-            lines.append("  compile_commands.json: found")
-        else:
-            lines.append(
-                "  compile_commands.json: not found (call graph features unavailable)"
-            )
-            lines.append(
-                f"    Build PyTorch to enable: cd {source} && python setup.py develop"
-            )
-
-    lines.append("")
     lines.append("Status: Ready")
     print("\n".join(lines))
 
@@ -181,9 +208,11 @@ def cmd_mcp_serve(args):
     from torchtalk.formatting import set_formatter_mode
     from torchtalk.server import run_server
 
+    if not _activate_harness(args.harness):
+        return 1
     set_formatter_mode(args.format)
     run_server(
-        pytorch_source=args.pytorch_source,
+        pytorch_source=args.source,
         index_path=args.index,
         transport=args.transport,
     )
@@ -191,13 +220,15 @@ def cmd_mcp_serve(args):
 
 
 def cmd_index_build(args):
-    """Build or refresh the index for a PyTorch source and exit."""
-    from torchtalk.config import resolve_pytorch_source
+    """Build or refresh the index for a source checkout and exit."""
+    from torchtalk.config import resolve_source
     from torchtalk.indexer import build_index
 
-    source = args.pytorch_source or resolve_pytorch_source()
+    if not _activate_harness(args.harness):
+        return 1
+    source = resolve_source(cli_flag=args.source)
     if not source:
-        log.error("No PyTorch source configured. Run 'torchtalk init' first.")
+        log.error("No source configured. Run 'torchtalk init' first.")
         return 1
 
     stats = build_index(source, wait_for_cpp=not args.no_wait)
@@ -218,13 +249,15 @@ def cmd_index_build(args):
 
 def cmd_index_update(args):
     """Incrementally refresh the bindings index using a snapshot as baseline."""
-    from torchtalk.config import resolve_pytorch_source
+    from torchtalk.config import resolve_source
     from torchtalk.indexer import update_index
     from torchtalk.snapshots import SnapshotError
 
-    source = args.pytorch_source or resolve_pytorch_source()
+    if not _activate_harness(args.harness):
+        return 1
+    source = resolve_source(cli_flag=args.source)
     if not source:
-        log.error("No PyTorch source configured. Run 'torchtalk init' first.")
+        log.error("No source configured. Run 'torchtalk init' first.")
         return 1
 
     try:
@@ -290,6 +323,8 @@ def cmd_snapshot_save(args):
     """Save current cache as a named snapshot."""
     from torchtalk.snapshots import SnapshotError, save_snapshot
 
+    if not _activate_harness(args.harness):
+        return 1
     try:
         manifest = save_snapshot(args.name)
     except SnapshotError as e:
@@ -308,6 +343,8 @@ def cmd_snapshot_load(args):
     """Load a named snapshot into the active cache."""
     from torchtalk.snapshots import SnapshotError, find_nearest_snapshot, load_snapshot
 
+    if not _activate_harness(args.harness):
+        return 1
     name = args.name
     force = args.force
 
@@ -491,9 +528,9 @@ def cmd_cursor_add(args):
     else:
         config_path = cursor_dir / MCP_CONFIG_NAME
 
-    pytorch_source = Path(args.pytorch_source).resolve()
-    if not pytorch_source.is_dir():
-        log.error("PyTorch source path is not a directory: %s", pytorch_source)
+    source = Path(args.source).resolve()
+    if not source.is_dir():
+        log.error("Source path is not a directory: %s", source)
         return 1
 
     if config_path.exists():
@@ -510,7 +547,7 @@ def cmd_cursor_add(args):
 
     data["mcpServers"]["torchtalk"] = {
         "command": "torchtalk",
-        "args": ["mcp-serve", "--pytorch-source", str(pytorch_source)],
+        "args": ["mcp-serve", "--source", str(source)],
     }
 
     config_dir = config_path.parent
@@ -535,7 +572,7 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Quick start:
-  torchtalk init --pytorch-source /path/to/pytorch
+  torchtalk init --source /path/to/pytorch
   claude mcp add torchtalk -s user -- torchtalk mcp-serve
 
 Verify setup:
@@ -548,21 +585,35 @@ Verify setup:
     # init command
     parser_init = subparsers.add_parser(
         "init",
-        help="Configure TorchTalk with PyTorch source path",
+        help="Configure TorchTalk with a source path for a harness",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Saves configuration to ~/.config/torchtalk/config.toml.
 Safe to re-run -- updates existing config without data loss.
+Run once per harness to configure multiple repos side by side.
 
-Example:
-  torchtalk init --pytorch-source /myworkspace/pytorch
+Examples:
+  torchtalk init --source /myworkspace/pytorch
+  torchtalk init --harness vllm --source /myworkspace/vllm --set-default
         """,
     )
     parser_init.add_argument(
+        "--source",
         "--pytorch-source",
         "-p",
+        dest="source",
         required=True,
-        help="Path to PyTorch source code",
+        help="Path to the source checkout (--pytorch-source is a deprecated alias)",
+    )
+    parser_init.add_argument(
+        "--harness",
+        default="pytorch",
+        help="Harness the source belongs to (default: pytorch)",
+    )
+    parser_init.add_argument(
+        "--set-default",
+        action="store_true",
+        help="Make this harness the default when --harness is omitted",
     )
     parser_init.add_argument(
         "--debug", action="store_true", help="Enable debug logging"
@@ -583,14 +634,20 @@ Example:
     index_sub = parser_index.add_subparsers(dest="index_cmd", required=True)
     p_build = index_sub.add_parser("build", help="Build or refresh the index and exit")
     p_build.add_argument(
+        "--source",
         "--pytorch-source",
         "-p",
-        help="Override PyTorch source (default: from config)",
+        dest="source",
+        help="Override source path (default: from config)",
     )
     p_build.add_argument(
         "--no-wait",
         action="store_true",
         help="Return immediately instead of waiting for the C++ call graph",
+    )
+    p_build.add_argument(
+        "--harness",
+        help="Harness to index with (default: from config, else pytorch)",
     )
     p_build.set_defaults(func=cmd_index_build)
 
@@ -603,9 +660,11 @@ Example:
         "--since", required=True, help="Baseline snapshot name (e.g. 'nightly')"
     )
     p_update.add_argument(
+        "--source",
         "--pytorch-source",
         "-p",
-        help="Override PyTorch source (default: from config)",
+        dest="source",
+        help="Override source path (default: from config)",
     )
     p_update.add_argument(
         "--on-uncovered",
@@ -617,6 +676,10 @@ Example:
             "widen (textually grep compile-DB TUs and add to reparse set)"
         ),
     )
+    p_update.add_argument(
+        "--harness",
+        help="Harness to update with (default: from config, else pytorch)",
+    )
     p_update.set_defaults(func=cmd_index_update)
 
     # mcp-serve command
@@ -625,14 +688,16 @@ Example:
         help="Start MCP server for Claude Code integration",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-Reads PyTorch source from config. Override with --pytorch-source flag.
+Reads the harness's source from config. Override with --source flag.
 First run builds the index (a few minutes); subsequent runs use cache.
         """,
     )
     parser_mcp.add_argument(
+        "--source",
         "--pytorch-source",
         "-p",
-        help="Override PyTorch source path (default: from config)",
+        dest="source",
+        help="Override source path (default: from config)",
     )
     parser_mcp.add_argument(
         "--index", "-i", help="Path to existing bindings.json or index directory"
@@ -642,6 +707,10 @@ First run builds the index (a few minutes); subsequent runs use cache.
         default="stdio",
         choices=["stdio", "streamable-http"],
         help="MCP transport type (default: stdio for Claude Code)",
+    )
+    parser_mcp.add_argument(
+        "--harness",
+        help="Harness to index with (default: from config, else pytorch)",
     )
     parser_mcp.add_argument(
         "--format",
@@ -664,6 +733,10 @@ First run builds the index (a few minutes); subsequent runs use cache.
         "name",
         help="Name (letters, digits, . - _ ; max 64 chars)",
     )
+    p_save.add_argument(
+        "--harness",
+        help="Harness whose cache to snapshot (default: from config, else pytorch)",
+    )
     p_save.set_defaults(func=cmd_snapshot_save)
 
     p_load = snap_sub.add_parser("load", help="Restore a snapshot into active cache")
@@ -679,6 +752,10 @@ First run builds the index (a few minutes); subsequent runs use cache.
         "--nearest",
         action="store_true",
         help="Auto-pick the snapshot whose git commit best matches current HEAD",
+    )
+    p_load.add_argument(
+        "--harness",
+        help="Harness whose cache to restore into (default: from config, else pytorch)",
     )
     p_load.set_defaults(func=cmd_snapshot_load)
 
@@ -733,10 +810,12 @@ First run builds the index (a few minutes); subsequent runs use cache.
         help="Project root: .cursor/mcp.json and .claude contents are written here",
     )
     parser_cursor.add_argument(
+        "--source",
         "--pytorch-source",
         "-p",
+        dest="source",
         required=True,
-        help="Path to PyTorch source tree",
+        help="Path to the source checkout (--pytorch-source is a deprecated alias)",
     )
     parser_cursor.add_argument(
         "--global",

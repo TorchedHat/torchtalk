@@ -221,6 +221,60 @@ class TestCudaDeviceFuncBinding:
         assert device_bindings == []
 
 
+class TestManifestMacroConfig:
+    """Primitive 1: macro-alias expansion + token substitution (vLLM shape)."""
+
+    def _detector(self):
+        return BindingDetector(
+            macro_aliases={"TORCH_LIBRARY_EXPAND": "TORCH_LIBRARY"},
+            token_map={"TORCH_EXTENSION_NAME": "_C"},
+        )
+
+    def test_macro_alias_expands_to_torch_library(self):
+        code = (
+            "TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {\n"
+            '  ops.def("paged_attention(Tensor q) -> Tensor");\n'
+            '  ops.impl("paged_attention", &paged_attention);\n'
+            "}\n"
+        )
+        graph = self._detector().detect_bindings("/x.cpp", code)
+        by_type = {b.binding_type: b for b in graph.bindings}
+        op = by_type[BindingType.TORCH_OP.value]
+        assert op.python_name == "_C.paged_attention"
+        assert op.namespace == "_C"
+        assert op.line_number == 2
+        impl = by_type[BindingType.TORCH_LIBRARY_IMPL.value]
+        assert impl.cpp_name == "paged_attention"
+
+    def test_token_map_resolves_pybind_module_name(self):
+        code = 'PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) { m.def("fwd", &fwd); }'
+        graph = self._detector().detect_bindings("/y.cpp", code)
+        assert graph.bindings[0].namespace == "_C"
+        assert "TORCH_EXTENSION_NAME" not in {b.namespace for b in graph.bindings}
+
+    def test_unconfigured_detector_is_unchanged(self):
+        code = (
+            'TORCH_LIBRARY(aten, m) { m.def("relu(Tensor self) -> Tensor"); }\n'
+            "TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {\n"
+            '  ops.def("paged_attention(Tensor q) -> Tensor");\n'
+            "}\n"
+        )
+        graph = BindingDetector().detect_bindings("/z.cpp", code)
+        names = {b.python_name for b in graph.bindings}
+        assert "aten.relu" in names
+        assert not any("paged_attention" in n for n in names)
+
+    def test_word_boundary_no_partial_token_hits(self):
+        code = (
+            "TORCH_LIBRARY_EXPANDED_THING(foo, m) {}\n"
+            "TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {\n"
+            '  ops.def("op_a(Tensor t) -> Tensor");\n'
+            "}\n"
+        )
+        graph = self._detector().detect_bindings("/w.cpp", code)
+        assert {b.namespace for b in graph.bindings if b.namespace} == {"_C"}
+
+
 class TestModuleVarTorchOps:
     def test_library_block_uses_declared_module_variable(self):
         code = (
@@ -302,3 +356,79 @@ class TestEnclosingFunctionKeywords:
         graph = BindingDetector().detect_bindings("/d.cpp", code)
         disp = next(b for b in graph.bindings if b.binding_type == "at_dispatch")
         assert disp.cpp_name == "gelu_impl"
+
+
+class TestSearchDirBounds:
+    """Directory scans honor manifest cpp_search_dirs."""
+
+    _CODE = 'TORCH_LIBRARY(aten, m) { m.def("relu(Tensor self) -> Tensor"); }\n'
+
+    def _repo(self, tmp_path_factory):
+        # mktemp instead of tmp_path: tmp_path embeds the test name, whose
+        # "test_" segment trips the scanner's exclusion patterns.
+        repo = tmp_path_factory.mktemp("scandir")
+        (repo / "csrc").mkdir()
+        (repo / "vendored").mkdir()
+        (repo / "csrc" / "inside.cpp").write_text(self._CODE)
+        (repo / "vendored" / "outside.cpp").write_text(self._CODE)
+        return repo
+
+    def test_scan_limited_to_search_dirs(self, tmp_path_factory):
+        repo = self._repo(tmp_path_factory)
+        detector = BindingDetector(search_dirs=("csrc",))
+        graph = detector.detect_bindings_in_directory(str(repo))
+        files = {b.file_path for b in graph.bindings}
+        assert files
+        assert all("vendored" not in f for f in files)
+
+    def test_unbounded_detector_scans_whole_tree(self, tmp_path_factory):
+        repo = self._repo(tmp_path_factory)
+        graph = BindingDetector().detect_bindings_in_directory(str(repo))
+        files = {b.file_path for b in graph.bindings}
+        assert any("vendored" in f for f in files)
+        assert any("csrc" in f for f in files)
+
+    def test_missing_search_dirs_scan_nothing(self, tmp_path_factory):
+        repo = self._repo(tmp_path_factory)
+        detector = BindingDetector(search_dirs=("nonexistent",))
+        graph = detector.detect_bindings_in_directory(str(repo))
+        assert graph.bindings == []
+
+
+class TestManifestExcludeAndPrefilter:
+    """Manifest exclude_patterns and registration_macros drive directory scans."""
+
+    _CODE = 'TORCH_LIBRARY(aten, m) { m.def("relu(Tensor self) -> Tensor"); }\n'
+
+    def _repo(self, tmp_path_factory):
+        repo = tmp_path_factory.mktemp("scandir")
+        (repo / "csrc" / "generated").mkdir(parents=True)
+        (repo / "csrc" / "tests").mkdir()
+        (repo / "csrc" / "generated" / "gen.cpp").write_text(self._CODE)
+        (repo / "csrc" / "tests" / "helper.cpp").write_text(self._CODE)
+        return repo
+
+    def test_manifest_excludes_replace_defaults(self, tmp_path_factory):
+        repo = self._repo(tmp_path_factory)
+        detector = BindingDetector(search_dirs=("csrc",), exclude_patterns=("/tests/",))
+        graph = detector.detect_bindings_in_directory(str(repo))
+        files = {b.file_path for b in graph.bindings}
+        assert any("generated" in f for f in files)
+        assert not any("/tests/" in f for f in files)
+
+    def test_default_excludes_apply_when_manifest_unset(self, tmp_path_factory):
+        repo = self._repo(tmp_path_factory)
+        detector = BindingDetector(search_dirs=("csrc",))
+        graph = detector.detect_bindings_in_directory(str(repo))
+        assert graph.bindings == []
+
+    def test_registration_macros_prefilter(self, tmp_path_factory):
+        repo = tmp_path_factory.mktemp("scandir")
+        (repo / "csrc").mkdir()
+        (repo / "csrc" / "ops.cpp").write_text(self._CODE)
+        detector = BindingDetector(
+            search_dirs=("csrc",), registration_macros=("CUSTOM_REGISTER",)
+        )
+        assert detector.detect_bindings_in_directory(str(repo)).bindings == []
+        fallback = BindingDetector(search_dirs=("csrc",))
+        assert fallback.detect_bindings_in_directory(str(repo)).bindings

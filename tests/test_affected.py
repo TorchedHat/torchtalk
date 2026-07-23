@@ -9,6 +9,7 @@ import pytest
 
 from torchtalk.analysis.affected import (
     _api_to_source_paths,
+    _bindings_for,
     _class_matches_api,
     _filename_family,
     _tests_mentioning_apis,
@@ -169,18 +170,15 @@ class TestAffectedTests:
             opinfo_test_files=opinfo_test_files,
             depth=1,
         )
-        runs_by_file = {
-            tr["file"]: tr["included_classes"] for tr in result["test_runs"]
-        }
-        assert runs_by_file == {
-            "test/test_ops.py": [],
-            "test/test_meta.py": [],
-        }
+        # v2: OpInfo expansion is a -k run, not whole-file blankets.
+        assert result["test_runs"] == []
+        assert result["opinfo_runs"] == [
+            {"files": ["test/test_ops.py", "test/test_meta.py"], "k": "foo"}
+        ]
 
     def test_no_opinfo_match_falls_back_to_opinfo_files(self, extractor):
         # API resolved but not in OpInfo and no test class matches → catch-all
-        # adds OpInfo whole-file runs (test_ops.py / test_meta.py exercise
-        # ops via @ops(op_db) parametrization).
+        # emits a -k-bounded OpInfo run instead of whole files.
         by_cpp_name = {"foo_kernel": [{"python_name": "aten.foo"}]}
         opinfo_registry = {"bar": {}}  # foo not registered
         opinfo_test_files = {"test/test_ops.py"}
@@ -195,7 +193,8 @@ class TestAffectedTests:
             opinfo_test_files=opinfo_test_files,
             depth=1,
         )
-        assert {tr["file"] for tr in result["test_runs"]} == {"test/test_ops.py"}
+        assert result["test_runs"] == []
+        assert result["opinfo_runs"] == [{"files": ["test/test_ops.py"], "k": "foo"}]
 
     def test_opinfo_alias_match_expands_files(self, extractor):
         # API "conv2d" not in opinfo_registry directly, but is in alias_map
@@ -218,8 +217,11 @@ class TestAffectedTests:
             opinfo_test_files=opinfo_test_files,
             depth=1,
         )
-        files = {tr["file"] for tr in result["test_runs"]}
-        assert files == {"test/test_ops.py", "test/test_meta.py"}
+        assert result["test_runs"] == []
+        # alias key `conv2d` resolves to the canonical OpInfo op name
+        (orun,) = result["opinfo_runs"]
+        assert orun["files"] == ["test/test_ops.py", "test/test_meta.py"]
+        assert orun["k"] == "conv2d"
 
     def test_decomp_alias_expansion_reaches_user_facing_test_class(self, extractor):
         # Binding lands on `convolution_overrideable` (no TestConvolutionOverrideable
@@ -379,29 +381,6 @@ class TestAffectedTests:
         )
         assert "cudnn_convolution" in result["python_apis"]
         assert {tr["file"] for tr in result["test_runs"]} == {"test/test_conv.py"}
-
-    def test_catchall_opinfo_when_no_test_class_matches(self, extractor):
-        # API resolved (convolution_overrideable) but no test class by name and
-        # not in OpInfo → fall back to OpInfo whole-file runs.
-        by_cpp_name = {
-            "convolution_overrideable": [
-                {
-                    "python_name": "aten.convolution_overrideable",
-                    "cpp_name": "convolution_overrideable",
-                }
-            ]
-        }
-        result = affected_tests(
-            funcs=["at::native::convolution_overrideable"],
-            cpp_extractor=extractor,
-            by_cpp_name=by_cpp_name,
-            test_classes={},  # no class matches
-            test_files={"test/test_ops.py": {}, "test/test_meta.py": {}},
-            opinfo_test_files={"test/test_ops.py", "test/test_meta.py"},
-            depth=1,
-        )
-        files = {tr["file"] for tr in result["test_runs"]}
-        assert files == {"test/test_ops.py", "test/test_meta.py"}
 
     def test_catchall_skipped_when_test_class_already_matched(self, extractor):
         # If class-name match already produced a hit, don't add catch-all noise.
@@ -1258,15 +1237,20 @@ class TestMentionCapUnbounded:
 
 class TestApiAttrVariants:
     def test_includes_self_and_in_place_pair(self):
-        assert api_attr_variants("copy") == {"copy", "copy_"}
-        assert api_attr_variants("copy_") == {"copy", "copy_"}
+        assert api_attr_variants("copy") == {"copy", "copy_", "Copy"}
+        assert api_attr_variants("copy_") == {"copy", "copy_", "Copy"}
 
     def test_dotted_api_includes_leaf(self):
         assert api_attr_variants("masked.sum") == {
             "masked.sum",
             "sum",
             "sum_",
+            "Sum",
         }
+
+    def test_nn_module_pascal_variant(self):
+        assert "AvgPool2d" in api_attr_variants("avg_pool2d")
+        assert "Linear" in api_attr_variants("linear")
 
     def test_drops_empty_strings(self):
         # rstrip("_") on a bare "_" produces "" — must not pollute the set.
@@ -1668,3 +1652,219 @@ class TestAffectedDepthClamp:
         assert captured["depth"] == 1
         asyncio.run(_do_affected("foo", depth=99))
         assert captured["depth"] == 5
+
+
+class TestBindingsForCandidateOrder:
+    def test_out_suffix_op_preferred_over_impl_symbol(self):
+        # `cummax_out` exists as an impl symbol; its stripped stem `cummax`
+        # is the real YAML op — the op must win.
+        _, api_sources = _bindings_for(
+            {"at::native::cummax_out"},
+            by_cpp_name={},
+            native_functions={"cummax": {}},
+            native_implementations={"cummax_out": [{"function_name": "cummax_out"}]},
+        )
+        assert "cummax" in api_sources
+        assert "cummax_out" not in api_sources
+
+    def test_bare_yaml_op_still_wins_directly(self):
+        _, api_sources = _bindings_for(
+            {"gelu"},
+            by_cpp_name={},
+            native_functions={"gelu": {}},
+            native_implementations={},
+        )
+        assert "gelu" in api_sources
+
+
+class TestOpInfoRunGating:
+    @pytest.fixture
+    def extractor(self):
+        ext = MagicMock()
+        ext.get_callers.return_value = []
+        return ext
+
+    def _run(self, extractor, **kw):
+        return affected_tests(
+            funcs=["foo_kernel"],
+            cpp_extractor=extractor,
+            by_cpp_name={"foo_kernel": [{"python_name": "aten.foo"}]},
+            test_classes={},
+            test_files={"test/test_ops.py": {}},
+            opinfo_test_files={"test/test_ops.py"},
+            depth=1,
+            **kw,
+        )
+
+    def test_dotted_opinfo_key_reachable_via_leaf(self, extractor):
+        result = self._run(
+            extractor,
+            opinfo_registry={"torch.ops.aten.foo": {"name": "torch.ops.aten.foo"}},
+        )
+        (orun,) = result["opinfo_runs"]
+        assert orun["k"] == "torch_ops_aten_foo"
+
+    def test_fuzzy_only_apis_never_trigger_opinfo_runs(self, extractor):
+        # `max` arrives via cohort (fuzzy) — the old blanket trigger.
+        result = affected_tests(
+            funcs=["some_helper"],
+            cpp_extractor=extractor,
+            by_cpp_name={"some_helper": [{"python_name": None, "file_path": "/k.cu"}]},
+            bindings_by_file={
+                "/k.cu": [
+                    {"python_name": "max", "file_path": "/k.cu"},
+                    {"python_name": "min", "file_path": "/k.cu"},
+                ]
+            },
+            test_classes={},
+            test_files={"test/test_ops.py": {}},
+            opinfo_registry={"max": {}, "min": {}},
+            opinfo_test_files={"test/test_ops.py"},
+            depth=1,
+        )
+        assert result["opinfo_runs"] == []
+        assert result["test_runs"] == []
+
+
+class TestGradientsRun:
+    @pytest.fixture
+    def extractor(self):
+        ext = MagicMock()
+        ext.get_callers.return_value = []
+        return ext
+
+    def test_backward_input_adds_bwd_gradients_k_run(self, extractor):
+        result = affected_tests(
+            funcs=["gelu_backward"],
+            cpp_extractor=extractor,
+            by_cpp_name={"gelu_backward": [{"python_name": "aten.gelu_backward"}]},
+            test_classes={},
+            test_files={"test/test_ops_gradients.py": {}},
+            backward_to_forward={"gelu_backward": ["gelu"]},
+            depth=1,
+        )
+        assert {"files": ["test/test_ops_gradients.py"], "k": "gelu"} in result[
+            "opinfo_runs"
+        ]
+
+
+class TestFunctionLevelHits:
+    @pytest.fixture
+    def extractor(self):
+        ext = MagicMock()
+        ext.get_callers.return_value = []
+        return ext
+
+    def test_precise_api_joins_to_function_rows(self, extractor):
+        result = affected_tests(
+            funcs=["cummax"],
+            cpp_extractor=extractor,
+            by_cpp_name={"cummax": [{"python_name": "aten.cummax"}]},
+            test_classes={
+                "TestCummax": [{"file": "test/test_torch.py", "is_test_class": True}]
+            },
+            test_files={"test/test_torch.py": {}},
+            test_functions={
+                "test_cummax_cummin": [
+                    {
+                        "name": "test_cummax_cummin",
+                        "class": "TestCummax",
+                        "file": "test/test_torch.py",
+                    }
+                ],
+                "test_unrelated": [
+                    {
+                        "name": "test_unrelated",
+                        "class": "TestCummax",
+                        "file": "test/test_torch.py",
+                    }
+                ],
+            },
+            depth=1,
+        )
+        assert result["function_hits"] == {
+            "test/test_torch.py": {"TestCummax": ["test_cummax_cummin"]}
+        }
+
+
+class TestPytestOutputRendering:
+    def test_node_ids_and_pytest_block(self, monkeypatch):
+        from unittest.mock import MagicMock
+
+        from torchtalk import indexer
+        from torchtalk.tools import affected as affected_tool
+
+        ext = MagicMock()
+        monkeypatch.setattr(indexer._state, "bindings", [{"x": 1}])
+        monkeypatch.setattr(indexer._state, "cpp_extractor", ext)
+
+        def fake_affected_tests(**kwargs):
+            return {
+                "callers_walked": 1,
+                "bindings_matched": [],
+                "python_apis": ["cummax"],
+                "api_sources": {"cummax": ["call_graph"]},
+                "api_tier": {"cummax": "precise"},
+                "test_runs": [
+                    {
+                        "file": "test/test_torch.py",
+                        "included_classes": ["TestTorchDeviceType"],
+                    }
+                ],
+                "opinfo_runs": [{"files": ["test/test_ops.py"], "k": "cummax"}],
+                "function_hits": {
+                    "test/test_torch.py": {
+                        "TestTorchDeviceType": ["test_cummax_cummin"]
+                    }
+                },
+            }
+
+        monkeypatch.setattr(affected_tool, "affected_tests", fake_affected_tests)
+        out = asyncio.run(_do_affected("cummax"))
+        assert "test/test_torch.py::TestTorchDeviceType::test_cummax_cummin" in out
+        assert 'test/test_ops.py -k "cummax"' in out
+        assert (
+            "pytest test/test_torch.py::TestTorchDeviceType::test_cummax_cummin" in out
+        )
+
+
+class TestStructuredImplCandidates:
+    @pytest.fixture
+    def extractor(self):
+        ext = MagicMock()
+        ext.get_callers.return_value = []
+        return ext
+
+    def test_structured_class_member_resolves_to_op(self, extractor):
+        _, api_sources = _bindings_for(
+            {"at::native::structured_avg_pool2d_backward_out_cuda::impl"},
+            by_cpp_name={},
+            native_functions={"avg_pool2d_backward": {}},
+        )
+        assert "avg_pool2d_backward" in api_sources
+
+    def test_non_structured_names_unaffected(self, extractor):
+        _, api_sources = _bindings_for(
+            {"at::native::plain_helper"},
+            by_cpp_name={},
+            native_functions={"avg_pool2d_backward": {}},
+        )
+        assert api_sources == {}
+
+
+class TestMentionCapCountsDistinctFiles:
+    def test_many_hits_in_few_files_kept(self):
+        # 60 raw hits concentrated in 2 files: specific-but-popular API
+        # (the avg_pool2d shape) must survive the cap.
+        attr_index = {
+            "avg_pool2d": [
+                {"file": f"test/f{i % 2}.py", "class": "TestPool", "function": "t"}
+                for i in range(60)
+            ],
+        }
+        test_files = {"test/f0.py": {}, "test/f1.py": {}}
+        result, contributing = _tests_mentioning_apis(
+            {"avg_pool2d"}, attr_index, test_files, per_api_cap=50
+        )
+        assert set(result) == {"test/f0.py", "test/f1.py"}
+        assert "avg_pool2d" in contributing

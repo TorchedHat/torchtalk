@@ -290,3 +290,22 @@ class TestImportAwareResolution:
             alias_map={"torch.linalg.cross": "aten::linalg_cross"},
         )
         assert module.functions[0].cpp_bindings == []
+
+
+class TestPackageRoots:
+    def test_manifest_roots_drive_module_names(self, tmp_path):
+        pkg = tmp_path / "vllm" / "engine"
+        pkg.mkdir(parents=True)
+        f = pkg / "llm.py"
+        f.write_text("class LLM:\n    pass\n")
+        analyzer = PythonAnalyzer(package_roots=("vllm",))
+        module = analyzer.analyze_file(str(f))
+        assert module.name == "vllm.engine.llm"
+
+    def test_default_roots_unchanged(self, tmp_path):
+        pkg = tmp_path / "torch" / "nn"
+        pkg.mkdir(parents=True)
+        f = pkg / "linear.py"
+        f.write_text("class Linear:\n    pass\n")
+        module = PythonAnalyzer().analyze_file(str(f))
+        assert module.name == "torch.nn.linear"

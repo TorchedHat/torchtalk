@@ -64,7 +64,7 @@ def fake_cache(tmp_path, monkeypatch):
     monkeypatch.setattr(snapshots, "CACHE_DIR", cache)
     monkeypatch.setattr(snapshots, "SNAPSHOTS_DIR", cache / "snapshots")
     monkeypatch.setattr(snapshots, "cache_paths", fake_cache_paths)
-    monkeypatch.setattr(snapshots, "resolve_pytorch_source", lambda: source)
+    monkeypatch.setattr(snapshots, "resolve_source", lambda: source)
 
     return {
         "cache": cache,
@@ -134,7 +134,7 @@ class TestSaveSnapshot:
             save_snapshot("v1")
 
     def test_no_source_raises(self, fake_cache, monkeypatch):
-        monkeypatch.setattr(snapshots, "resolve_pytorch_source", lambda: None)
+        monkeypatch.setattr(snapshots, "resolve_source", lambda: None)
         with pytest.raises(SnapshotError, match="No PyTorch source"):
             save_snapshot("v1")
 
@@ -166,38 +166,18 @@ class TestLoadSnapshot:
 
     def test_fingerprint_mismatch_refused(self, fake_cache, monkeypatch):
         save_snapshot("v1")
-        # Swap the live cache to a different fingerprint
-        other_fp = "cafebabe9999"
-        other_bindings = fake_cache["cache"] / f"bindings_{other_fp}.json"
-        other_bindings.write_text("{}")
-        monkeypatch.setattr(
-            snapshots,
-            "cache_paths",
-            lambda _: {
-                "bindings": other_bindings,
-                "callgraph": other_bindings.parent
-                / "call_graph"
-                / f"pytorch_callgraph_parallel_{other_fp}.json",
-            },
-        )
+        # Point the live config at a different source checkout
+        other_src = fake_cache["cache"].parent / "other_pytorch"
+        other_src.mkdir()
+        monkeypatch.setattr(snapshots, "resolve_source", lambda: str(other_src))
         with pytest.raises(SnapshotError, match="Fingerprint mismatch"):
             load_snapshot("v1")
 
     def test_fingerprint_mismatch_force_loads(self, fake_cache, monkeypatch):
         save_snapshot("v1")
-        other_fp = "cafebabe9999"
-        other_bindings = fake_cache["cache"] / f"bindings_{other_fp}.json"
-        other_bindings.write_text("{}")
-        monkeypatch.setattr(
-            snapshots,
-            "cache_paths",
-            lambda _: {
-                "bindings": other_bindings,
-                "callgraph": other_bindings.parent
-                / "call_graph"
-                / f"pytorch_callgraph_parallel_{other_fp}.json",
-            },
-        )
+        other_src = fake_cache["cache"].parent / "other_pytorch"
+        other_src.mkdir()
+        monkeypatch.setattr(snapshots, "resolve_source", lambda: str(other_src))
         manifest = load_snapshot("v1", force=True)
         assert manifest.name == "v1"
 
@@ -482,19 +462,9 @@ class TestContentFingerprint:
         save_snapshot("v1")
 
         monkeypatch.setattr(snapshots, "_content_fingerprint", lambda _: "different")
-        other_fp = "cafebabe9999"
-        other_bindings = fake_cache["cache"] / f"bindings_{other_fp}.json"
-        other_bindings.write_text("{}")
-        monkeypatch.setattr(
-            snapshots,
-            "cache_paths",
-            lambda _: {
-                "bindings": other_bindings,
-                "callgraph": other_bindings.parent
-                / "call_graph"
-                / f"pytorch_callgraph_parallel_{other_fp}.json",
-            },
-        )
+        other_src = fake_cache["cache"].parent / "other_pytorch"
+        other_src.mkdir()
+        monkeypatch.setattr(snapshots, "resolve_source", lambda: str(other_src))
         with pytest.raises(SnapshotError, match="Fingerprint mismatch"):
             load_snapshot("v1")
 
@@ -559,7 +529,7 @@ class TestFindNearestSnapshot:
         assert find_nearest_snapshot() is None
 
     def test_none_when_no_source(self, fake_cache, monkeypatch):
-        monkeypatch.setattr(snapshots, "resolve_pytorch_source", lambda: None)
+        monkeypatch.setattr(snapshots, "resolve_source", lambda: None)
         assert find_nearest_snapshot() is None
 
     def test_prefers_exact_over_ancestor(self, fake_cache, monkeypatch):
@@ -595,3 +565,29 @@ class TestFindNearestSnapshot:
         picked = find_nearest_snapshot()
         assert picked is not None
         assert picked.name == "by_content"
+
+
+class TestHarnessPackageGuard:
+    def test_save_records_active_package(self, fake_cache):
+        manifest = save_snapshot("v1")
+        assert manifest.package == "pytorch"
+
+    def test_load_refuses_cross_package(self, fake_cache, monkeypatch):
+        from torchtalk.harness import get_harness
+
+        save_snapshot("v1")
+        monkeypatch.setattr(
+            snapshots, "active_manifest", lambda: get_harness("vllm").manifest
+        )
+        with pytest.raises(SnapshotError, match="'pytorch' harness"):
+            load_snapshot("v1")
+
+    def test_pre_v3_manifest_loads_without_package(self, fake_cache):
+        save_snapshot("v1")
+        mf = fake_cache["cache"] / "snapshots" / "v1" / "manifest.json"
+        data = json.loads(mf.read_text())
+        data["schema_version"] = 2
+        data.pop("package")
+        mf.write_text(json.dumps(data))
+        manifest = load_snapshot("v1")
+        assert manifest.package == ""

@@ -25,11 +25,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .config import CACHE_DIR, cache_paths, resolve_pytorch_source
+from .config import CACHE_DIR, cache_paths, resolve_source, source_hash
+from .harness import active_manifest
+from .symbols import content_fingerprint as _content_fingerprint
 
 SNAPSHOTS_DIR = CACHE_DIR / "snapshots"
 MANIFEST_NAME = "manifest.json"
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 _NAME_COMPONENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 _NAME_MAX_COMPONENTS = 3
@@ -65,6 +67,8 @@ class SnapshotManifest:
     callgraph_size: int = 0
     callgraph_sha256: str = ""
     content_fingerprint: str | None = None
+    # Harness package that built the snapshotted cache; "" on pre-v3 snapshots.
+    package: str = ""
     schema_version: int = SCHEMA_VERSION
 
 
@@ -144,40 +148,6 @@ def _git_commit(source: str) -> str | None:
         return None
 
 
-def _content_fingerprint(source: str) -> str | None:
-    """Merkle-style hash over HEAD tree + any uncommitted diff.
-
-    Uses git's own tree hash (a content-addressed Merkle over all tracked files)
-    combined with a hash of `git diff HEAD` to cover dirty trees. Two checkouts
-    with identical content produce the same fingerprint regardless of path.
-    Returns None when source is not a git working tree.
-    """
-    try:
-        tree = subprocess.run(
-            ["git", "-C", source, "rev-parse", "HEAD^{tree}"],
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=5,
-        ).stdout.strip()
-        diff = subprocess.run(
-            ["git", "-C", source, "diff", "HEAD"],
-            capture_output=True,
-            check=True,
-            timeout=15,
-        ).stdout
-    except (
-        subprocess.CalledProcessError,
-        FileNotFoundError,
-        subprocess.TimeoutExpired,
-    ):
-        return None
-
-    h = hashlib.blake2b(tree.encode(), digest_size=16)
-    h.update(diff)
-    return h.hexdigest()
-
-
 def _is_ancestor(source: str, ancestor: str, descendant: str) -> bool:
     """Return True if ancestor commit is reachable from descendant in source's git."""
     try:
@@ -215,6 +185,9 @@ def _migrate(data: dict[str, Any]) -> dict[str, Any]:
     if data["schema_version"] < 2:
         data.setdefault("content_fingerprint", None)
         data["schema_version"] = 2
+    if data["schema_version"] < 3:
+        data.setdefault("package", "")
+        data["schema_version"] = 3
     return data
 
 
@@ -280,11 +253,16 @@ def find_nearest_snapshot(source: str | None = None) -> SnapshotManifest | None:
     > most recent ancestor commit. Returns None if nothing matches or source is
     not a git working tree.
     """
-    source = source or resolve_pytorch_source()
+    source = source or resolve_source()
     if not source:
         return None
 
-    candidates = list_snapshots()
+    # Cross-harness snapshots would fail load_snapshot's package guard;
+    # pre-v3 snapshots (package "") are kept as candidates.
+    active_package = active_manifest().package
+    candidates = [
+        m for m in list_snapshots() if not m.package or m.package == active_package
+    ]
     content_fp = _content_fingerprint(source)
     if content_fp:
         for m in candidates:
@@ -312,7 +290,7 @@ def save_snapshot(name: str) -> SnapshotManifest:
     """
     _validate_name(name)
 
-    source = resolve_pytorch_source()
+    source = resolve_source()
     if not source:
         raise SnapshotError("No PyTorch source configured. Run 'torchtalk init' first.")
 
@@ -349,18 +327,18 @@ def save_snapshot(name: str) -> SnapshotManifest:
             callgraph_size = cg_tmp.stat().st_size
             callgraph_sha256 = _hash_file(cg_tmp)
 
-        fingerprint = paths["bindings"].stem.removeprefix("bindings_")
         manifest = SnapshotManifest(
             name=name,
             created=datetime.now(timezone.utc).isoformat(),
             pytorch_source=source,
-            source_fingerprint=fingerprint,
+            source_fingerprint=source_hash(source),
             git_commit=_git_commit(source),
             bindings_size=bindings_size,
             bindings_sha256=bindings_sha256,
             callgraph_size=callgraph_size,
             callgraph_sha256=callgraph_sha256,
             content_fingerprint=_content_fingerprint(source),
+            package=active_manifest().package,
         )
         _atomic_write_text(
             tmp_path / MANIFEST_NAME, json.dumps(asdict(manifest), indent=2)
@@ -393,9 +371,16 @@ def load_snapshot(name: str, force: bool = False) -> SnapshotManifest:
     ):
         raise SnapshotCorruptError(f"Snapshot '{name}' callgraph.json failed checksum")
 
-    source = resolve_pytorch_source() or manifest.pytorch_source
+    active_package = active_manifest().package
+    if manifest.package and manifest.package != active_package:
+        raise SnapshotError(
+            f"Snapshot '{name}' was built by the '{manifest.package}' harness "
+            f"but '{active_package}' is active. Pass --harness {manifest.package}."
+        )
+
+    source = resolve_source() or manifest.pytorch_source
     paths = cache_paths(source)
-    current_fp = paths["bindings"].stem.removeprefix("bindings_")
+    current_fp = source_hash(source)
     current_content_fp = _content_fingerprint(source)
 
     path_match = current_fp == manifest.source_fingerprint

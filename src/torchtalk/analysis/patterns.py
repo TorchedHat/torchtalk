@@ -96,17 +96,17 @@ TEST_UTILITY_MODULES = [
 ]
 
 
-def should_exclude(path: str) -> bool:
-    return any(p in path.lower() for p in EXCLUDE_PATTERNS)
+def should_exclude(path: str, patterns: tuple[str, ...] | None = None) -> bool:
+    return any(p in path.lower() for p in (patterns or EXCLUDE_PATTERNS))
 
 
 def should_include_dir(file_path: str, include_dirs: list[str]) -> bool:
     return any(d in file_path for d in include_dirs)
 
 
-def has_binding_patterns(content: str) -> bool:
-    return any(p in content for p in CPP_BINDING_PATTERNS)
+def has_binding_patterns(content: str, patterns: tuple[str, ...] | None = None) -> bool:
+    return any(p in content for p in (patterns or CPP_BINDING_PATTERNS))
 
 
-def has_test_patterns(content: str) -> bool:
-    return any(p in content for p in TEST_CONTENT_PATTERNS)
+def has_test_patterns(content: str, patterns: tuple[str, ...] | None = None) -> bool:
+    return any(p in content for p in (patterns or TEST_CONTENT_PATTERNS))

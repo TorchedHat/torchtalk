@@ -10,7 +10,7 @@ from mcp.server.fastmcp import FastMCP
 
 from .formatting import create_formatter
 from .indexer import (
-    _auto_detect_pytorch,
+    _auto_detect_source,
     _init_from_source,
     _load_from_json,
     _state,
@@ -64,6 +64,13 @@ async def get_status() -> str:
         )
     if _state.derivatives:
         md.bold("Derivatives", f"{len(_state.derivatives):,} formulas")
+    if _state.registrations:
+        md.bold(
+            "Registrations",
+            f"{len(_state.registrations.get('records', [])):,} records, "
+            f"{len(_state.registrations.get('candidate_edges', [])):,} "
+            "candidate edges",
+        )
     md.blank()
 
     md.h3("C++ Call Graph")
@@ -304,7 +311,7 @@ def run_server(
     error via `_ensure_loaded` until the data is ready."""
     import threading
 
-    source = pytorch_source or _auto_detect_pytorch()
+    source = pytorch_source or _auto_detect_source()
 
     def _bg_init():
         try:

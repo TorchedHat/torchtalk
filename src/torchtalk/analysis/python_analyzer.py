@@ -118,9 +118,14 @@ class PyModule:
 class PythonAnalyzer:
     """Analyzes Python source code using AST."""
 
-    def __init__(self, alias_map: dict[str, str] | None = None):
+    def __init__(
+        self,
+        alias_map: dict[str, str] | None = None,
+        package_roots: tuple[str, ...] | None = None,
+    ):
         self._module_cache: dict[str, PyModule] = {}
         self._alias_map = alias_map
+        self._package_roots = package_roots or ("torch", "torchvision", "torchaudio")
 
     def analyze_file(self, file_path: str) -> PyModule | None:
         """Analyze a single Python file."""
@@ -177,10 +182,9 @@ class PythonAnalyzer:
 
     def _path_to_module_name(self, path: Path) -> str:
         """Convert file path to Python module name."""
-        # Try to find torch/ or similar package root
         parts = path.parts
         for i, part in enumerate(parts):
-            if part in ("torch", "torchvision", "torchaudio"):
+            if part in self._package_roots:
                 # Build module name from this point
                 module_parts = list(parts[i:])
                 # Remove .py extension
