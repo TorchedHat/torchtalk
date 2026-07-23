@@ -13,13 +13,19 @@ from typing import Any
 
 from .analysis.helpers import fuzzy_distance_limit, levenshtein_distance, truncate
 from .analysis.patterns import (
+    has_binding_patterns as _has_binding_patterns,
+)
+from .analysis.patterns import (
     has_test_patterns as _has_test_patterns,
 )
 from .analysis.patterns import is_vendor_path
 from .analysis.patterns import (
     should_exclude as _should_exclude,
 )
-from .config import CACHE_DIR, cache_paths, resolve_pytorch_source, source_hash
+from .analysis.patterns import (
+    should_include_dir as _should_include_dir,
+)
+from .config import CACHE_DIR, cache_paths, resolve_source
 from .harness import ConventionManifest, active_manifest
 from .symbols import PackageIdentity, content_fingerprint, detect_package_identity
 
@@ -85,23 +91,28 @@ def _source_fingerprint(source: str) -> str:
 
     Git checkouts get a content fingerprint (HEAD tree + dirty diff), so
     commits, pulls, and uncommitted edits all invalidate caches. Non-git
-    checkouts fall back to mtime/size of version files.
+    checkouts fall back to a coarse tree signal (file count + newest mtime
+    across the manifest's search dirs) so edits still invalidate; version
+    files alone would fingerprint every content state identically.
     """
     fp = content_fingerprint(source) if source else None
     if fp:
         return fp
     src = Path(source)
-    files = [
-        src / "version.txt",
-        src / "torch/version.py",
-        src / ".git/HEAD",
-    ]
-    parts = []
-    for f in files:
-        if f.exists():
-            s = f.stat()
-            parts.append(f"{f.name}:{s.st_mtime}:{s.st_size}")
-    return hashlib.md5("|".join(parts).encode()).hexdigest()[:16]
+    manifest = active_manifest()
+    newest, count = 0.0, 0
+    for d in sorted({*manifest.cpp_search_dirs, *manifest.python_search_dirs}):
+        root = src / d
+        if not root.exists():
+            continue
+        for p in root.rglob("*"):
+            try:
+                if p.is_file():
+                    count += 1
+                    newest = max(newest, p.stat().st_mtime)
+            except OSError:
+                continue
+    return hashlib.md5(f"tree:{count}:{newest}".encode()).hexdigest()[:16]
 
 
 # Bump when the bindings-cache schema changes (e.g. a new field added to
@@ -331,7 +342,7 @@ def _find_implementations(
             file_str = str(cpp_file)
 
             # Apply exclusion patterns
-            if _should_exclude(file_str):
+            if _should_exclude(file_str, manifest.exclude_patterns):
                 continue
 
             try:
@@ -427,7 +438,11 @@ def _build_index(
     implementations, symbol_to_file = _find_implementations(source, functions, manifest)
 
     detector = BindingDetector(
-        macro_aliases=manifest.cpp_macro_aliases, token_map=manifest.cpp_token_map
+        macro_aliases=manifest.cpp_macro_aliases,
+        token_map=manifest.cpp_token_map,
+        search_dirs=manifest.cpp_search_dirs,
+        exclude_patterns=manifest.exclude_patterns,
+        registration_macros=manifest.registration_macros,
     )
     graph = detector.detect_bindings_in_directory(source)
 
@@ -526,7 +541,7 @@ def _init_cpp_call_graph(source: str):
             return
 
         cg_cache_dir = CACHE_DIR / "call_graph"
-        cache_key = f"pytorch_callgraph_parallel_{source_hash(source)}"
+        cache_key = cache_paths(source)["callgraph"].stem
 
         extractor = CppCallGraphExtractor(cache_dir=cg_cache_dir)
         if extractor.load_cache(
@@ -542,11 +557,17 @@ def _init_cpp_call_graph(source: str):
         # Build in background
         import threading
 
+        manifest = active_manifest()
+
         def build():
             global _state
             try:
                 ext = CppCallGraphExtractor(cache_dir=cg_cache_dir)
-                ext.extract_from_pytorch_parallel(source)
+                ext.extract_from_pytorch_parallel(
+                    source,
+                    include_dirs=list(manifest.cpp_search_dirs),
+                    exclude_patterns=manifest.exclude_patterns,
+                )
                 ext.save_cache(cache_key, fingerprint=_source_fingerprint(source))
                 _state.cpp_extractor = ext
                 log.info(
@@ -886,10 +907,18 @@ def _init_test_infrastructure(source: str):
                 interesting_attrs.update(api_attr_variants(aten_name))
 
         # Scan test directories
-        for test_dir in active_manifest().test_search_dirs:
+        manifest = active_manifest()
+        for test_dir in manifest.test_search_dirs:
             dir_path = src / test_dir
             if not dir_path.exists():
                 continue
+
+            # Standalone test dirs (outside the import package) are indexed
+            # inclusively; package-internal dirs (e.g. torch/testing) hold
+            # utilities, so only content-matching files are indexed.
+            is_main_test_dir = (
+                test_dir.split("/")[0] not in manifest.python_package_roots
+            )
 
             for py_file in dir_path.rglob("*.py"):
                 file_str = str(py_file)
@@ -901,12 +930,9 @@ def _init_test_infrastructure(source: str):
                 try:
                     content = py_file.read_text(encoding="utf-8", errors="replace")
 
-                    # For test/ directory, be inclusive - index all .py files
-                    # For torch/testing/, use pattern filtering
-                    is_main_test_dir = (
-                        "/test/" in file_str and "/testing/" not in file_str
-                    )
-                    if not is_main_test_dir and not _has_test_patterns(content):
+                    if not is_main_test_dir and not _has_test_patterns(
+                        content, manifest.test_content_patterns
+                    ):
                         continue
 
                     # Parse AST to extract test classes and functions
@@ -1002,7 +1028,7 @@ def _init_test_infrastructure(source: str):
                     log.debug(f"Error parsing {py_file.name}: {e}")
 
         # Index test utilities
-        for util_path in active_manifest().test_utility_modules:
+        for util_path in manifest.test_utility_modules:
             full_path = src / util_path
             if full_path.exists():
                 _state.test_utilities[util_path] = {
@@ -1231,13 +1257,13 @@ def _parse_opinfo_registry(opinfo_path: str):
         log.debug(f"Failed to read OpInfo file {opinfo_path}: {e}")
 
 
-def _auto_detect_pytorch() -> str | None:
-    """Auto-detect PyTorch source using 3-level resolution.
+def _auto_detect_source() -> str | None:
+    """Auto-detect the active harness's source using 3-level resolution.
 
-    Priority: PYTORCH_SOURCE env var > config.toml > None
+    Priority: env var > config.toml > None.
     CLI flag is handled upstream in run_server().
     """
-    return resolve_pytorch_source()
+    return resolve_source()
 
 
 def update_index(source: str, since: str, on_uncovered: str = "warn") -> dict:
@@ -1259,6 +1285,12 @@ def update_index(source: str, since: str, on_uncovered: str = "warn") -> dict:
     from .snapshots import _relpath, _snapshot_dir, read_manifest
 
     manifest = read_manifest(since)
+    active = active_manifest()
+    if manifest.package and manifest.package != active.package:
+        raise ValueError(
+            f"Snapshot '{since}' was built by the '{manifest.package}' harness "
+            f"but '{active.package}' is active. Pass --harness {manifest.package}."
+        )
     if not manifest.git_commit:
         raise ValueError(
             f"Snapshot '{since}' has no git_commit; cannot diff against HEAD"
@@ -1266,6 +1298,16 @@ def update_index(source: str, since: str, on_uncovered: str = "warn") -> dict:
 
     snap_dir = _snapshot_dir(since)
     prior = json.loads((snap_dir / "bindings.json").read_text())
+
+    # Prior rows are carried forward verbatim; an older payload schema would
+    # produce a mixed-format cache that _cache_valid then accepts.
+    prior_version = prior.get("metadata", {}).get("format_version")
+    if prior_version != _BINDINGS_CACHE_FORMAT_VERSION:
+        raise ValueError(
+            f"Snapshot '{since}' bindings use cache format v{prior_version}; "
+            f"current is v{_BINDINGS_CACHE_FORMAT_VERSION}. Run 'torchtalk "
+            "index build' and save a fresh snapshot."
+        )
 
     try:
         diff_out = subprocess.run(
@@ -1288,8 +1330,7 @@ def update_index(source: str, since: str, on_uncovered: str = "warn") -> dict:
     cpp_exts = (".cpp", ".cc", ".cxx", ".cu", ".cuh")
     header_exts = (".h", ".hpp", ".hxx", ".hh", ".inc")
     yaml_files = {
-        "aten/src/ATen/native/native_functions.yaml",
-        "tools/autograd/derivatives.yaml",
+        p for p in (active.native_functions_yaml, active.derivatives_yaml) if p
     }
 
     changed_cpp: set[str] = set()
@@ -1324,17 +1365,29 @@ def update_index(source: str, since: str, on_uncovered: str = "warn") -> dict:
     ]
 
     detector = BindingDetector(
-        macro_aliases=active_manifest().cpp_macro_aliases,
-        token_map=active_manifest().cpp_token_map,
+        macro_aliases=active.cpp_macro_aliases,
+        token_map=active.cpp_token_map,
     )
     src = Path(source)
+    # Same harness boundary as the full build: search dirs, exclusion
+    # patterns, and the binding-pattern prefilter must all match
+    # detect_bindings_in_directory, or incremental results diverge.
+    bounds = tuple(d.rstrip("/") + "/" for d in active.cpp_search_dirs)
     for rel in changed_cpp:
+        if bounds and not rel.startswith(bounds):
+            continue
+        # Exclusion runs on the repo-relative path: patterns describe repo
+        # shapes, and the checkout's own directory name must not match them.
+        if _should_exclude(rel, active.exclude_patterns):
+            continue
         full = src / rel
         if not full.exists():
             continue
         try:
             content = full.read_text(errors="ignore")
         except OSError:
+            continue
+        if not _has_binding_patterns(content, active.registration_macros):
             continue
         g = detector.detect_bindings(str(full), content)
         new_bindings.extend(b.to_dict() for b in g.bindings)
@@ -1476,7 +1529,7 @@ def _update_call_graph(
         return {"skipped": "baseline snapshot has no call graph"}
 
     cg_cache_dir = CACHE_DIR / "call_graph"
-    cache_key = f"pytorch_callgraph_parallel_{source_hash(source)}"
+    cache_key = cache_paths(source)["callgraph"].stem
 
     extractor = CppCallGraphExtractor(cache_dir=cg_cache_dir)
     if not extractor.load_from_path(snap_cg):
@@ -1510,9 +1563,15 @@ def _update_call_graph(
         widened_net = widened - tus_to_reparse
         tus_to_reparse |= widened
 
+    # Same harness boundary as the full call-graph build.
+    active = active_manifest()
     entries: list[tuple[str, list[str]]] = []
     for rel in tus_to_reparse:
         full = str(src / rel)
+        if not _should_include_dir(full, list(active.cpp_search_dirs)):
+            continue
+        if _should_exclude(full, active.exclude_patterns):
+            continue
         entry = cc_index.get(full)
         if entry is None:
             continue

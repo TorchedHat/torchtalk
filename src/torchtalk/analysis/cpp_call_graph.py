@@ -155,6 +155,7 @@ def _synthesize_missing_cu_entries(
     covered_files: set[str],
     template_args: list[str],
     cuda_env: dict,
+    exclude_patterns: tuple[str, ...] | None = None,
 ) -> list[tuple[str, list[str]]]:
     """Glob .cu files under include_dirs and synthesize entries for ones missing
     from compile_commands.json.
@@ -174,7 +175,7 @@ def _synthesize_missing_cu_entries(
             file_path = str(cu)
             if file_path in covered_files or file_path in seen:
                 continue
-            if should_exclude(file_path):
+            if should_exclude(file_path, exclude_patterns):
                 continue
             seen.add(file_path)
             extra.append(
@@ -308,13 +309,15 @@ class CppCallGraphExtractor:
         pytorch_source: str,
         num_workers: int | None = None,
         include_dirs: list[str] | None = None,
+        exclude_patterns: tuple[str, ...] | None = None,
     ) -> dict[str, Any]:
-        """Extract call graph from PyTorch using parallel processing.
+        """Extract call graph from source using parallel processing.
 
         Args:
-            pytorch_source: Path to PyTorch source directory
+            pytorch_source: Path to source directory
             num_workers: Number of parallel workers (default: 80% of CPU count)
-            include_dirs: Directory patterns to include
+            include_dirs: Directory patterns to include (default: PyTorch dirs)
+            exclude_patterns: Path exclusion patterns (default: PyTorch patterns)
         """
         source = Path(pytorch_source)
 
@@ -361,7 +364,7 @@ class CppCallGraphExtractor:
             if not should_include_dir(file_path, include_dirs):
                 self.tu_status[tu_rel] = "filtered"
                 continue
-            if should_exclude(file_path):
+            if should_exclude(file_path, exclude_patterns):
                 self.tu_status[tu_rel] = "filtered"
                 continue
 
@@ -374,7 +377,12 @@ class CppCallGraphExtractor:
 
         if cuda_env and template_raw_args is not None:
             synthesized = _synthesize_missing_cu_entries(
-                source, include_dirs, covered_files, template_raw_args, cuda_env
+                source,
+                include_dirs,
+                covered_files,
+                template_raw_args,
+                cuda_env,
+                exclude_patterns,
             )
             if synthesized:
                 log.info(

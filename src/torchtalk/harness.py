@@ -15,6 +15,7 @@ from .analysis.patterns import (
     CPP_SEARCH_DIRS,
     EXCLUDE_PATTERNS,
     PYTHON_SEARCH_DIRS,
+    TEST_CONTENT_PATTERNS,
     TEST_SEARCH_DIRS,
     TEST_UTILITY_MODULES,
 )
@@ -40,12 +41,13 @@ class ConventionManifest:
     # top-level import-package dirs used to derive module names from paths
     python_package_roots: tuple[str, ...] = ()
     test_search_dirs: tuple[str, ...] = ()
+    # content markers identifying test files in package-internal test dirs
+    test_content_patterns: tuple[str, ...] = ("TestCase", "pytest", "unittest")
     test_utility_modules: tuple[str, ...] = ()
     exclude_patterns: tuple[str, ...] = ()
     registration_macros: tuple[str, ...] = ()
     native_functions_yaml: str = ""
     derivatives_yaml: str = ""
-    cache_identity: str = "git"
     # C++ extractor config: alias macro → canonical macro it expands to
     # (e.g. {"TORCH_LIBRARY_EXPAND": "TORCH_LIBRARY"}), and token → literal
     # substitutions (e.g. {"TORCH_EXTENSION_NAME": "_C"}).
@@ -74,6 +76,7 @@ PYTORCH_MANIFEST = ConventionManifest(
     python_search_dirs=tuple(PYTHON_SEARCH_DIRS),
     python_package_roots=("torch",),
     test_search_dirs=tuple(TEST_SEARCH_DIRS),
+    test_content_patterns=tuple(TEST_CONTENT_PATTERNS),
     test_utility_modules=tuple(TEST_UTILITY_MODULES),
     exclude_patterns=tuple(EXCLUDE_PATTERNS),
     registration_macros=tuple(CPP_BINDING_PATTERNS),
@@ -163,6 +166,11 @@ def set_active_harness(name: str) -> None:
     if name not in _REGISTRY:
         raise KeyError(f"Unknown harness {name!r}. Registered: {sorted(_REGISTRY)}")
     _ACTIVE = name
+
+
+def active_harness_name() -> str:
+    """Name of the harness used when get_harness() is called without a name."""
+    return _ACTIVE
 
 
 def active_manifest() -> ConventionManifest:

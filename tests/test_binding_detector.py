@@ -356,3 +356,79 @@ class TestEnclosingFunctionKeywords:
         graph = BindingDetector().detect_bindings("/d.cpp", code)
         disp = next(b for b in graph.bindings if b.binding_type == "at_dispatch")
         assert disp.cpp_name == "gelu_impl"
+
+
+class TestSearchDirBounds:
+    """Directory scans honor manifest cpp_search_dirs."""
+
+    _CODE = 'TORCH_LIBRARY(aten, m) { m.def("relu(Tensor self) -> Tensor"); }\n'
+
+    def _repo(self, tmp_path_factory):
+        # mktemp instead of tmp_path: tmp_path embeds the test name, whose
+        # "test_" segment trips the scanner's exclusion patterns.
+        repo = tmp_path_factory.mktemp("scandir")
+        (repo / "csrc").mkdir()
+        (repo / "vendored").mkdir()
+        (repo / "csrc" / "inside.cpp").write_text(self._CODE)
+        (repo / "vendored" / "outside.cpp").write_text(self._CODE)
+        return repo
+
+    def test_scan_limited_to_search_dirs(self, tmp_path_factory):
+        repo = self._repo(tmp_path_factory)
+        detector = BindingDetector(search_dirs=("csrc",))
+        graph = detector.detect_bindings_in_directory(str(repo))
+        files = {b.file_path for b in graph.bindings}
+        assert files
+        assert all("vendored" not in f for f in files)
+
+    def test_unbounded_detector_scans_whole_tree(self, tmp_path_factory):
+        repo = self._repo(tmp_path_factory)
+        graph = BindingDetector().detect_bindings_in_directory(str(repo))
+        files = {b.file_path for b in graph.bindings}
+        assert any("vendored" in f for f in files)
+        assert any("csrc" in f for f in files)
+
+    def test_missing_search_dirs_scan_nothing(self, tmp_path_factory):
+        repo = self._repo(tmp_path_factory)
+        detector = BindingDetector(search_dirs=("nonexistent",))
+        graph = detector.detect_bindings_in_directory(str(repo))
+        assert graph.bindings == []
+
+
+class TestManifestExcludeAndPrefilter:
+    """Manifest exclude_patterns and registration_macros drive directory scans."""
+
+    _CODE = 'TORCH_LIBRARY(aten, m) { m.def("relu(Tensor self) -> Tensor"); }\n'
+
+    def _repo(self, tmp_path_factory):
+        repo = tmp_path_factory.mktemp("scandir")
+        (repo / "csrc" / "generated").mkdir(parents=True)
+        (repo / "csrc" / "tests").mkdir()
+        (repo / "csrc" / "generated" / "gen.cpp").write_text(self._CODE)
+        (repo / "csrc" / "tests" / "helper.cpp").write_text(self._CODE)
+        return repo
+
+    def test_manifest_excludes_replace_defaults(self, tmp_path_factory):
+        repo = self._repo(tmp_path_factory)
+        detector = BindingDetector(search_dirs=("csrc",), exclude_patterns=("/tests/",))
+        graph = detector.detect_bindings_in_directory(str(repo))
+        files = {b.file_path for b in graph.bindings}
+        assert any("generated" in f for f in files)
+        assert not any("/tests/" in f for f in files)
+
+    def test_default_excludes_apply_when_manifest_unset(self, tmp_path_factory):
+        repo = self._repo(tmp_path_factory)
+        detector = BindingDetector(search_dirs=("csrc",))
+        graph = detector.detect_bindings_in_directory(str(repo))
+        assert graph.bindings == []
+
+    def test_registration_macros_prefilter(self, tmp_path_factory):
+        repo = tmp_path_factory.mktemp("scandir")
+        (repo / "csrc").mkdir()
+        (repo / "csrc" / "ops.cpp").write_text(self._CODE)
+        detector = BindingDetector(
+            search_dirs=("csrc",), registration_macros=("CUSTOM_REGISTER",)
+        )
+        assert detector.detect_bindings_in_directory(str(repo)).bindings == []
+        fallback = BindingDetector(search_dirs=("csrc",))
+        assert fallback.detect_bindings_in_directory(str(repo)).bindings

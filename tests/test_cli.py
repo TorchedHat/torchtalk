@@ -88,13 +88,13 @@ class TestIndexUpdateExitCode:
         import torchtalk.cli as cli_mod
         from torchtalk import indexer
 
-        monkeypatch.setattr(
-            "torchtalk.config.resolve_pytorch_source", lambda: "/tmp/fake"
-        )
+        monkeypatch.setattr("torchtalk.config.resolve_source", lambda **kw: "/tmp/fake")
         monkeypatch.setattr(
             indexer, "update_index", lambda *a, **kw: self._fake_stats(True)
         )
-        args = Namespace(since="baseline", pytorch_source=None, on_uncovered="fail")
+        args = Namespace(
+            since="baseline", source=None, on_uncovered="fail", harness=None
+        )
         assert cli_mod.cmd_index_update(args) == 1
 
     def test_returns_zero_when_no_uncovered_fail(self, monkeypatch):
@@ -103,13 +103,13 @@ class TestIndexUpdateExitCode:
         import torchtalk.cli as cli_mod
         from torchtalk import indexer
 
-        monkeypatch.setattr(
-            "torchtalk.config.resolve_pytorch_source", lambda: "/tmp/fake"
-        )
+        monkeypatch.setattr("torchtalk.config.resolve_source", lambda **kw: "/tmp/fake")
         monkeypatch.setattr(
             indexer, "update_index", lambda *a, **kw: self._fake_stats(False)
         )
-        args = Namespace(since="baseline", pytorch_source=None, on_uncovered="warn")
+        args = Namespace(
+            since="baseline", source=None, on_uncovered="warn", harness=None
+        )
         assert cli_mod.cmd_index_update(args) == 0
 
 
@@ -188,7 +188,7 @@ class TestFormatFlag:
             {
                 "harness": None,
                 "format": "markdown",
-                "pytorch_source": None,
+                "source": None,
                 "index": None,
                 "transport": "stdio",
             },

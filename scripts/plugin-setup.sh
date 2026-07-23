@@ -18,8 +18,9 @@ if ! command -v torchtalk >/dev/null 2>&1; then
     fi
 fi
 
-# Nudge if no PyTorch source resolves, matching config.resolve_pytorch_source:
-# PYTORCH_SOURCE, then PYTORCH_PATH (each must exist), then the config file.
+# Nudge if no source resolves, matching config.resolve_source: PYTORCH_SOURCE,
+# PYTORCH_PATH, or any TORCHTALK_SOURCE_* var (each must exist), then the
+# config file's [sources] table or legacy pytorch_source key.
 config_file="${XDG_CONFIG_HOME:-${HOME}/.config}/torchtalk/config.toml"
 source_configured=false
 
@@ -27,13 +28,16 @@ if [[ -n "${PYTORCH_SOURCE:-}" && -d "${PYTORCH_SOURCE}" ]]; then
     source_configured=true
 elif [[ -n "${PYTORCH_PATH:-}" && -d "${PYTORCH_PATH}" ]]; then
     source_configured=true
-elif [[ -f "${config_file}" ]] && grep -q "pytorch_source" "${config_file}" 2>/dev/null; then
+elif compgen -A variable | grep -q "^TORCHTALK_SOURCE_"; then
+    source_configured=true
+elif [[ -f "${config_file}" ]] \
+    && grep -qE "pytorch_source|^\[sources\]" "${config_file}" 2>/dev/null; then
     source_configured=true
 fi
 
 if [[ "${source_configured}" == false ]]; then
-    echo "TorchTalk: no PyTorch source configured. Set PYTORCH_SOURCE or run" \
-         "'torchtalk init --pytorch-source <path>' to enable cross-language" \
+    echo "TorchTalk: no source configured. Set PYTORCH_SOURCE or run" \
+         "'torchtalk init --source <path>' to enable cross-language" \
          "analysis of a PyTorch checkout (recommended)."
 fi
 

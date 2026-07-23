@@ -387,12 +387,74 @@ class TestUpdateIndex:
         with pytest.raises(ValueError, match="no git_commit"):
             update_index(str(tmp_path / "src"), since="baseline")
 
+    def test_raises_on_cross_package_snapshot(self, tmp_path, monkeypatch):
+        cache = tmp_path / "cache"
+        snap_dir = cache / "snapshots" / "baseline"
+        snap_dir.mkdir(parents=True)
+        (snap_dir / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "name": "baseline",
+                    "created": "2026-01-01T00:00:00+00:00",
+                    "pytorch_source": str(tmp_path / "src"),
+                    "source_fingerprint": "deadbeef",
+                    "git_commit": "abc1234",
+                    "bindings_size": 0,
+                    "bindings_sha256": "x",
+                    "content_fingerprint": None,
+                    "package": "vllm",
+                    "schema_version": 3,
+                }
+            )
+        )
+        (snap_dir / "bindings.json").write_text(json.dumps({"bindings": []}))
+        monkeypatch.setattr(snapshots, "SNAPSHOTS_DIR", cache / "snapshots")
+
+        with pytest.raises(ValueError, match="'vllm' harness"):
+            update_index(str(tmp_path / "src"), since="baseline")
+
+    def test_raises_on_old_format_baseline(self, tmp_path, monkeypatch):
+        cache = tmp_path / "cache"
+        snap_dir = cache / "snapshots" / "baseline"
+        snap_dir.mkdir(parents=True)
+        (snap_dir / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "name": "baseline",
+                    "created": "2026-01-01T00:00:00+00:00",
+                    "pytorch_source": str(tmp_path / "src"),
+                    "source_fingerprint": "deadbeef",
+                    "git_commit": "abc1234",
+                    "bindings_size": 0,
+                    "bindings_sha256": "x",
+                    "content_fingerprint": None,
+                    "schema_version": 2,
+                }
+            )
+        )
+        (snap_dir / "bindings.json").write_text(
+            json.dumps({"bindings": [], "metadata": {"format_version": 2}})
+        )
+        monkeypatch.setattr(snapshots, "SNAPSHOTS_DIR", cache / "snapshots")
+
+        with pytest.raises(ValueError, match="cache format v2"):
+            update_index(str(tmp_path / "src"), since="baseline")
+
     def test_drops_and_reindexes_changed_files(self, tmp_path, monkeypatch):
-        """Stale bindings for changed files are dropped; re-detected entries added."""
+        """Stale bindings for changed files are dropped; re-detected entries added.
+
+        Changed files outside the manifest's C++ search dirs lose their stale
+        bindings but are not re-detected (harness boundary).
+        """
         import subprocess
 
         src = tmp_path / "src"
-        src.mkdir()
+        changed_rel = "aten/src/ATen/native/changed.cpp"
+        outside_rel = "tools/outside.cpp"
+        excluded_rel = "aten/src/ATen/native/test_helper.cpp"
+        unpatterned_rel = "aten/src/ATen/native/plain.cpp"
+        (src / changed_rel).parent.mkdir(parents=True)
+        (src / outside_rel).parent.mkdir(parents=True)
         cache = tmp_path / "cache"
         snap_dir = cache / "snapshots" / "baseline"
         snap_dir.mkdir(parents=True)
@@ -403,7 +465,7 @@ class TestUpdateIndex:
                     "python_name": "stale",
                     "cpp_name": "at::stale",
                     "dispatch_key": "CPU",
-                    "file_path": str(src / "changed.cpp"),
+                    "file_path": str(src / changed_rel),
                     "line_number": 1,
                 },
                 {
@@ -413,11 +475,19 @@ class TestUpdateIndex:
                     "file_path": str(src / "untouched.cpp"),
                     "line_number": 2,
                 },
+                {
+                    "python_name": "outside",
+                    "cpp_name": "at::outside",
+                    "dispatch_key": "CPU",
+                    "file_path": str(src / outside_rel),
+                    "line_number": 3,
+                },
             ],
             "cuda_kernels": [],
             "native_functions": {},
             "derivatives": {},
             "native_implementations": {},
+            "metadata": {"format_version": indexer._BINDINGS_CACHE_FORMAT_VERSION},
         }
         (snap_dir / "bindings.json").write_text(json.dumps(baseline_bindings))
         (snap_dir / "manifest.json").write_text(
@@ -435,7 +505,10 @@ class TestUpdateIndex:
                 }
             )
         )
-        (src / "changed.cpp").write_text("// new content")
+        (src / changed_rel).write_text("TORCH_LIBRARY(aten, m) {}")
+        (src / outside_rel).write_text("TORCH_LIBRARY(aten, m) {}")
+        (src / excluded_rel).write_text("TORCH_LIBRARY(aten, m) {}")
+        (src / unpatterned_rel).write_text("// no binding patterns here")
 
         monkeypatch.setattr(snapshots, "SNAPSHOTS_DIR", cache / "snapshots")
         monkeypatch.setattr(indexer, "CACHE_DIR", cache)
@@ -449,7 +522,10 @@ class TestUpdateIndex:
 
         def fake_diff(cmd, **kwargs):
             class R:
-                stdout = "M\tchanged.cpp\n"
+                stdout = (
+                    f"M\t{changed_rel}\nM\t{outside_rel}\n"
+                    f"M\t{excluded_rel}\nM\t{unpatterned_rel}\n"
+                )
 
             return R()
 
@@ -463,7 +539,7 @@ class TestUpdateIndex:
                             "python_name": "reindexed",
                             "cpp_name": "at::reindexed",
                             "dispatch_key": "CPU",
-                            "file_path": str(src / "changed.cpp"),
+                            "file_path": str(src / changed_rel),
                             "line_number": 5,
                         }
 
@@ -483,8 +559,10 @@ class TestUpdateIndex:
 
         stats = update_index(str(src), since="baseline")
 
-        assert stats["cpp_files_changed"] == 1
-        assert stats["bindings_total"] == 2  # stable + reindexed, stale dropped
+        assert stats["cpp_files_changed"] == 4
+        # stable + reindexed; stale dropped; the out-of-bounds, excluded, and
+        # pattern-free changed files are not re-detected
+        assert stats["bindings_total"] == 2
 
         written = json.loads(Path(cache / "bindings.json").read_text())
         names = {b["python_name"] for b in written["bindings"]}
@@ -768,7 +846,16 @@ class TestUpdateIndexMetadata:
         cache = tmp_path / "cache"
         snap_dir = cache / "snapshots" / "baseline"
         snap_dir.mkdir(parents=True)
-        (snap_dir / "bindings.json").write_text(json.dumps({"bindings": []}))
+        (snap_dir / "bindings.json").write_text(
+            json.dumps(
+                {
+                    "bindings": [],
+                    "metadata": {
+                        "format_version": indexer._BINDINGS_CACHE_FORMAT_VERSION
+                    },
+                }
+            )
+        )
         (snap_dir / "manifest.json").write_text(
             json.dumps(
                 {

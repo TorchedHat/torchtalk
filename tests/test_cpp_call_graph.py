@@ -81,7 +81,7 @@ class TestSynthesizeMissingCuEntries:
     def relax_exclude(self, monkeypatch):
         # pytest's tmp_path contains "test_" which matches EXCLUDE_PATTERNS.
         # Replace should_exclude with one that only flags real exclude patterns.
-        def stub(path: str) -> bool:
+        def stub(path: str, patterns=None) -> bool:
             return "/test/" in path or "/third_party/" in path
 
         monkeypatch.setattr(cpp_call_graph, "should_exclude", stub)
@@ -645,7 +645,9 @@ class TestSupportedExtensions:
         (src / "compile_commands.json").write_text(json.dumps(db))
 
         monkeypatch.setattr(cpp_call_graph, "_discover_cuda_env", lambda: None)
-        monkeypatch.setattr(cpp_call_graph, "should_exclude", lambda _p: False)
+        monkeypatch.setattr(
+            cpp_call_graph, "should_exclude", lambda _p, _pat=None: False
+        )
         monkeypatch.setattr(cpp_call_graph, "should_include_dir", lambda _p, _d: True)
         monkeypatch.setattr(cpp_call_graph, "Pool", _FakePool)
 

@@ -164,6 +164,9 @@ class BindingDetector:
         self,
         macro_aliases: dict[str, str] | None = None,
         token_map: dict[str, str] | None = None,
+        search_dirs: tuple[str, ...] | None = None,
+        exclude_patterns: tuple[str, ...] | None = None,
+        registration_macros: tuple[str, ...] | None = None,
     ):
         from tree_sitter_language_pack import get_parser
 
@@ -171,6 +174,10 @@ class BindingDetector:
         self.cuda_parser = get_parser("cuda")  # If available, falls back to cpp
         self.macro_aliases = macro_aliases or {}
         self.token_map = token_map or {}
+        self.search_dirs = search_dirs or ()
+        # Empty tuples fall back to the PyTorch defaults in patterns.py.
+        self.exclude_patterns = exclude_patterns or ()
+        self.registration_macros = registration_macros or ()
         log.info("BindingDetector initialized with C++/CUDA support")
 
     def _preprocess(self, content: str) -> str:
@@ -660,14 +667,21 @@ class BindingDetector:
         return (node.text or b"").decode("utf-8", errors="replace")
 
     def detect_bindings_in_directory(self, directory: str) -> BindingGraph:
-        """Scan a directory for cross-language bindings."""
+        """Scan a directory (bounded by search_dirs when set) for bindings."""
         dir_path = Path(directory)
         combined_graph = BindingGraph()
 
+        if self.search_dirs:
+            roots = [dir_path / d for d in self.search_dirs if (dir_path / d).exists()]
+        else:
+            roots = [dir_path]
+
         extensions = ["*.cpp", "*.cc", "*.cxx", "*.cu", "*.cuh"]
-        files = []
-        for ext in extensions:
-            files.extend(dir_path.rglob(ext))
+        files: list[Path] = []
+        for root in roots:
+            for ext in extensions:
+                files.extend(root.rglob(ext))
+        files = list(dict.fromkeys(files))
 
         log.info(f"Scanning {len(files)} C++/CUDA files for bindings...")
 
@@ -676,16 +690,16 @@ class BindingDetector:
         for cpp_file in files:
             file_str = str(cpp_file)
 
-            # Apply exclusion patterns (from shared config)
-            if should_exclude(file_str):
+            # Apply exclusion patterns (manifest's, falling back to shared config)
+            if should_exclude(file_str, self.exclude_patterns):
                 skipped_excluded += 1
                 continue
 
             try:
                 content = cpp_file.read_text(encoding="utf-8", errors="replace")
 
-                # Fuzzy grep: check for binding-related patterns (from shared config)
-                if not has_binding_patterns(content):
+                # Fuzzy grep: check for binding-related patterns
+                if not has_binding_patterns(content, self.registration_macros):
                     skipped_no_patterns += 1
                     continue
 

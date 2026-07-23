@@ -55,3 +55,25 @@ class TestRealRepoManifests:
     def test_vllm_and_torchvision_registered(self):
         assert harness_mod.get_harness("vllm").manifest.package == "vllm"
         assert harness_mod.get_harness("torchvision").manifest.package == "torchvision"
+
+
+class TestCachePathsHarnessQualified:
+    def test_explicit_package_qualifies_filenames(self):
+        from torchtalk.config import cache_paths
+
+        paths = cache_paths("/src", package="vllm")
+        assert all("vllm" in p.name for p in paths.values())
+
+    def test_default_follows_active_harness(self):
+        from torchtalk.config import cache_paths
+
+        try:
+            harness_mod.set_active_harness("vllm")
+            vllm_paths = cache_paths("/src")
+        finally:
+            harness_mod.set_active_harness("pytorch")
+        pytorch_paths = cache_paths("/src")
+        assert all("vllm" in p.name for p in vllm_paths.values())
+        assert all("pytorch" in p.name for p in pytorch_paths.values())
+        for key, path in pytorch_paths.items():
+            assert path != vllm_paths[key]

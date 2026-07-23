@@ -22,7 +22,11 @@
   "mcpServers": {
     "torchtalk": {
       "command": "torchtalk",
-      "args": ["mcp-serve"],
+      "args": [
+        "mcp-serve",
+        "--harness",
+        "pytorch"
+      ],
       "env": {
         "PYTORCH_SOURCE": "${PYTORCH_SOURCE:-}"
       }

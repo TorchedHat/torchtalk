@@ -117,7 +117,7 @@ async def _do_affected(funcs: str, depth: int = 3) -> str:
             else:
                 node_ids.append(f"{file}::{cls}")
 
-    md.h3(f"Test runs ({len(runs)} files)")
+    md.h3(f"Test runs ({len(runs) + len(opinfo_runs)} selections)")
     for nid in node_ids:
         md.item(f"`{nid}`")
     for orun in opinfo_runs:
