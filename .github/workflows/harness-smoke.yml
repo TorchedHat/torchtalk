@@ -1,0 +1,30 @@
+name: Harness Smoke
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "src/torchtalk/harness.py"
+      - "src/torchtalk/analysis/patterns.py"
+      - "src/torchtalk/analysis/extractors.py"
+      - "src/torchtalk/analysis/binding_detector.py"
+      - "src/torchtalk/indexer.py"
+      - "scripts/harness_smoke.py"
+
+jobs:
+  harness-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install torchtalk
+        run: pip install -e ".[dev]"
+
+      - name: Run harness smoke test
+        run: python scripts/harness_smoke.py --harness pytorch --clone

@@ -38,28 +38,12 @@ class TestSplitFuncs:
 
 
 @pytest.fixture
-def affected_state():
-    """State with a mock cpp_extractor for _do_affected tests."""
-    s = indexer._state
-    saved = (
-        s.bindings,
-        s.native_functions,
-        s.cpp_extractor,
-        s.cpp_building,
-        s.by_cpp_name,
-        s.test_classes,
-        s.test_files,
-        s.opinfo_registry,
-        s.opinfo_alias_map,
-        s.opinfo_test_files,
-        s.test_attr_index,
-        s.pytorch_source,
-    )
+def affected_state(mock_state):
+    s = mock_state
     s.bindings = [{"python_name": "x"}]
     s.native_functions = {}
     s.cpp_extractor = MagicMock()
     s.cpp_building = False
-    s.by_cpp_name = {}
     s.test_classes = {}
     s.test_files = {}
     s.opinfo_registry = {}
@@ -67,26 +51,8 @@ def affected_state():
     s.opinfo_test_files = set()
     s.test_attr_index = {}
     s.pytorch_source = "/fake"
-
     indexer._build_indexes(s)
-    try:
-        yield s
-    finally:
-        (
-            s.bindings,
-            s.native_functions,
-            s.cpp_extractor,
-            s.cpp_building,
-            s.by_cpp_name,
-            s.test_classes,
-            s.test_files,
-            s.opinfo_registry,
-            s.opinfo_alias_map,
-            s.opinfo_test_files,
-            s.test_attr_index,
-            s.pytorch_source,
-        ) = saved
-        indexer._build_indexes(s)
+    return s
 
 
 def _canned_result(**overrides):

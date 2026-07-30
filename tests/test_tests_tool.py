@@ -13,22 +13,10 @@ from torchtalk.tools.tests import (
 
 
 @pytest.fixture
-def test_tool_state():
-    """Populated test infrastructure state for tool tests."""
-    s = indexer._state
-    saved = (
-        s.bindings,
-        s.native_functions,
-        s.test_functions,
-        s.test_classes,
-        s.test_files,
-        s.test_utilities,
-        s.opinfo_registry,
-        s.pytorch_source,
-    )
+def test_tool_state(mock_state):
+    s = mock_state
     s.bindings = [{"python_name": "x"}]
     s.native_functions = {}
-
     s.test_functions = {
         "test_softmax": [
             {
@@ -69,11 +57,10 @@ def test_tool_state():
             },
         ],
     }
-
     s.test_classes = {
-        "Test_softmax": [
+        "TestNN_softmax": [
             {
-                "name": "Test_softmax",
+                "name": "TestNN_softmax",
                 "file": "test/test_ops.py",
                 "line": 5,
                 "bases": ["TestCase"],
@@ -90,7 +77,6 @@ def test_tool_state():
             },
         ],
     }
-
     s.test_files = {
         "test/test_ops.py": {
             "path": "test/test_ops.py",
@@ -116,7 +102,6 @@ def test_tool_state():
             "functions": [{"name": "test_add", "class": "TestMath", "line": 50}],
         },
     }
-
     s.opinfo_registry = {
         "softmax": {
             "name": "softmax",
@@ -126,7 +111,6 @@ def test_tool_state():
             "aten_name": "_softmax",
         },
     }
-
     s.test_utilities = {
         "torch/testing/_internal/common_utils.py": {
             "path": "torch/testing/_internal/common_utils.py",
@@ -134,24 +118,9 @@ def test_tool_state():
             "exists": True,
         },
     }
-
     s.pytorch_source = None
-
     indexer._build_indexes(s)
-    try:
-        yield s
-    finally:
-        (
-            s.bindings,
-            s.native_functions,
-            s.test_functions,
-            s.test_classes,
-            s.test_files,
-            s.test_utilities,
-            s.opinfo_registry,
-            s.pytorch_source,
-        ) = saved
-        indexer._build_indexes(s)
+    return s
 
 
 class TestFindSimilarTests:
@@ -167,7 +136,7 @@ class TestFindSimilarTests:
 
     def test_matches_class_by_name(self, test_tool_state):
         out = asyncio.run(_do_find_similar_tests("softmax"))
-        assert "Test_softmax" in out
+        assert "TestNN_softmax" in out
         assert "Test Classes" in out
 
     def test_matches_file_by_substring(self, test_tool_state):

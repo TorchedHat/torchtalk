@@ -43,20 +43,3 @@ jobs:
 
       - name: Run tests
         run: python -m pytest tests/ -v --cov=torchtalk --cov-report=term-missing
-
-  test-harness:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Install dependencies
-        run: pip install -e ".[dev]"
-
-      - name: Run tool harness tests
-        run: python -m pytest tests/test_tests_tool.py tests/test_affected_tool.py -v
