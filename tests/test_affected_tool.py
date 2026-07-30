@@ -115,4 +115,4 @@ class TestDoAffected:
         affected_state.cpp_extractor = None
         affected_state.cpp_building = False
         out = asyncio.run(_do_affected("foo_kernel"))
-        assert "call graph" in out.lower() or "unavailable" in out.lower()
+        assert "compile_commands.json" in out
