@@ -40,11 +40,10 @@ def _load_manifests() -> list[dict]:
 def _source_path(manifest: dict) -> Path | None:
     """Resolve source path from the manifest's env_var."""
     env_var = manifest.get("env_var", "")
-    for var in (env_var, f"{env_var}_PATH"):
-        if val := os.environ.get(var):
-            p = Path(val)
-            if p.exists():
-                return p
+    if val := os.environ.get(env_var):
+        p = Path(val)
+        if p.exists():
+            return p
     return None
 
 

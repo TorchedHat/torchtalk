@@ -1,4 +1,4 @@
-repo: https://github.com/pytorch/pytorch.git
+repo: pytorch/pytorch
 ref: v2.13.0
 env_var: PYTORCH_SOURCE
 sparse_paths:
