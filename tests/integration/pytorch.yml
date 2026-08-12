@@ -1,0 +1,33 @@
+repo: pytorch/pytorch
+ref: v2.13.0
+env_var: PYTORCH_SOURCE
+sparse_paths:
+  - torch/csrc
+  - aten/src/ATen/native
+  - torch/nn
+  - tools/autograd
+
+anchors:
+  - file: torch/csrc/Module.cpp
+    check: pybind_name
+    value: _WeakTensorRef
+
+  - file: aten/src/ATen/native/RNN.cpp
+    check: torch_library_cpp_name
+    value: quantized_lstm
+
+  - dir: aten/src/ATen/native/cuda
+    check: has_cuda_kernel
+    glob: "*.cu"
+    content_filter: __global__
+
+  - dir: aten/src/ATen/native
+    check: has_at_dispatch
+    glob: "*.cpp"
+    content_filter: AT_DISPATCH
+
+  - dir: torch/csrc/autograd
+    check: has_binding_types
+    value:
+      - pybind_method
+      - torch_library_impl

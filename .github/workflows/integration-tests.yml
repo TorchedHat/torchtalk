@@ -1,0 +1,64 @@
+name: Integration Tests
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - "src/torchtalk/analysis/**"
+      - "tests/test_binding_detector_pytorch.py"
+      - "tests/integration/**"
+      - ".github/workflows/integration-tests.yml"
+
+jobs:
+  integration:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: [pytorch]
+    steps:
+      - name: Checkout torchtalk
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install torchtalk
+        run: pip install -e ".[dev]"
+
+      - name: Read manifest
+        id: manifest
+        run: |
+          python3 << 'SCRIPT'
+          import yaml, os
+
+          with open("tests/integration/${{ matrix.target }}.yml") as f:
+              m = yaml.safe_load(f)
+
+          out = os.environ["GITHUB_OUTPUT"]
+          with open(out, "a") as f:
+              f.write(f"repo={m['repo']}\n")
+              f.write(f"ref={m['ref']}\n")
+              f.write(f"env_var={m['env_var']}\n")
+              f.write("sparse_paths<<EOF\n")
+              for p in m["sparse_paths"]:
+                  f.write(f"{p}\n")
+              f.write("EOF\n")
+          SCRIPT
+
+      - name: Sparse checkout target
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ steps.manifest.outputs.repo }}
+          ref: ${{ steps.manifest.outputs.ref }}
+          sparse-checkout: ${{ steps.manifest.outputs.sparse_paths }}
+          filter: blob:none
+          path: _target
+
+      - name: Set source env var
+        run: echo "${{ steps.manifest.outputs.env_var }}=${{ github.workspace }}/_target" >> $GITHUB_ENV
+
+      - name: Run integration tests
+        run: python -m pytest tests/test_binding_detector_pytorch.py -v

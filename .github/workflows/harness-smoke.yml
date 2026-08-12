@@ -11,6 +11,7 @@ on:
       - "src/torchtalk/analysis/binding_detector.py"
       - "src/torchtalk/indexer.py"
       - "scripts/harness_smoke.py"
+      - "tests/integration/**"
       - ".github/workflows/harness-smoke.yml"
 
 jobs:
