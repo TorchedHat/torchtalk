@@ -4,6 +4,8 @@ env_var: PYTORCH_SOURCE
 sparse_paths:
   - torch/csrc
   - aten/src/ATen/native
+  - torch/nn
+  - tools/autograd
 
 anchors:
   - file: torch/csrc/Module.cpp
