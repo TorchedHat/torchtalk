@@ -2,6 +2,7 @@
 
 from torchtalk.analysis.helpers import (
     dedupe_by_key,
+    fuzzy_distance_limit,
     fuzzy_match,
     levenshtein_distance,
     safe_sort_key,
@@ -125,3 +126,22 @@ class TestDedupeByKey:
 
     def test_empty_list(self):
         assert dedupe_by_key([], "name") == []
+
+
+class TestFuzzyDistanceLimit:
+    def test_short_name_floor(self):
+        assert fuzzy_distance_limit("ab") == 2
+        assert fuzzy_distance_limit("relu") == 2
+
+    def test_medium_name_still_floor(self):
+        assert fuzzy_distance_limit("softmax") == 2
+
+    def test_long_enough_name_reaches_three(self):
+        assert fuzzy_distance_limit("hardswish") == 3
+
+    def test_long_kernel_name_capped_at_three(self):
+        assert fuzzy_distance_limit("very_long_kernel_name_here") == 3
+        assert fuzzy_distance_limit("a" * 40) == 3
+
+    def test_empty_name_uses_floor(self):
+        assert fuzzy_distance_limit("") == 2

@@ -5,7 +5,13 @@ import asyncio
 import pytest
 
 from torchtalk import indexer
-from torchtalk.tools.ops import _do_cuda_kernels, trace
+from torchtalk.tools.ops import (
+    _do_cuda_kernels,
+    _do_search_bindings,
+    _get_native_func,
+    _similar_functions,
+    trace,
+)
 
 
 @pytest.fixture
@@ -60,7 +66,8 @@ class TestTraceWithoutCallGraph:
 
     def test_trace_unknown_function(self, state_without_call_graph):
         out = asyncio.run(trace("definitely_not_an_op_xyz"))
-        assert isinstance(out, str)
+        assert "definitely_not_an_op_xyz" in out
+        assert "not found" in out.lower()
 
 
 class TestCudaKernelsWithoutCallGraph:
@@ -104,3 +111,173 @@ class TestTraceFuzzyLabeling:
         out = asyncio.run(trace("hardswishh", focus="dispatch"))
         assert "fuzzy match" in out
         assert "Function Not Found" not in out
+
+
+@pytest.fixture
+def ops_state(mock_state):
+    s = mock_state
+    s.native_functions = {
+        "addmm": {"name": "addmm", "base_name": "addmm"},
+        "add_out": {"name": "add_out", "base_name": "add_out"},
+        "softmax.Tensor": {"name": "softmax.Tensor", "base_name": "softmax"},
+        "relu": {"name": "relu", "base_name": "relu"},
+        "softmin": {"name": "softmin", "base_name": "softmin"},
+        "softmax": {"name": "softmax", "base_name": "softmax"},
+    }
+    s.bindings = [
+        {
+            "python_name": "aten.add",
+            "cpp_name": "add_cpu",
+            "dispatch_key": "CPU",
+            "file_path": "/src/a.cpp",
+            "line_number": 10,
+        },
+        {
+            "python_name": "aten.add",
+            "cpp_name": "add_cuda",
+            "dispatch_key": "CUDA",
+            "file_path": "/src/b.cu",
+            "line_number": 20,
+        },
+        {
+            "python_name": "aten.add",
+            "cpp_name": "add_cpu",
+            "dispatch_key": "CPU",
+            "file_path": "/src/a_dup.cpp",
+            "line_number": 99,
+        },
+        {
+            "python_name": "aten.mul",
+            "cpp_name": "mul_cpu",
+            "dispatch_key": "CPU",
+            "file_path": "/src/c.cpp",
+            "line_number": 30,
+        },
+        {
+            "python_name": "aten.add",
+            "cpp_name": "add_mps",
+            "dispatch_key": "MPS",
+            "file_path": "/src/d.mm",
+            "line_number": 40,
+        },
+        {
+            "python_name": "aten.add",
+            "cpp_name": "add_quantized",
+            "dispatch_key": "QuantizedCPU",
+            "file_path": "/src/e.cpp",
+            "line_number": 50,
+        },
+        {
+            "python_name": "aten.add",
+            "cpp_name": "add_mkldnn",
+            "dispatch_key": "MkldnnCPU",
+            "file_path": "/src/f.cpp",
+            "line_number": 60,
+        },
+    ]
+    s.pytorch_source = "/src"
+    indexer._build_indexes(s)
+    return s
+
+
+class TestGetNativeFunc:
+    def test_exact_key(self, ops_state):
+        result = _get_native_func("relu")
+        assert result is not None
+        assert result["name"] == "relu"
+
+    def test_case_insensitive_key(self, ops_state):
+        result = _get_native_func("softmax")
+        assert result is not None
+        assert result["name"] == "softmax"
+
+        result = _get_native_func("SOFTMAX")
+        assert result is not None
+        assert result["base_name"].lower() == "softmax"
+
+    def test_base_name_fallback(self, ops_state):
+        # Drop the exact "softmax" key so lookup walks to base_name.
+        del ops_state.native_functions["softmax"]
+        result = _get_native_func("softmax")
+        assert result is not None
+        assert result["name"] == "softmax.Tensor"
+        assert result["base_name"] == "softmax"
+
+    def test_substring_shortest_key_wins(self, ops_state):
+        result = _get_native_func("add")
+        assert result is not None
+        assert result["name"] == "addmm"
+
+    def test_no_match_returns_none(self, ops_state):
+        assert _get_native_func("zzz_not_an_op") is None
+
+
+class TestSimilarFunctions:
+    def test_substring_suggestions(self, ops_state):
+        result = _similar_functions("soft")
+        assert "softmax" in result
+        assert "softmin" in result
+        assert "relu" not in result
+
+    def test_typo_via_levenshtein(self, ops_state):
+        result = _similar_functions("sofmax")
+        assert "softmax" in result
+
+    def test_skips_keys_of_length_fifty_or_more(self, ops_state):
+        long_key = "a" * 49 + "c"  # 50 chars — excluded by len(key) < 50
+        short_key = "a" * 47 + "b"
+        ops_state.native_functions[long_key] = {"name": long_key, "base_name": long_key}
+        ops_state.native_functions[short_key] = {
+            "name": short_key,
+            "base_name": short_key,
+        }
+        query = "a" * 47 + "x"
+        result = _similar_functions(query)
+        assert long_key not in result
+        assert short_key in result
+
+    def test_limit_and_unique(self, ops_state):
+        for i in range(15):
+            name = f"fn_{i:02d}"
+            ops_state.native_functions[name] = {"name": name, "base_name": name}
+        result = _similar_functions("fn_", limit=3)
+        assert len(result) == 3
+        assert len(set(result)) == 3
+
+
+class TestSearchBindings:
+    def test_matches_python_name(self, ops_state):
+        out = asyncio.run(_do_search_bindings("aten.add"))
+        assert "aten.add" in out
+        assert "add_cpu" in out
+        assert "aten.mul" not in out
+
+    def test_matches_cpp_name(self, ops_state):
+        out = asyncio.run(_do_search_bindings("add_cuda"))
+        assert "add_cuda" in out
+        assert "Found 1 binding(s)" in out
+        assert "add_cpu" not in out
+
+    def test_backend_filter(self, ops_state):
+        out = asyncio.run(_do_search_bindings("add", backend="CUDA"))
+        assert "(backend: CUDA)" in out
+        assert "add_cuda" in out
+        assert "add_cpu" not in out
+        assert "aten.mul" not in out
+
+    def test_dedup_by_name_and_dispatch_key(self, ops_state):
+        out = asyncio.run(_do_search_bindings("add_cpu"))
+        assert "Found 1 binding(s)" in out
+        assert "a_dup.cpp" not in out
+
+    def test_truncation_footer(self, ops_state):
+        out = asyncio.run(_do_search_bindings("add", limit=2))
+        assert "*Showing 2 of 5 results*" in out
+
+    def test_no_match_with_backend(self, ops_state):
+        out = asyncio.run(_do_search_bindings("gelu", backend="mps"))
+        assert out == "No bindings found matching 'gelu' with backend 'mps'."
+
+    def test_no_match_without_backend(self, ops_state):
+        out = asyncio.run(_do_search_bindings("gelu"))
+        assert out == "No bindings found matching 'gelu'."
