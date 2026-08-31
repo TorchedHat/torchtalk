@@ -199,3 +199,14 @@ class TestKernelTuHelperMapping:
         nf = {f"op{i}": {} for i in range(6)}
         out = extract_kernel_impl_to_op(tmp_path, nf)
         assert "shared_helper" not in out
+
+
+def test_custom_stub_root(tmp_path):
+    root = tmp_path / "csrc" / "kernels"
+    (root / "cpu").mkdir(parents=True)
+    (root / "cpu" / "Foo.cpp").write_text("REGISTER_DISPATCH(foo_stub, &foo_kernel);\n")
+    nf = {"foo": {"name": "foo"}}
+    assert extract_kernel_impl_to_op(tmp_path, nf) == {}
+    assert extract_kernel_impl_to_op(tmp_path, nf, stub_root="csrc/kernels") == {
+        "foo_kernel": "foo"
+    }

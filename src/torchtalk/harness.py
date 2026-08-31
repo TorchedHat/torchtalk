@@ -61,6 +61,14 @@ class ConventionManifest:
     registration_calls: tuple[CallRegistration, ...] = ()
     # dispatcher call → arg (position or kwarg) naming the invoked method
     string_dispatchers: dict[str, int | str] = field(default_factory=dict)
+    # Python op prefix → C++ op namespace, e.g. `torch.add` ↔ `aten::add`.
+    op_namespaces: dict[str, str] = field(default_factory=dict)
+    # Repo-relative files scanned for `@register_decomposition(<ns>.X)`.
+    decomp_alias_paths: tuple[str, ...] = ()
+    # Repo-relative dir whose cpu/cuda subdirs hold REGISTER_*_DISPATCH macros.
+    dispatch_stub_root: str = ""
+    # Wrappers stripped from `m.impl("op", WRAPPER(fn))` targets.
+    cpp_call_wrappers: tuple[str, ...] = ()
 
 
 @runtime_checkable
@@ -83,6 +91,19 @@ PYTORCH_MANIFEST = ConventionManifest(
     native_functions_yaml="aten/src/ATen/native/native_functions.yaml",
     derivatives_yaml="tools/autograd/derivatives.yaml",
     decorator_registries={"register_decomposition": "decompositions"},
+    op_namespaces={"torch": "aten"},
+    decomp_alias_paths=(
+        "torch/_decomp/decompositions.py",
+        "torch/_decomp/decompositions_for_jvp.py",
+        "torch/_refs/__init__.py",
+        "torch/_refs/_conversions.py",
+        "torch/_refs/fft.py",
+        "torch/_refs/linalg/__init__.py",
+        "torch/_refs/nn/functional/__init__.py",
+        "torch/_refs/special/__init__.py",
+    ),
+    dispatch_stub_root="aten/src/ATen/native",
+    cpp_call_wrappers=("TORCH_FN_BOXED", "TORCH_FN", "TORCH_BOX", "TORCH_SELECTIVE_FN"),
 )
 
 

@@ -26,6 +26,7 @@ log = logging.getLogger(__name__)
 # ALSO_REGISTER_AVX512_DISPATCH, REGISTER_NO_AVX2_DISPATCH, etc.
 _REGISTER_RE = re.compile(r"\b(?:ALSO_)?REGISTER_\w+\s*\(\s*(\w+)\s*,\s*&?\s*(\w+)")
 
+_DEFAULT_STUB_ROOT = "aten/src/ATen/native"
 _SCAN_DIRS = ("cpu", "cuda", "quantized/cpu", "quantized/cuda")
 _SCAN_EXTS = ("*.cpp", "*.cu", "*.h")
 _STUB_SUFFIXES = ("_stub", "_kernel_impl", "_kernel")
@@ -52,13 +53,19 @@ def _stub_to_op(stub: str, nf_keys: set[str]) -> str | None:
 
 
 def extract_kernel_impl_to_op(
-    source: Path, native_functions: dict[str, dict] | None
+    source: Path,
+    native_functions: dict[str, dict] | None,
+    stub_root: str = "",
 ) -> dict[str, str]:
-    """Build kernel-impl → ATen op map by scraping REGISTER_* macros."""
+    """Build kernel-impl → ATen op map by scraping REGISTER_* macros.
+
+    `stub_root` is the repo-relative dir holding the cpu/cuda kernel subdirs
+    (manifest `dispatch_stub_root`); empty falls back to the PyTorch path.
+    """
     if not native_functions:
         return {}
     nf_keys = set(native_functions)
-    native_root = source / "aten" / "src" / "ATen" / "native"
+    native_root = source / (stub_root or _DEFAULT_STUB_ROOT)
     if not native_root.exists():
         return {}
 

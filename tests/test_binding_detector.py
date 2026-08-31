@@ -481,3 +481,24 @@ class TestManifestExcludeAndPrefilter:
         assert detector.detect_bindings_in_directory(str(repo)).bindings == []
         fallback = BindingDetector(search_dirs=("csrc",))
         assert fallback.detect_bindings_in_directory(str(repo)).bindings
+
+
+class TestCallWrappers:
+    def test_default_wrappers_include_box_and_selective(self):
+        assert _clean_impl_target("TORCH_BOX(&foo)") == "foo"
+        assert _clean_impl_target("TORCH_SELECTIVE_FN(ns::bar)") == "bar"
+
+    def test_custom_wrappers_override_defaults(self):
+        assert _clean_impl_target("MY_WRAP(foo)", wrappers=("MY_WRAP",)) == "foo"
+        assert _clean_impl_target("TORCH_FN(foo)", wrappers=("MY_WRAP",)) != "foo"
+
+    def test_detector_passes_wrappers(self):
+        src = """
+        TORCH_LIBRARY_IMPL(aten, CPU, m) {
+            m.impl("relu", MY_WRAP(relu_kernel));
+        }
+        """
+        graph = BindingDetector(call_wrappers=("MY_WRAP",)).detect_bindings(
+            "ops.cpp", src
+        )
+        assert "relu_kernel" in {b.cpp_name for b in graph.bindings}

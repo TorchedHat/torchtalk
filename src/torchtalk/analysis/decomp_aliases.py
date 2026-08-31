@@ -16,6 +16,7 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
+# PyTorch defaults; overridden by `ConventionManifest.decomp_alias_paths`.
 _DECOMP_FILES = (
     "torch/_decomp/decompositions.py",
     "torch/_decomp/decompositions_for_jvp.py",
@@ -26,6 +27,7 @@ _DECOMP_FILES = (
     "torch/_refs/nn/functional/__init__.py",
     "torch/_refs/special/__init__.py",
 )
+_DEFAULT_NAMESPACES = ("aten",)
 
 
 def _is_register_decomp(node: ast.expr) -> bool:
@@ -36,20 +38,24 @@ def _is_register_decomp(node: ast.expr) -> bool:
     return False
 
 
-def _aten_op_name(attr: ast.expr) -> str | None:
+def _aten_op_name(
+    attr: ast.expr, namespaces: tuple[str, ...] = _DEFAULT_NAMESPACES
+) -> str | None:
     """`aten.X` → `X`; `aten.X.default` → `X`; anything else → None."""
     parts: list[str] = []
     node: ast.expr = attr
     while isinstance(node, ast.Attribute):
         parts.append(node.attr)
         node = node.value
-    if isinstance(node, ast.Name) and node.id == "aten" and parts:
+    if isinstance(node, ast.Name) and node.id in namespaces and parts:
         parts.reverse()
         return parts[0]
     return None
 
 
-def _aten_ops_from_args(args: list[ast.expr]) -> list[str]:
+def _aten_ops_from_args(
+    args: list[ast.expr], namespaces: tuple[str, ...] = _DEFAULT_NAMESPACES
+) -> list[str]:
     """Pull aten op names out of register_decomposition() args.
 
     Accepts `aten.X`, `aten.X.default`, `[aten.X, aten.Y]`, `(aten.X, aten.Y)`.
@@ -60,13 +66,25 @@ def _aten_ops_from_args(args: list[ast.expr]) -> list[str]:
         node = queue.pop()
         if isinstance(node, ast.List | ast.Tuple):
             queue.extend(node.elts)
-        elif isinstance(node, ast.Attribute) and (name := _aten_op_name(node)):
+        elif isinstance(node, ast.Attribute) and (
+            name := _aten_op_name(node, namespaces)
+        ):
             out.append(name)
     return out
 
 
-def extract_decomp_aliases(source: Path) -> dict[str, list[str]]:
-    """Walk decomp/refs files; return bidirectional aten ↔ python-fn alias map."""
+def extract_decomp_aliases(
+    source: Path,
+    paths: tuple[str, ...] = (),
+    namespaces: tuple[str, ...] = (),
+) -> dict[str, list[str]]:
+    """Walk decomp/refs files; return bidirectional aten ↔ python-fn alias map.
+
+    `paths` / `namespaces` come from the manifest; empty falls back to the
+    PyTorch defaults.
+    """
+    paths = paths or _DECOMP_FILES
+    namespaces = namespaces or _DEFAULT_NAMESPACES
     aliases: dict[str, set[str]] = {}
 
     def link(a: str, b: str) -> None:
@@ -75,7 +93,7 @@ def extract_decomp_aliases(source: Path) -> dict[str, list[str]]:
         aliases.setdefault(a, set()).add(b)
         aliases.setdefault(b, set()).add(a)
 
-    for rel in _DECOMP_FILES:
+    for rel in paths:
         path = source / rel
         if not path.exists():
             continue
@@ -92,7 +110,7 @@ def extract_decomp_aliases(source: Path) -> dict[str, list[str]]:
                     continue
                 if not _is_register_decomp(deco.func):
                     continue
-                for op_name in _aten_ops_from_args(deco.args):
+                for op_name in _aten_ops_from_args(deco.args, namespaces):
                     link(op_name, node.name)
 
     return {k: sorted(v) for k, v in aliases.items()}
