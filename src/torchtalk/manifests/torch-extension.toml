@@ -1,0 +1,57 @@
+# Abstract base profile for repos that extend PyTorch (custom ops, kernels).
+# Not registered as a harness; use `extends = "torch-extension"`.
+
+[package]
+name = "torch-extension"
+depends_on = [
+    "pytorch",
+]
+
+[paths]
+cpp_search_dirs = [
+    "csrc",
+]
+python_search_dirs = []
+python_package_roots = []
+test_search_dirs = [
+    "tests",
+]
+test_content_patterns = [
+    "TestCase",
+    "pytest",
+    "unittest",
+]
+exclude_patterns = [
+    "/test/",
+    "/tests/",
+    "test_",
+    "_test.",
+    "/third_party/",
+    "/generated/",
+    "/build/",
+    "__pycache__",
+    "/benchmarks/",
+    "/examples/",
+]
+
+[cpp]
+registration_macros = [
+    "TORCH_LIBRARY",
+    "PYBIND11_MODULE",
+    "pybind11",
+    "py::class_<",
+    "m.def(",
+    "__global__",
+    "AT_DISPATCH",
+    "c10::Dispatcher",
+    "RegisterOperators",
+]
+call_wrappers = [
+    "TORCH_BOX",
+    "TORCH_SELECTIVE_FN",
+    "TORCH_FN",
+    "TORCH_SELECTIVE_SCHEMA",
+]
+
+[python.op_namespaces]
+torch = "aten"

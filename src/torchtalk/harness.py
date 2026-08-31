@@ -7,18 +7,15 @@ from different manifests merge via package-qualified symbol IDs (symbols.py).
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Protocol, runtime_checkable
+import sys
+from dataclasses import dataclass, field, fields
+from pathlib import Path
+from typing import Any, Protocol, runtime_checkable
 
-from .analysis.patterns import (
-    CPP_BINDING_PATTERNS,
-    CPP_SEARCH_DIRS,
-    EXCLUDE_PATTERNS,
-    PYTHON_SEARCH_DIRS,
-    TEST_CONTENT_PATTERNS,
-    TEST_SEARCH_DIRS,
-    TEST_UTILITY_MODULES,
-)
+if sys.version_info >= (3, 11):
+    import tomllib
+else:
+    import tomli as tomllib
 
 
 @dataclass(frozen=True)
@@ -69,6 +66,10 @@ class ConventionManifest:
     dispatch_stub_root: str = ""
     # Wrappers stripped from `m.impl("op", WRAPPER(fn))` targets.
     cpp_call_wrappers: tuple[str, ...] = ()
+    # Harness names this package's symbols resolve against (bridge targets).
+    depends_on: tuple[str, ...] = ()
+    # Smoke-test floors: index stat name → minimum count (scripts/harness_smoke.py).
+    expected_minimums: dict[str, int] = field(default_factory=dict)
 
 
 @runtime_checkable
@@ -78,33 +79,159 @@ class Harness(Protocol):
     manifest: ConventionManifest
 
 
-PYTORCH_MANIFEST = ConventionManifest(
-    package="pytorch",
-    cpp_search_dirs=tuple(CPP_SEARCH_DIRS),
-    python_search_dirs=tuple(PYTHON_SEARCH_DIRS),
-    python_package_roots=("torch",),
-    test_search_dirs=tuple(TEST_SEARCH_DIRS),
-    test_content_patterns=tuple(TEST_CONTENT_PATTERNS),
-    test_utility_modules=tuple(TEST_UTILITY_MODULES),
-    exclude_patterns=tuple(EXCLUDE_PATTERNS),
-    registration_macros=tuple(CPP_BINDING_PATTERNS),
-    native_functions_yaml="aten/src/ATen/native/native_functions.yaml",
-    derivatives_yaml="tools/autograd/derivatives.yaml",
-    decorator_registries={"register_decomposition": "decompositions"},
-    op_namespaces={"torch": "aten"},
-    decomp_alias_paths=(
-        "torch/_decomp/decompositions.py",
-        "torch/_decomp/decompositions_for_jvp.py",
-        "torch/_refs/__init__.py",
-        "torch/_refs/_conversions.py",
-        "torch/_refs/fft.py",
-        "torch/_refs/linalg/__init__.py",
-        "torch/_refs/nn/functional/__init__.py",
-        "torch/_refs/special/__init__.py",
-    ),
-    dispatch_stub_root="aten/src/ATen/native",
-    cpp_call_wrappers=("TORCH_FN_BOXED", "TORCH_FN", "TORCH_BOX", "TORCH_SELECTIVE_FN"),
-)
+MANIFESTS_DIR = Path(__file__).parent / "manifests"
+REPO_MANIFEST_NAME = ".torchtalk.toml"
+
+# Each TOML section key maps to one ConventionManifest field; `cpp.*` keys
+# are prefixed to their field names below.
+_SECTION_FIELDS: dict[str, dict[str, str]] = {
+    "paths": {
+        f: f
+        for f in (
+            "cpp_search_dirs",
+            "python_search_dirs",
+            "python_package_roots",
+            "test_search_dirs",
+            "test_content_patterns",
+            "test_utility_modules",
+            "exclude_patterns",
+            "native_functions_yaml",
+            "derivatives_yaml",
+            "decomp_alias_paths",
+            "dispatch_stub_root",
+        )
+    },
+    "cpp": {
+        "registration_macros": "registration_macros",
+        "macro_aliases": "cpp_macro_aliases",
+        "token_map": "cpp_token_map",
+        "call_wrappers": "cpp_call_wrappers",
+    },
+    "python": {
+        f: f
+        for f in (
+            "decorator_registries",
+            "string_registries",
+            "registration_calls",
+            "string_dispatchers",
+            "op_namespaces",
+        )
+    },
+}
+_FIELD_TYPES = {f.name: f.type for f in fields(ConventionManifest)}
+
+
+class ManifestError(ValueError):
+    """A manifest TOML file is malformed or references an unknown profile."""
+
+
+def _flatten(data: dict[str, Any], origin: str) -> dict[str, Any]:
+    """Map TOML sections onto ConventionManifest field names."""
+    out: dict[str, Any] = {}
+    pkg = data.get("package", {})
+    if "name" in pkg:
+        out["package"] = pkg["name"]
+    if "depends_on" in pkg:
+        out["depends_on"] = pkg["depends_on"]
+    for section, mapping in _SECTION_FIELDS.items():
+        for key, value in data.get(section, {}).items():
+            if key not in mapping:
+                raise ManifestError(f"{origin}: unknown key [{section}] {key}")
+            out[mapping[key]] = value
+    if "expected_minimums" in data:
+        out["expected_minimums"] = data["expected_minimums"]
+    known = {"package", "paths", "cpp", "python", "expected_minimums"}
+    for section in data:
+        if section not in known:
+            raise ManifestError(f"{origin}: unknown section [{section}]")
+    return out
+
+
+def _coerce(name: str, value: Any) -> Any:
+    """Convert TOML values to the field's dataclass type (lists → tuples)."""
+    if name == "registration_calls":
+        return tuple(
+            CallRegistration(
+                r["call"], r["key_arg"], r["target_arg"], r.get("registry", "")
+            )
+            for r in value
+        )
+    ftype = str(_FIELD_TYPES[name])
+    if ftype.startswith("tuple") and isinstance(value, list):
+        return tuple(value)
+    return value
+
+
+def manifest_from_dict(
+    data: dict[str, Any],
+    *,
+    base: ConventionManifest | None = None,
+    origin: str = "<dict>",
+) -> ConventionManifest:
+    """Build a manifest from parsed TOML, layered over `base` when given.
+
+    Every key set in `data` replaces the base value outright (lists and
+    tables are not merged), so a profile can drop a base default by
+    setting it to an empty value.
+    """
+    values: dict[str, Any] = {}
+    if base is not None:
+        values.update({f.name: getattr(base, f.name) for f in fields(base)})
+    for name, raw in _flatten(data, origin).items():
+        values[name] = _coerce(name, raw)
+    if "package" not in values:
+        raise ManifestError(f"{origin}: [package] name is required")
+    if "cpp_search_dirs" not in values:
+        raise ManifestError(f"{origin}: [paths] cpp_search_dirs is required")
+    return ConventionManifest(**values)
+
+
+def _read_toml(path: Path) -> dict[str, Any]:
+    with open(path, "rb") as f:
+        return tomllib.load(f)
+
+
+def load_manifest(path: str | Path, _seen: tuple[str, ...] = ()) -> ConventionManifest:
+    """Load a manifest TOML file, resolving `[package] extends` recursively.
+
+    `extends` names a built-in profile in `torchtalk/manifests/` (e.g.
+    "torch-extension" or "pytorch") or a path relative to the file itself.
+    """
+    path = Path(path)
+    if not path.exists():
+        raise ManifestError(f"Manifest not found: {path}")
+    data = _read_toml(path)
+    origin = str(path)
+    if origin in _seen:
+        raise ManifestError(f"{origin}: circular extends chain {(*_seen, origin)}")
+    base = None
+    parent = data.get("package", {}).get("extends")
+    if parent:
+        builtin = MANIFESTS_DIR / f"{parent}.toml"
+        candidate = builtin if builtin.exists() else path.parent / parent
+        if not candidate.exists():
+            raise ManifestError(f"{origin}: extends {parent!r} not found")
+        base = load_manifest(candidate, (*_seen, origin))
+    return manifest_from_dict(data, base=base, origin=origin)
+
+
+def load_builtin_manifest(name: str) -> ConventionManifest:
+    """Load `torchtalk/manifests/<name>.toml`."""
+    return load_manifest(MANIFESTS_DIR / f"{name}.toml")
+
+
+def builtin_manifest_names() -> list[str]:
+    """Names of shipped manifest profiles (including abstract bases)."""
+    return sorted(p.stem for p in MANIFESTS_DIR.glob("*.toml"))
+
+
+def find_repo_manifest(source: str | Path) -> Path | None:
+    """Return `<source>/.torchtalk.toml` when the checkout ships one."""
+    path = Path(source) / REPO_MANIFEST_NAME
+    return path if path.is_file() else None
+
+
+PYTORCH_MANIFEST = load_builtin_manifest("pytorch")
 
 
 @dataclass(frozen=True)
@@ -117,52 +244,8 @@ class ManifestHarness:
 PYTORCH_HARNESS = ManifestHarness(PYTORCH_MANIFEST)
 
 
-VLLM_MANIFEST = ConventionManifest(
-    package="vllm",
-    cpp_search_dirs=("csrc",),
-    python_search_dirs=("vllm",),
-    python_package_roots=("vllm",),
-    test_search_dirs=("tests",),
-    exclude_patterns=("/tests/", "/benchmarks/", "/examples/", "__pycache__"),
-    cpp_macro_aliases={
-        "TORCH_LIBRARY_EXPAND": "TORCH_LIBRARY",
-        "TORCH_LIBRARY_IMPL_EXPAND": "TORCH_LIBRARY_IMPL",
-    },
-    cpp_token_map={"TORCH_EXTENSION_NAME": "_C"},
-    decorator_registries={"CustomOp.register": "custom_ops"},
-    string_registries=(
-        "_TEXT_GENERATION_MODELS",
-        "_EMBEDDING_MODELS",
-        "_LATE_INTERACTION_MODELS",
-        "_REWARD_MODELS",
-        "_TOKEN_CLASSIFICATION_MODELS",
-        "_SEQUENCE_CLASSIFICATION_MODELS",
-        "_MULTIMODAL_MODELS",
-        "_SPECULATIVE_DECODING_MODELS",
-        "_TRANSFORMERS_SUPPORTED_MODELS",
-        "_TRANSFORMERS_BACKEND_MODELS",
-    ),
-    registration_calls=(
-        CallRegistration(
-            "direct_register_custom_op", "op_name", "op_func", "custom_ops"
-        ),
-        CallRegistration("direct_register_custom_op", 0, 1, "custom_ops"),
-    ),
-    string_dispatchers={"collective_rpc": 0},
-)
-
-TORCHVISION_MANIFEST = ConventionManifest(
-    package="torchvision",
-    cpp_search_dirs=("torchvision/csrc",),
-    python_search_dirs=("torchvision",),
-    python_package_roots=("torchvision",),
-    test_search_dirs=("test",),
-    exclude_patterns=tuple(EXCLUDE_PATTERNS),
-    cpp_macro_aliases={
-        "STABLE_TORCH_LIBRARY_FRAGMENT": "TORCH_LIBRARY_FRAGMENT",
-        "STABLE_TORCH_LIBRARY_IMPL": "TORCH_LIBRARY_IMPL",
-    },
-)
+VLLM_MANIFEST = load_builtin_manifest("vllm")
+TORCHVISION_MANIFEST = load_builtin_manifest("torchvision")
 
 _REGISTRY: dict[str, Harness] = {}
 _ACTIVE = "pytorch"
@@ -171,6 +254,11 @@ _ACTIVE = "pytorch"
 def register_harness(name: str, harness: Harness) -> None:
     """Register a harness under a package name."""
     _REGISTRY[name] = harness
+
+
+def list_harnesses() -> list[str]:
+    """Names of all registered harnesses."""
+    return sorted(_REGISTRY)
 
 
 def get_harness(name: str | None = None) -> Harness:
@@ -196,6 +284,22 @@ def active_harness_name() -> str:
 
 def active_manifest() -> ConventionManifest:
     return get_harness().manifest
+
+
+def activate_repo_manifest(source: str | Path) -> str | None:
+    """Register and activate `<source>/.torchtalk.toml` if present.
+
+    Returns the harness name activated, or None when the checkout has no
+    repo-local manifest. Re-registering an existing name replaces it, so a
+    checkout can override a shipped profile of the same package.
+    """
+    path = find_repo_manifest(source)
+    if path is None:
+        return None
+    manifest = load_manifest(path)
+    register_harness(manifest.package, ManifestHarness(manifest))
+    set_active_harness(manifest.package)
+    return manifest.package
 
 
 register_harness("pytorch", PYTORCH_HARNESS)

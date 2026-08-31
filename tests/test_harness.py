@@ -93,3 +93,101 @@ class TestManifestOpFields:
         assert m.decomp_alias_paths == ()
         assert m.dispatch_stub_root == ""
         assert m.cpp_call_wrappers == ()
+
+
+class TestTomlManifests:
+    """PR-3: manifests load from TOML with extends/depends_on/expected_minimums."""
+
+    def test_builtins_registered_from_toml(self):
+        assert harness_mod.get_harness("pytorch").manifest is PYTORCH_MANIFEST
+        assert PYTORCH_MANIFEST.package == "pytorch"
+        assert harness_mod.get_harness("vllm").manifest.package == "vllm"
+        assert harness_mod.get_harness("torchvision").manifest.package == "torchvision"
+        assert "torch-extension" in harness_mod.builtin_manifest_names()
+        assert "torch-extension" not in harness_mod.list_harnesses()
+
+    def test_pytorch_toml_matches_patterns_constants(self):
+        from torchtalk.analysis import patterns as P
+
+        m = PYTORCH_MANIFEST
+        assert m.cpp_search_dirs == tuple(P.CPP_SEARCH_DIRS)
+        assert m.python_search_dirs == tuple(P.PYTHON_SEARCH_DIRS)
+        assert m.test_search_dirs == tuple(P.TEST_SEARCH_DIRS)
+        assert m.test_content_patterns == tuple(P.TEST_CONTENT_PATTERNS)
+        assert m.test_utility_modules == tuple(P.TEST_UTILITY_MODULES)
+        assert m.exclude_patterns == tuple(P.EXCLUDE_PATTERNS)
+        assert m.registration_macros == tuple(P.CPP_BINDING_PATTERNS)
+
+    def test_pytorch_expected_minimums(self):
+        assert PYTORCH_MANIFEST.expected_minimums["native_functions"] == 2400
+        assert PYTORCH_MANIFEST.depends_on == ()
+
+    def test_vllm_extends_torch_extension(self):
+        m = harness_mod.VLLM_MANIFEST
+        base = harness_mod.load_builtin_manifest("torch-extension")
+        assert m.depends_on == ("pytorch",)
+        assert m.cpp_search_dirs == base.cpp_search_dirs == ("csrc",)
+        assert m.cpp_call_wrappers == base.cpp_call_wrappers
+        assert m.op_namespaces == {"torch": "aten"}
+        # child replaces, not appends
+        expected = ("/tests/", "/benchmarks/", "/examples/", "__pycache__")
+        assert m.exclude_patterns == expected
+        assert m.cpp_macro_aliases["TORCH_LIBRARY_EXPAND"] == "TORCH_LIBRARY"
+        assert m.registration_calls[0].call == "direct_register_custom_op"
+        assert m.registration_calls[1].key_arg == 0
+        assert m.string_dispatchers == {"collective_rpc": 0}
+        assert len(m.string_registries) == 10
+
+    def test_extends_replaces_not_appends(self, tmp_path):
+        child = tmp_path / "child.toml"
+        child.write_text(
+            '[package]\nname = "x"\nextends = "torch-extension"\n'
+            '[paths]\nexclude_patterns = ["/only/"]\n'
+            "[cpp]\ncall_wrappers = []\n"
+            "[expected_minimums]\nbindings = 5\n"
+        )
+        m = harness_mod.load_manifest(child)
+        assert m.exclude_patterns == ("/only/",)
+        assert m.cpp_call_wrappers == ()
+        assert m.depends_on == ("pytorch",)
+        assert m.expected_minimums == {"bindings": 5}
+
+    def test_extends_relative_path_and_cycle(self, tmp_path):
+        (tmp_path / "base.toml").write_text(
+            '[package]\nname = "b"\n[paths]\ncpp_search_dirs = ["src"]\n'
+        )
+        (tmp_path / "leaf.toml").write_text(
+            '[package]\nname = "leaf"\nextends = "base.toml"\n'
+        )
+        leaf = harness_mod.load_manifest(tmp_path / "leaf.toml")
+        assert leaf.cpp_search_dirs == ("src",)
+        (tmp_path / "a.toml").write_text('[package]\nname = "a"\nextends = "b.toml"\n')
+        (tmp_path / "b.toml").write_text('[package]\nname = "b"\nextends = "a.toml"\n')
+        with pytest.raises(harness_mod.ManifestError, match="circular"):
+            harness_mod.load_manifest(tmp_path / "a.toml")
+
+    def test_unknown_key_and_missing_required(self, tmp_path):
+        bad = tmp_path / "bad.toml"
+        bad.write_text('[package]\nname = "x"\n[paths]\nbogus = 1\n')
+        with pytest.raises(harness_mod.ManifestError, match="unknown key"):
+            harness_mod.load_manifest(bad)
+        bad.write_text('[package]\nname = "x"\n')
+        with pytest.raises(harness_mod.ManifestError, match="cpp_search_dirs"):
+            harness_mod.load_manifest(bad)
+        with pytest.raises(harness_mod.ManifestError, match="not found"):
+            harness_mod.load_manifest(tmp_path / "nope.toml")
+
+    def test_repo_local_manifest_activates(self, tmp_path):
+        prev = harness_mod.active_harness_name()
+        (tmp_path / ".torchtalk.toml").write_text(
+            '[package]\nname = "myext"\nextends = "torch-extension"\n'
+        )
+        try:
+            assert harness_mod.find_repo_manifest(tmp_path) is not None
+            assert harness_mod.activate_repo_manifest(tmp_path) == "myext"
+            assert harness_mod.active_harness_name() == "myext"
+            assert harness_mod.active_manifest().cpp_search_dirs == ("csrc",)
+        finally:
+            harness_mod.set_active_harness(prev)
+            harness_mod._REGISTRY.pop("myext", None)
+        assert harness_mod.activate_repo_manifest(tmp_path / "empty") is None
