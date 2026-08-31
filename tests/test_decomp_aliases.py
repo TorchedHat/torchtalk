@@ -160,3 +160,16 @@ class TestExtractDecompAliases:
         )
         out = extract_decomp_aliases(tmp_path)
         assert out["conv_op"] == ["conv_decomp"]
+
+
+def test_custom_paths_and_namespace(tmp_path):
+    f = tmp_path / "pkg" / "decomps.py"
+    f.parent.mkdir(parents=True)
+    f.write_text(
+        "@register_decomposition(myops.foo)\ndef foo_decomp(x):\n    return x\n"
+    )
+    assert extract_decomp_aliases(tmp_path) == {}
+    aliases = extract_decomp_aliases(
+        tmp_path, paths=("pkg/decomps.py",), namespaces=("myops",)
+    )
+    assert aliases == {"foo": ["foo_decomp"], "foo_decomp": ["foo"]}

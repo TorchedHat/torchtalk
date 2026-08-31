@@ -77,3 +77,19 @@ class TestCachePathsHarnessQualified:
         assert all("pytorch" in p.name for p in pytorch_paths.values())
         for key, path in pytorch_paths.items():
             assert path != vllm_paths[key]
+
+
+class TestManifestOpFields:
+    def test_pytorch_defaults(self):
+        m = PYTORCH_MANIFEST
+        assert m.op_namespaces == {"torch": "aten"}
+        assert "torch/_decomp/decompositions.py" in m.decomp_alias_paths
+        assert m.dispatch_stub_root == "aten/src/ATen/native"
+        assert "TORCH_BOX" in m.cpp_call_wrappers
+
+    def test_empty_by_default(self):
+        m = ConventionManifest(package="x", cpp_search_dirs=("csrc",))
+        assert m.op_namespaces == {}
+        assert m.decomp_alias_paths == ()
+        assert m.dispatch_stub_root == ""
+        assert m.cpp_call_wrappers == ()

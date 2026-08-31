@@ -443,6 +443,7 @@ def _build_index(
         search_dirs=manifest.cpp_search_dirs,
         exclude_patterns=manifest.exclude_patterns,
         registration_macros=manifest.registration_macros,
+        call_wrappers=manifest.cpp_call_wrappers or None,
     )
     graph = detector.detect_bindings_in_directory(source)
 
@@ -635,7 +636,9 @@ def _init_python_modules(source: str):
         from .analysis.alias_map import build_function_alias_map
         from .analysis.python_analyzer import PythonAnalyzer, build_module_index
 
-        _state.alias_map = build_function_alias_map(_state.native_functions)
+        _state.alias_map = build_function_alias_map(
+            _state.native_functions, active_manifest().op_namespaces or None
+        )
         log.info(f"Alias map: {len(_state.alias_map)} torch.<op> aliases")
 
         manifest = active_manifest()
@@ -777,7 +780,12 @@ def _init_decomp_aliases(source: str):
     """Build aten ↔ python-fn alias map from decomp/refs decorators."""
     from .analysis.decomp_aliases import extract_decomp_aliases
 
-    _state.decomp_alias_map = extract_decomp_aliases(Path(source))
+    manifest = active_manifest()
+    _state.decomp_alias_map = extract_decomp_aliases(
+        Path(source),
+        paths=manifest.decomp_alias_paths,
+        namespaces=tuple(manifest.op_namespaces.values()),
+    )
     log.info(f"Decomp aliases: {len(_state.decomp_alias_map)} entries")
 
 
@@ -794,7 +802,9 @@ def _init_dispatch_stubs(source: str):
     from .analysis.dispatch_stub_map import extract_kernel_impl_to_op
 
     _state.kernel_impl_to_op = extract_kernel_impl_to_op(
-        Path(source), _state.native_functions
+        Path(source),
+        _state.native_functions,
+        stub_root=active_manifest().dispatch_stub_root,
     )
     log.info(f"Dispatch stub map: {len(_state.kernel_impl_to_op)} kernel impls")
 

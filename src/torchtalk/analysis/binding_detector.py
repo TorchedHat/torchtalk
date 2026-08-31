@@ -94,7 +94,8 @@ _CPP_CONTROL_KEYWORDS = {
     "sizeof",
 }
 
-_IMPL_WRAPPERS = ("TORCH_FN_BOXED", "TORCH_FN")
+# PyTorch defaults; overridden by `ConventionManifest.cpp_call_wrappers`.
+_IMPL_WRAPPERS = ("TORCH_FN_BOXED", "TORCH_FN", "TORCH_BOX", "TORCH_SELECTIVE_FN")
 _NO_IMPL_MARKERS = ("makeFallthrough", "makeNamedNotSupported")
 
 # `__global__` kernel definition; attributes may flank the keyword.
@@ -133,7 +134,9 @@ _DEVICE_PATTERN = re.compile(
 )
 
 
-def _clean_impl_target(raw: str, op_name: str = "") -> str:
+def _clean_impl_target(
+    raw: str, op_name: str = "", wrappers: tuple[str, ...] = _IMPL_WRAPPERS
+) -> str:
     """Extract a usable cpp_name from `m.impl("op", <raw>)`.
 
     Returns `op_name` as a fallback when `raw` is a no-real-impl marker
@@ -156,7 +159,8 @@ def _clean_impl_target(raw: str, op_name: str = "") -> str:
             return m.group(1).rsplit("::", 1)[-1]
         return op_name
 
-    for wrapper in _IMPL_WRAPPERS:
+    # Longest names first so `TORCH_FN_BOXED(` is not mistaken for `TORCH_FN(`.
+    for wrapper in sorted(wrappers, key=len, reverse=True):
         prefix = wrapper + "("
         if raw.startswith(prefix):
             raw = raw[len(prefix) :]
@@ -181,6 +185,7 @@ class BindingDetector:
         search_dirs: tuple[str, ...] | None = None,
         exclude_patterns: tuple[str, ...] | None = None,
         registration_macros: tuple[str, ...] | None = None,
+        call_wrappers: tuple[str, ...] | None = None,
     ):
         from tree_sitter_language_pack import get_parser
 
@@ -192,6 +197,7 @@ class BindingDetector:
         # Empty tuples fall back to the PyTorch defaults in patterns.py.
         self.exclude_patterns = exclude_patterns or ()
         self.registration_macros = registration_macros or ()
+        self.call_wrappers = call_wrappers or _IMPL_WRAPPERS
         log.info("BindingDetector initialized with C++/CUDA support")
 
     def _preprocess(self, content: str) -> str:
@@ -555,7 +561,9 @@ class BindingDetector:
             # Strip overload suffix (`abs.out` → `abs`) so cpp_name is searchable
             # via the bare op name when raw target is a no-impl marker.
             bare_op = op_name.split(".", 1)[0]
-            cpp_func = _clean_impl_target(match.group(2), op_name=bare_op)
+            cpp_func = _clean_impl_target(
+                match.group(2), op_name=bare_op, wrappers=self.call_wrappers
+            )
             if not cpp_func:
                 continue
             line_offset = block_content[: match.start()].count("\n")

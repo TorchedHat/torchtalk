@@ -34,8 +34,14 @@ def _exposed_name(base: str, strip: str) -> str:
     return base
 
 
-def build_function_alias_map(native_functions: dict[str, dict]) -> dict[str, str]:
+def build_function_alias_map(
+    native_functions: dict[str, dict],
+    op_namespaces: dict[str, str] | None = None,
+) -> dict[str, str]:
     """Map Python `torch.<...>` call forms to canonical `aten::<base>` symbols.
+
+    `op_namespaces` maps Python prefix → C++ namespace (manifest field);
+    defaults to `{"torch": "aten"}`. Every prefix pair emits its own entries.
 
     Default-namespace ops (no `python_module:`) emit `torch.<base>`. Ops with
     `python_module:` in `_NAMESPACE_RULES` emit a namespaced form (e.g.
@@ -44,6 +50,7 @@ def build_function_alias_map(native_functions: dict[str, dict]) -> dict[str, str
     """
     aliases: dict[str, str] = {}
     seen: set[str] = set()
+    namespaces = op_namespaces or {"torch": "aten"}
     for entry in native_functions.values():
         base = entry.get("base_name")
         if not base or base in seen:
@@ -60,7 +67,8 @@ def build_function_alias_map(native_functions: dict[str, dict]) -> dict[str, str
 
         pm = entry.get("python_module") or ""
         if not pm:
-            aliases[f"torch.{base}"] = f"aten::{base}"
+            for py, cpp in namespaces.items():
+                aliases[f"{py}.{base}"] = f"{cpp}::{base}"
             continue
 
         rule = _NAMESPACE_RULES.get(pm)
@@ -69,5 +77,6 @@ def build_function_alias_map(native_functions: dict[str, dict]) -> dict[str, str
         display, strip = rule
         exposed = _exposed_name(base, strip)
         if exposed:
-            aliases[f"torch.{display}.{exposed}"] = f"aten::{base}"
+            for py, cpp in namespaces.items():
+                aliases[f"{py}.{display}.{exposed}"] = f"{cpp}::{base}"
     return aliases

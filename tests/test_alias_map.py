@@ -202,3 +202,10 @@ class TestBuildFunctionAliasMap:
             }
         }
         assert build_function_alias_map(native) == {"torch.x": "aten::x"}
+
+
+def test_custom_op_namespaces():
+    nf = {"add": {"base_name": "add", "variants": "function", "python_module": ""}}
+    assert build_function_alias_map(nf, {"vllm": "_C"}) == {"vllm.add": "_C::add"}
+    both = build_function_alias_map(nf, {"torch": "aten", "vllm": "_C"})
+    assert both == {"torch.add": "aten::add", "vllm.add": "_C::add"}
