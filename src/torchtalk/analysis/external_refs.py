@@ -20,6 +20,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import Any
 
 from torchtalk.harness import (
@@ -91,6 +92,7 @@ def collect_import_refs(
     modules: dict[str, Any],
     manifest: ConventionManifest,
     targets: dict[str, tuple[str, ...]] | None = None,
+    source: str | None = None,
 ) -> list[ExternalRef]:
     """Module-level import edges from `modules` into `depends_on` packages.
 
@@ -104,6 +106,7 @@ def collect_import_refs(
     if not targets:
         return []
     own_roots = set(manifest.python_package_roots)
+    root = Path(source).resolve() if source else None
     refs: list[ExternalRef] = []
     for mod_name in sorted(modules):
         mod = modules[mod_name]
@@ -124,12 +127,22 @@ def collect_import_refs(
                     from_symbol=mod_name,
                     to_name=target,
                     kind="import",
-                    evidence=f"{imp.file_path}:{imp.line_number}",
+                    evidence=f"{_rel(imp.file_path, root)}:{imp.line_number}",
                     to_package=pkg,
                 )
             )
     refs.sort(key=lambda r: (r.from_symbol, r.evidence, r.to_name))
     return refs
+
+
+def _rel(path: str, root: Path | None) -> str:
+    """Evidence paths are repo-relative so they survive moving the checkout."""
+    if root is None:
+        return path
+    try:
+        return Path(path).resolve().relative_to(root).as_posix()
+    except ValueError:
+        return path
 
 
 def refs_by_target(refs: Iterable[ExternalRef]) -> dict[str, list[ExternalRef]]:

@@ -133,7 +133,7 @@ class TestImplRegex:
 class TestKernelPattern:
     def _name(self, code: str) -> str | None:
         m = _KERNEL_PATTERN.search(code)
-        return m.group(1) if m else None
+        return m.group("name") if m else None
 
     def test_simple_global_kernel(self):
         assert self._name("__global__ void simpleKernel(int* a) {") == "simpleKernel"
@@ -206,10 +206,35 @@ class TestKernelPattern:
         )
         assert self._name(code) == "hadamard_transform_kernel"
 
-    def test_launch_bounds_is_never_a_kernel_name(self):
-        code = "__global__ void __launch_bounds__(512) real_name(int* a) {"
-        names = [m.group(1) for m in _KERNEL_PATTERN.finditer(code)]
-        assert names == ["real_name"]
+    def test_double_paren_attribute(self):
+        code = (
+            "template <typename scalar_t, int THRDS>\n"
+            "__global__ void __launch_bounds__(WvPrGrp * THRDS)\n"
+            "__attribute__((amdgpu_waves_per_eu(1, 1)))\n"
+            "wvSplitK_hf_sml_(const int K, const scalar_t* B) {"
+        )
+        assert self._name(code) == "wvSplitK_hf_sml_"
+
+    def test_line_number_anchors_on_global_keyword(self):
+        # Attributes preceding `__global__` on earlier lines must not shift the
+        # reported line; the kernel starts where `template`/`__global__` is.
+        code = (
+            "int x;\n"
+            "\n"
+            "static __global__ void __launch_bounds__(256)\n"
+            "line_kernel(int* a) {}\n"
+            "\n"
+            "template <typename T>\n"
+            "__global__ void other_kernel(T* a) {}\n"
+        )
+        lines = {
+            m.group("name"): code[
+                : m.start("tmpl") if m.group("tmpl") else m.start("kw")
+            ].count("\n")
+            + 1
+            for m in _KERNEL_PATTERN.finditer(code)
+        }
+        assert lines == {"line_kernel": 3, "other_kernel": 6}
 
 
 class TestDevicePattern:

@@ -76,13 +76,13 @@ native_functions_yaml = "aten/src/ATen/native/native_functions.yaml"
 derivatives_yaml = "tools/autograd/derivatives.yaml"
 decomp_alias_paths = [
     "torch/_decomp/decompositions.py",
+    "torch/_decomp/decompositions_for_jvp.py",
     "torch/_refs/__init__.py",
-    "torch/_refs/nn/functional/__init__.py",
-    "torch/_refs/linalg/__init__.py",
-    "torch/_refs/special/__init__.py",
+    "torch/_refs/_conversions.py",
     "torch/_refs/fft.py",
-    "torch/_prims/__init__.py",
-    "torch/_decomp/decompositions_for_rng.py",
+    "torch/_refs/linalg/__init__.py",
+    "torch/_refs/nn/functional/__init__.py",
+    "torch/_refs/special/__init__.py",
 ]
 dispatch_stub_root = "aten/src/ATen/native"
 
@@ -99,10 +99,10 @@ registration_macros = [
     "RegisterOperators",
 ]
 call_wrappers = [
+    "TORCH_FN_BOXED",
+    "TORCH_FN",
     "TORCH_BOX",
     "TORCH_SELECTIVE_FN",
-    "TORCH_FN",
-    "TORCH_SELECTIVE_SCHEMA",
 ]
 
 [python.decorator_registries]

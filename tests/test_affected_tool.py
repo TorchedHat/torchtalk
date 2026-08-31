@@ -50,7 +50,7 @@ def affected_state(mock_state):
     s.opinfo_alias_map = {}
     s.opinfo_test_files = set()
     s.test_attr_index = {}
-    s.pytorch_source = "/fake"
+    s.source = "/fake"
     indexer._build_indexes(s)
     return s
 

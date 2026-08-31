@@ -7,7 +7,7 @@ from ..indexer import _state
 
 
 def _rel_path(path: str) -> str:
-    return relative_path(path, _state.pytorch_source)
+    return relative_path(path, _state.source)
 
 
 def _with_note(text: str) -> str:

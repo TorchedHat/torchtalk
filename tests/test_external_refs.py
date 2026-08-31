@@ -52,13 +52,13 @@ class TestCollectImportRefs:
                 [
                     ("torch.nn", "torch.nn"),
                     ("torch", "nn"),
-                    ("torch.nn.functional", "F"),
+                    ("torch.nn.functional", "torch.nn.functional"),
                 ],
             )
         }
         refs = collect_import_refs(mods, _manifest(), TARGETS)
         names = [r.to_name for r in refs]
-        assert names == ["torch.nn", "torch.nn", "torch.nn.functional.F"]
+        assert names == ["torch.nn", "torch.nn", "torch.nn.functional"]
         assert all(r.kind == "import" for r in refs)
         assert all(r.to_package == "pytorch" for r in refs)
         assert all(r.from_symbol == "vllm.model_executor.layers.linear" for r in refs)

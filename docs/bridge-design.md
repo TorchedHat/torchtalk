@@ -34,7 +34,7 @@ signal), not dropped.
 
 | kind          | collected from                                   | resolver list (manifest)      | status |
 |---------------|--------------------------------------------------|-------------------------------|--------|
-| `import`      | module-level `import` / `from ... import`         | `python_package_roots` of dep | PR-4   |
+| `import`      | top-level and nested `import` / `from ... import` statements         | `python_package_roots` of dep | PR-4   |
 | `op`          | `torch.ops.aten.X`, `torch.X` calls               | `[python] op_namespaces`      | C2     |
 | `cpp`         | `at::X`, `c10::X` in C++ sources                  | `[bridge] cpp_namespaces`     | C2     |
 | `base_class`  | `class Foo(torch.nn.Module)`                      | `[bridge] base_class_namespaces` | C2  |
@@ -88,8 +88,9 @@ them via `extends`.
 
 Python analysis is not cached in the JSON index (it runs at load), so
 external refs live in `ServerState.external_refs` as plain dicts and are
-recomputed per load. They are exposed through `get_stats()` as
-`external_refs`. The snapshot schema (v3) is untouched; resolved bridge
+recomputed per load. The count is reported as `external_refs` in the
+stats returned by `build_index` / `update_index` and in `torchtalk index
+build` output. The snapshot schema (v3) is untouched; resolved bridge
 results get their own cache and a v4 schema in C2.
 
 ## Roadmap

@@ -7,6 +7,7 @@ from different manifests merge via package-qualified symbol IDs (symbols.py).
 
 from __future__ import annotations
 
+import re
 import sys
 from dataclasses import dataclass, field, fields
 from pathlib import Path
@@ -127,6 +128,8 @@ _SECTION_FIELDS: dict[str, dict[str, str]] = {
     },
 }
 _FIELD_TYPES = {f.name: f.type for f in fields(ConventionManifest)}
+_PACKAGE_KEYS = {"name", "extends", "depends_on"}
+_PACKAGE_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 
 class ManifestError(ValueError):
@@ -137,12 +140,25 @@ def _flatten(data: dict[str, Any], origin: str) -> dict[str, Any]:
     """Map TOML sections onto ConventionManifest field names."""
     out: dict[str, Any] = {}
     pkg = data.get("package", {})
+    if not isinstance(pkg, dict):
+        raise ManifestError(f"{origin}: [package] must be a table")
+    for key in pkg:
+        if key not in _PACKAGE_KEYS:
+            raise ManifestError(f"{origin}: unknown key [package] {key}")
     if "name" in pkg:
-        out["package"] = pkg["name"]
+        name = pkg["name"]
+        if not isinstance(name, str) or not _PACKAGE_NAME_RE.match(name):
+            raise ManifestError(
+                f"{origin}: [package] name must match [A-Za-z0-9_.-]+, got {name!r}"
+            )
+        out["package"] = name
     if "depends_on" in pkg:
         out["depends_on"] = pkg["depends_on"]
     for section, mapping in _SECTION_FIELDS.items():
-        for key, value in data.get(section, {}).items():
+        table = data.get(section, {})
+        if not isinstance(table, dict):
+            raise ManifestError(f"{origin}: [{section}] must be a table")
+        for key, value in table.items():
             if key not in mapping:
                 raise ManifestError(f"{origin}: unknown key [{section}] {key}")
             out[mapping[key]] = value
@@ -155,18 +171,57 @@ def _flatten(data: dict[str, Any], origin: str) -> dict[str, Any]:
     return out
 
 
-def _coerce(name: str, value: Any) -> Any:
-    """Convert TOML values to the field's dataclass type (lists → tuples)."""
-    if name == "registration_calls":
-        return tuple(
-            CallRegistration(
-                r["call"], r["key_arg"], r["target_arg"], r.get("registry", "")
-            )
-            for r in value
-        )
+def _coerce(name: str, value: Any, origin: str = "<dict>") -> Any:
+    """Convert TOML values to the field's dataclass type (lists → tuples).
+
+    Raises ManifestError when the TOML value has the wrong shape, so a typo
+    like `cpp_search_dirs = "csrc"` fails at load time rather than iterating
+    over characters deep inside the indexer.
+    """
     ftype = str(_FIELD_TYPES[name])
-    if ftype.startswith("tuple") and isinstance(value, list):
+    if name == "registration_calls":
+        if not isinstance(value, list) or not all(isinstance(r, dict) for r in value):
+            raise ManifestError(
+                f"{origin}: registration_calls must be a list of tables"
+            )
+        out = []
+        for r in value:
+            missing = [k for k in ("call", "key_arg", "target_arg") if k not in r]
+            if missing:
+                raise ManifestError(
+                    f"{origin}: registration_calls entry missing {missing}: {r}"
+                )
+            out.append(
+                CallRegistration(
+                    r["call"], r["key_arg"], r["target_arg"], r.get("registry", "")
+                )
+            )
+        return tuple(out)
+    if name == "expected_minimums":
+        if not isinstance(value, dict) or not all(
+            isinstance(v, int) and not isinstance(v, bool) for v in value.values()
+        ):
+            raise ManifestError(
+                f"{origin}: [expected_minimums] values must be integers"
+            )
+        return dict(value)
+    if ftype.startswith("tuple"):
+        if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+            raise ManifestError(f"{origin}: {name} must be a list of strings")
         return tuple(value)
+    if ftype == "str":
+        if not isinstance(value, str):
+            raise ManifestError(f"{origin}: {name} must be a string")
+        return value
+    if ftype.startswith("dict"):
+        if not isinstance(value, dict) or not all(
+            isinstance(v, (str, int)) and not isinstance(v, bool)
+            for v in value.values()
+        ):
+            raise ManifestError(
+                f"{origin}: {name} must be a table of strings or integers"
+            )
+        return dict(value)
     return value
 
 
@@ -186,7 +241,7 @@ def manifest_from_dict(
     if base is not None:
         values.update({f.name: getattr(base, f.name) for f in fields(base)})
     for name, raw in _flatten(data, origin).items():
-        values[name] = _coerce(name, raw)
+        values[name] = _coerce(name, raw, origin)
     if "package" not in values:
         raise ManifestError(f"{origin}: [package] name is required")
     if "cpp_search_dirs" not in values:
@@ -196,7 +251,10 @@ def manifest_from_dict(
 
 def _read_toml(path: Path) -> dict[str, Any]:
     with open(path, "rb") as f:
-        return tomllib.load(f)
+        try:
+            return tomllib.load(f)
+        except tomllib.TOMLDecodeError as e:
+            raise ManifestError(f"{path}: {e}") from e
 
 
 def load_manifest(path: str | Path, _seen: tuple[str, ...] = ()) -> ConventionManifest:
@@ -218,7 +276,10 @@ def load_manifest(path: str | Path, _seen: tuple[str, ...] = ()) -> ConventionMa
         builtin = MANIFESTS_DIR / f"{parent}.toml"
         candidate = builtin if builtin.exists() else path.parent / parent
         if not candidate.exists():
-            raise ManifestError(f"{origin}: extends {parent!r} not found")
+            raise ManifestError(
+                f"{origin}: extends {parent!r} not found "
+                f"(built-ins: {builtin_manifest_names()})"
+            )
         base = load_manifest(candidate, (*_seen, origin))
     return manifest_from_dict(data, base=base, origin=origin)
 
@@ -269,19 +330,36 @@ def list_harnesses() -> list[str]:
     return sorted(_REGISTRY)
 
 
+def _ensure_registered(name: str) -> None:
+    """Lazily register a shipped `manifests/<name>.toml` on first use.
+
+    Lets `--harness myfw` work for a profile that exists only as a TOML file
+    (e.g. one dropped into `manifests/` by a contributor) without touching
+    the hardcoded registrations below. Raises KeyError when no such profile
+    exists; a malformed profile raises ManifestError.
+    """
+    if name in _REGISTRY:
+        return
+    path = MANIFESTS_DIR / f"{name}.toml"
+    if not path.is_file():
+        raise KeyError(
+            f"Unknown harness {name!r}. Registered: {sorted(_REGISTRY)}; "
+            f"built-in manifests: {builtin_manifest_names()}"
+        )
+    register_harness(name, ManifestHarness(load_manifest(path)))
+
+
 def get_harness(name: str | None = None) -> Harness:
     """Return the named harness, or the active one when no name is given."""
     key = name or _ACTIVE
-    if key not in _REGISTRY:
-        raise KeyError(f"Unknown harness {key!r}. Registered: {sorted(_REGISTRY)}")
+    _ensure_registered(key)
     return _REGISTRY[key]
 
 
 def set_active_harness(name: str) -> None:
     """Select the harness used when get_harness() is called without a name."""
     global _ACTIVE
-    if name not in _REGISTRY:
-        raise KeyError(f"Unknown harness {name!r}. Registered: {sorted(_REGISTRY)}")
+    _ensure_registered(name)
     _ACTIVE = name
 
 

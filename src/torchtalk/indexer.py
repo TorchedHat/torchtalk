@@ -73,7 +73,7 @@ class ServerState:
     kernel_impl_to_op: dict[str, str] = field(default_factory=dict)
     dispatch_to_op: dict[str, str] = field(default_factory=dict)
 
-    pytorch_source: str | None = None
+    source: str | None = None
     package: PackageIdentity | None = None
     cpp_extractor: Any = None
     cpp_building: bool = False
@@ -284,9 +284,7 @@ def _impls_from_extractor(target: str) -> list[dict]:
     extractor = _state.cpp_extractor
     if not extractor:
         return []
-    src_prefix = (
-        (_state.pytorch_source.rstrip("/") + "/") if _state.pytorch_source else None
-    )
+    src_prefix = (_state.source.rstrip("/") + "/") if _state.source else None
     out: list[dict] = []
     for qname, (file, line) in extractor.function_locations.items():
         if qname.rsplit("::", 1)[-1] != target:
@@ -596,8 +594,8 @@ def _cpp_status() -> str:
         return "C++ call graph building in background (~1-2 min). Try again shortly."
 
     if not _state.cpp_extractor:
-        if _state.pytorch_source:
-            src = Path(_state.pytorch_source)
+        if _state.source:
+            src = Path(_state.source)
             if (
                 not (src / "compile_commands.json").exists()
                 and not (src / "build/compile_commands.json").exists()
@@ -606,7 +604,7 @@ def _cpp_status() -> str:
                     "C++ call graph unavailable - "
                     "`compile_commands.json` not found.\n\n"
                     "**To enable:** Build PyTorch once:\n"
-                    f"```\ncd {_state.pytorch_source}\npython setup.py develop\n```"
+                    f"```\ncd {_state.source}\npython setup.py develop\n```"
                 )
         return "C++ call graph unavailable. Install libclang or build PyTorch."
 
@@ -627,12 +625,13 @@ def _ensure_loaded(component: str = "bindings"):
     }
     loaded, msg = checks.get(component, (True, ""))
     if not loaded:
-        raise RuntimeError(f"{msg}. Start server with --pytorch-source.")
+        raise RuntimeError(f"{msg}. Start server with --source.")
 
 
 def _init_python_modules(source: str):
     """Initialize Python module analysis using configured search directories."""
     global _state
+    _state.external_refs = []
 
     try:
         from .analysis.alias_map import build_function_alias_map
@@ -673,17 +672,17 @@ def _init_python_modules(source: str):
                 f"{len(_state.nn_modules)} nn.Module classes"
             )
             _init_py_cpp_edges(source)
-            _init_external_refs(all_modules, manifest)
+            _init_external_refs(all_modules, manifest, source)
     except Exception as e:
         log.warning(f"Failed to analyze Python modules: {e}")
 
 
-def _init_external_refs(modules: dict[str, Any], manifest) -> None:
+def _init_external_refs(modules: dict[str, Any], manifest, source: str) -> None:
     """Collect import edges into `depends_on` packages (PR-4 bridge smoke test)."""
     from torchtalk.analysis.external_refs import collect_import_refs
 
     try:
-        refs = collect_import_refs(modules, manifest)
+        refs = collect_import_refs(modules, manifest, source=source)
     except Exception as e:  # never block indexing on the bridge
         log.warning(f"External ref collection failed: {e}")
         refs = []
@@ -728,7 +727,7 @@ def _save_py_cpp_edges_cache(path: Path) -> None:
     """Persist the py→cpp edge index to JSON, versioned and fingerprinted."""
     payload = {
         "version": _PY_CPP_EDGES_CACHE_VERSION,
-        "fingerprint": _source_fingerprint(_state.pytorch_source or ""),
+        "fingerprint": _source_fingerprint(_state.source or ""),
         "edges": _state.py_to_cpp_edges,
     }
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -786,7 +785,7 @@ def _init_from_source(source: str):
         _state.registrations = data.get("registrations", {})
         _build_indexes(_state)
 
-    _state.pytorch_source = str(src)
+    _state.source = str(src)
     _state.package = detect_package_identity(str(src), active_manifest().package)
     _init_decomp_aliases(str(src))
     _init_backward_bridge()
@@ -849,7 +848,7 @@ def _save_test_infra_cache(path: Path) -> None:
     """Persist test infrastructure state to JSON. Sets become sorted lists."""
     payload = {
         "version": _TEST_INFRA_CACHE_VERSION,
-        "fingerprint": _source_fingerprint(_state.pytorch_source or ""),
+        "fingerprint": _source_fingerprint(_state.source or ""),
         "test_files": _state.test_files,
         "test_classes": _state.test_classes,
         "test_functions": _state.test_functions,
@@ -1245,9 +1244,9 @@ def _parse_opinfo_registry(opinfo_path: str):
         except SyntaxError:
             return
 
-        if _state.pytorch_source:
+        if _state.source:
             try:
-                rel_path = str(path.relative_to(_state.pytorch_source))
+                rel_path = str(path.relative_to(_state.source))
             except ValueError:
                 rel_path = str(path)
         else:
@@ -1617,6 +1616,7 @@ def _update_call_graph(
         return {"skipped": str(e)}
 
     stats["header_affected_tus"] = len(header_affected)
+    stats.setdefault("external_refs", len(_state.external_refs))
     stats["uncovered_headers"] = len(uncovered)
     stats["uncovered_sample"] = sorted(uncovered)[:5]
     stats["on_uncovered"] = on_uncovered

@@ -117,6 +117,12 @@ class TestTomlManifests:
         assert m.test_utility_modules == tuple(P.TEST_UTILITY_MODULES)
         assert m.exclude_patterns == tuple(P.EXCLUDE_PATTERNS)
         assert m.registration_macros == tuple(P.CPP_BINDING_PATTERNS)
+        # Drift guards: the TOML must mirror the detector constants it replaces.
+        from torchtalk.analysis.binding_detector import _IMPL_WRAPPERS
+        from torchtalk.analysis.decomp_aliases import _DECOMP_FILES
+
+        assert m.cpp_call_wrappers == tuple(_IMPL_WRAPPERS)
+        assert m.decomp_alias_paths == tuple(_DECOMP_FILES)
 
     def test_pytorch_expected_minimums(self):
         assert PYTORCH_MANIFEST.expected_minimums["native_functions"] == 2400
@@ -197,6 +203,41 @@ class TestTomlManifests:
             harness_mod.load_manifest(bad)
         with pytest.raises(harness_mod.ManifestError, match="not found"):
             harness_mod.load_manifest(tmp_path / "nope.toml")
+
+    def test_value_type_validation(self, tmp_path):
+        cases = {
+            '[paths]\ncpp_search_dirs = "csrc"': "list of strings",
+            "[expected_minimums]\nbindings = true": "must be integers",
+            '[[cpp.registration_calls]]\ncall = "x"': "registration_calls",
+            "[python.op_namespaces]\nx = true": "table of strings",
+        }
+        for body, msg in cases.items():
+            p = tmp_path / "v.toml"
+            head = '[package]\nname = "v"\n'
+            if not body.startswith("[paths]"):
+                head += '[paths]\ncpp_search_dirs = ["csrc"]\n'
+            p.write_text(f"{head}{body}\n")
+            with pytest.raises(harness_mod.ManifestError, match=msg):
+                harness_mod.load_manifest(p)
+
+    def test_toml_syntax_error_is_manifest_error(self, tmp_path):
+        p = tmp_path / "broken.toml"
+        p.write_text("[package\nname = ")
+        with pytest.raises(harness_mod.ManifestError, match=r"broken\.toml"):
+            harness_mod.load_manifest(p)
+
+    def test_unknown_package_key_and_bad_name(self, tmp_path):
+        p = tmp_path / "k.toml"
+        p.write_text('[package]\nname = "k"\nversion = "1"\n')
+        with pytest.raises(harness_mod.ManifestError, match=r"\[package\] version"):
+            harness_mod.load_manifest(p)
+        p.write_text('[package]\nname = "bad name"\n')
+        with pytest.raises(harness_mod.ManifestError, match="name"):
+            harness_mod.load_manifest(p)
+
+    def test_unknown_harness_error_lists_builtins(self):
+        with pytest.raises(KeyError, match="built-in manifests"):
+            harness_mod.get_harness("definitely-not-a-harness")
 
     def test_repo_local_manifest_activates(self, tmp_path):
         prev = harness_mod.active_harness_name()
