@@ -1,0 +1,119 @@
+# PyTorch (pytorch/pytorch). Lists here mirror torchtalk/analysis/patterns.py;
+# tests/test_harness.py fails if they drift.
+# expected_minimums: min across v2.10-v2.13 sparse-clone results minus 10%.
+
+[package]
+name = "pytorch"
+
+[paths]
+cpp_search_dirs = [
+    "aten/src/ATen/native",
+    "torch/csrc",
+    "c10",
+    "aten/src/ATen/core",
+    "aten/src/ATen/cuda",
+]
+python_search_dirs = [
+    "torch/nn",
+    "torch/optim",
+    "torch/autograd",
+    "torch/jit",
+    "torch/cuda",
+    "torch/backends",
+    "torch/fx",
+    "torch/_dynamo",
+    "torch/_inductor",
+    "torch/_decomp",
+    "torch/ao",
+    "torch/distributed",
+    "torch/export",
+    "torch/_refs",
+    "torch/_prims",
+    "torch/nested",
+    "torch/mps",
+]
+python_package_roots = [
+    "torch",
+]
+test_search_dirs = [
+    "test",
+    "torch/testing",
+    "torch/testing/_internal",
+]
+test_content_patterns = [
+    "TestCase",
+    "pytest",
+    "instantiate_device_type_tests",
+    "OpInfo",
+    "make_tensor",
+    "assert_close",
+    "dtype_test",
+    "gradcheck",
+]
+test_utility_modules = [
+    "torch/testing/_internal/common_utils.py",
+    "torch/testing/_internal/common_device_type.py",
+    "torch/testing/_internal/common_dtype.py",
+    "torch/testing/_internal/common_cuda.py",
+    "torch/testing/_internal/opinfo/core.py",
+    "torch/testing/_internal/opinfo/definitions.py",
+    "torch/testing/_internal/hypothesis_utils.py",
+    "torch/testing/_comparison.py",
+]
+exclude_patterns = [
+    "/test/",
+    "/tests/",
+    "test_",
+    "_test.",
+    "/third_party/",
+    "/generated/",
+    "/build/",
+    "__pycache__",
+    "/benchmarks/",
+    "/examples/",
+]
+native_functions_yaml = "aten/src/ATen/native/native_functions.yaml"
+derivatives_yaml = "tools/autograd/derivatives.yaml"
+decomp_alias_paths = [
+    "torch/_decomp/decompositions.py",
+    "torch/_refs/__init__.py",
+    "torch/_refs/nn/functional/__init__.py",
+    "torch/_refs/linalg/__init__.py",
+    "torch/_refs/special/__init__.py",
+    "torch/_refs/fft.py",
+    "torch/_prims/__init__.py",
+    "torch/_decomp/decompositions_for_rng.py",
+]
+dispatch_stub_root = "aten/src/ATen/native"
+
+[cpp]
+registration_macros = [
+    "TORCH_LIBRARY",
+    "PYBIND11_MODULE",
+    "pybind11",
+    "py::class_<",
+    "m.def(",
+    "__global__",
+    "AT_DISPATCH",
+    "c10::Dispatcher",
+    "RegisterOperators",
+]
+call_wrappers = [
+    "TORCH_BOX",
+    "TORCH_SELECTIVE_FN",
+    "TORCH_FN",
+    "TORCH_SELECTIVE_SCHEMA",
+]
+
+[python.decorator_registries]
+register_decomposition = "decompositions"
+
+[python.op_namespaces]
+torch = "aten"
+
+[expected_minimums]
+native_functions = 2400
+bindings = 2100
+cuda_kernels = 450
+derivatives = 600
+python_modules = 100

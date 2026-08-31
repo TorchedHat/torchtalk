@@ -1,0 +1,23 @@
+# torchvision (pytorch/vision). Delta over torch-extension.
+
+[package]
+name = "torchvision"
+extends = "torch-extension"
+
+[paths]
+cpp_search_dirs = [
+    "torchvision/csrc",
+]
+python_search_dirs = [
+    "torchvision",
+]
+python_package_roots = [
+    "torchvision",
+]
+test_search_dirs = [
+    "test",
+]
+
+[cpp.macro_aliases]
+STABLE_TORCH_LIBRARY_FRAGMENT = "TORCH_LIBRARY_FRAGMENT"
+STABLE_TORCH_LIBRARY_IMPL = "TORCH_LIBRARY_IMPL"

@@ -1,7 +1,8 @@
 """Harness smoke test: validates that a harness config indexes a real repo.
 
 Reads repo/ref/sparse_paths from tests/integration/<target>.yml (single
-source of truth). Thresholds live here since they're smoke-specific.
+source of truth). Thresholds come from `expected_minimums` in the harness
+manifest (src/torchtalk/manifests/<target>.toml).
 
 Usage:
     python scripts/harness_smoke.py --harness pytorch --source /path/to/pytorch
@@ -19,21 +20,12 @@ from pathlib import Path
 
 import yaml
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+from torchtalk.harness import get_harness, list_harnesses
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MANIFESTS_DIR = REPO_ROOT / "tests" / "integration"
 
-SMOKE_THRESHOLDS = {
-    "pytorch": {
-        # Thresholds: min across v2.10-v2.13 sparse-clone results minus
-        # 10% buffer. Absorbs restructures like the v2.13 native_functions
-        # drop (2869->2762) without false alarms.
-        "min_native_functions": 2400,
-        "min_bindings": 2100,
-        "min_cuda_kernels": 450,
-        "min_derivatives": 600,
-        "min_python_modules": 100,
-    },
-}
 
 _STABLE_TAG = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
 
@@ -97,7 +89,9 @@ def sparse_clone(repo_url: str, ref: str, paths: list[str], dest: Path) -> None:
 
 
 def main():
-    targets = sorted(SMOKE_THRESHOLDS.keys())
+    targets = sorted(
+        n for n in list_harnesses() if get_harness(n).manifest.expected_minimums
+    )
     parser = argparse.ArgumentParser(description="Harness smoke test")
     parser.add_argument("--harness", required=True, choices=targets)
     group = parser.add_mutually_exclusive_group(required=True)
@@ -119,10 +113,10 @@ def main():
     else:
         stats = _run_index(args.harness, args.source)
 
-    thresholds = SMOKE_THRESHOLDS[args.harness]
+    thresholds = get_harness(args.harness).manifest.expected_minimums
     failures = []
     for key, threshold in thresholds.items():
-        field = key.removeprefix("min_")
+        field = key
         actual = stats.get(field, 0)
         print(f"  {field}: {actual} (threshold: >= {threshold})")
         if actual < threshold:

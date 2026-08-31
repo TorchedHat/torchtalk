@@ -219,6 +219,21 @@ def cmd_mcp_serve(args):
     return 0
 
 
+def _apply_repo_manifest(source: str, explicit_harness: str | None) -> None:
+    """Prefer a `.torchtalk.toml` shipped in the checkout unless --harness was given."""
+    from torchtalk.harness import ManifestError, activate_repo_manifest
+
+    if explicit_harness:
+        return
+    try:
+        name = activate_repo_manifest(source)
+    except ManifestError as e:
+        log.warning("Ignoring repo manifest: %s", e)
+        return
+    if name:
+        log.info("Using repo-local manifest .torchtalk.toml (harness %r)", name)
+
+
 def cmd_index_build(args):
     """Build or refresh the index for a source checkout and exit."""
     from torchtalk.config import resolve_source
@@ -230,6 +245,7 @@ def cmd_index_build(args):
     if not source:
         log.error("No source configured. Run 'torchtalk init' first.")
         return 1
+    _apply_repo_manifest(source, args.harness)
 
     stats = build_index(source, wait_for_cpp=not args.no_wait)
 
@@ -259,6 +275,7 @@ def cmd_index_update(args):
     if not source:
         log.error("No source configured. Run 'torchtalk init' first.")
         return 1
+    _apply_repo_manifest(source, args.harness)
 
     try:
         stats = update_index(source, since=args.since, on_uncovered=args.on_uncovered)
