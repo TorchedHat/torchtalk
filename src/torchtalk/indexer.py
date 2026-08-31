@@ -56,6 +56,8 @@ class ServerState:
     nn_modules: list[Any] = field(default_factory=list)
     py_to_cpp_edges: dict[str, list[dict]] = field(default_factory=dict)
     alias_map: dict[str, str] = field(default_factory=dict)
+    # Outgoing cross-package refs (analysis/external_refs.py), as dicts.
+    external_refs: list[dict] = field(default_factory=list)
 
     test_files: dict[str, dict] = field(default_factory=dict)
     test_classes: dict[str, list[dict]] = field(default_factory=dict)
@@ -671,8 +673,26 @@ def _init_python_modules(source: str):
                 f"{len(_state.nn_modules)} nn.Module classes"
             )
             _init_py_cpp_edges(source)
+            _init_external_refs(all_modules, manifest)
     except Exception as e:
         log.warning(f"Failed to analyze Python modules: {e}")
+
+
+def _init_external_refs(modules: dict[str, Any], manifest) -> None:
+    """Collect import edges into `depends_on` packages (PR-4 bridge smoke test)."""
+    from torchtalk.analysis.external_refs import collect_import_refs
+
+    try:
+        refs = collect_import_refs(modules, manifest)
+    except Exception as e:  # never block indexing on the bridge
+        log.warning(f"External ref collection failed: {e}")
+        refs = []
+    _state.external_refs = [r.to_dict() for r in refs]
+    if refs:
+        by_pkg: dict[str, int] = {}
+        for r in refs:
+            by_pkg[r.to_package] = by_pkg.get(r.to_package, 0) + 1
+        log.info(f"External refs: {len(refs)} import edges {by_pkg}")
 
 
 # v3: edges now include import-aware resolution (`linalg.cross(...)` →
@@ -1638,6 +1658,7 @@ def build_index(source: str, wait_for_cpp: bool = True) -> dict:
         "call_graph_building": _state.cpp_building,
         "python_modules": len(_state.py_modules),
         "nn_modules": len(_state.nn_modules),
+        "external_refs": len(_state.external_refs),
         "test_files": len(_state.test_files),
         "test_functions": len(_state.test_functions),
     }

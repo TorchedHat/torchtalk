@@ -68,6 +68,10 @@ class ConventionManifest:
     cpp_call_wrappers: tuple[str, ...] = ()
     # Harness names this package's symbols resolve against (bridge targets).
     depends_on: tuple[str, ...] = ()
+    # [bridge] resolver lists: C++ namespaces owned by a dependency (`at::`),
+    # and base-class prefixes marking cross-package subclassing (`torch.nn`).
+    cpp_namespaces: tuple[str, ...] = ()
+    base_class_namespaces: tuple[str, ...] = ()
     # Smoke-test floors: index stat name → minimum count (scripts/harness_smoke.py).
     expected_minimums: dict[str, int] = field(default_factory=dict)
 
@@ -117,6 +121,10 @@ _SECTION_FIELDS: dict[str, dict[str, str]] = {
             "op_namespaces",
         )
     },
+    "bridge": {
+        "cpp_namespaces": "cpp_namespaces",
+        "base_class_namespaces": "base_class_namespaces",
+    },
 }
 _FIELD_TYPES = {f.name: f.type for f in fields(ConventionManifest)}
 
@@ -140,7 +148,7 @@ def _flatten(data: dict[str, Any], origin: str) -> dict[str, Any]:
             out[mapping[key]] = value
     if "expected_minimums" in data:
         out["expected_minimums"] = data["expected_minimums"]
-    known = {"package", "paths", "cpp", "python", "expected_minimums"}
+    known = {"package", "paths", "cpp", "python", "bridge", "expected_minimums"}
     for section in data:
         if section not in known:
             raise ManifestError(f"{origin}: unknown section [{section}]")
