@@ -162,6 +162,55 @@ class TestKernelPattern:
     def test_skips_non_kernel_function(self):
         assert self._name("void notKernel(int* a) {") is None
 
+    def test_launch_bounds_after_global(self):
+        code = "__global__ void __launch_bounds__(256) after_kernel(float* x) {"
+        assert self._name(code) == "after_kernel"
+
+    def test_bare_macro_attribute_after_global(self):
+        code = (
+            "__global__ __quickreduce_launch_bounds_two_shot__ static void\n"
+            "allreduce_prototype_twoshot(T const* A, T* B, uint32_t N) {"
+        )
+        assert self._name(code) == "allreduce_prototype_twoshot"
+
+    def test_non_void_template_return_type(self):
+        code = (
+            "template <typename scalar_t, int width>\n"
+            "__global__ std::enable_if_t<(width > 0) && _typeConvert<scalar_t>::exists>"
+            "\n"
+            "fused_add_rms_norm_kernel(scalar_t* __restrict__ input, float epsilon) {"
+        )
+        assert self._name(code) == "fused_add_rms_norm_kernel"
+
+    def test_call_like_macro_and_launch_bounds_after_global(self):
+        code = (
+            "template <typename T>\n"
+            "__global__ void __launch_bounds__(1024, 1) MY_ATTR(x)\n"
+            "stacked_kernel(T* a) {"
+        )
+        assert self._name(code) == "stacked_kernel"
+
+    def test_nested_parens_in_launch_bounds(self):
+        code = (
+            "template <class Type, bool UE8M0_SF = false>\n"
+            "__global__ void __launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))\n"
+            "cvt_fp16_to_fp4(int32_t numRows, Type const* in) {"
+        )
+        assert self._name(code) == "cvt_fp16_to_fp4"
+
+    def test_line_comment_between_attribute_and_name(self):
+        code = (
+            "__global__ void __launch_bounds__(32 * warps_per_block, blocks_per_sm)\n"
+            "// a is column major, b is row major\n"
+            "hadamard_transform_kernel(b16* a, b16* out, int total_num_chunks) {"
+        )
+        assert self._name(code) == "hadamard_transform_kernel"
+
+    def test_launch_bounds_is_never_a_kernel_name(self):
+        code = "__global__ void __launch_bounds__(512) real_name(int* a) {"
+        names = [m.group(1) for m in _KERNEL_PATTERN.finditer(code)]
+        assert names == ["real_name"]
+
 
 class TestDevicePattern:
     def _name(self, code: str) -> str | None:

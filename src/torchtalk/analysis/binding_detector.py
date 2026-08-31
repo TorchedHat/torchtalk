@@ -97,16 +97,30 @@ _CPP_CONTROL_KEYWORDS = {
 _IMPL_WRAPPERS = ("TORCH_FN_BOXED", "TORCH_FN")
 _NO_IMPL_MARKERS = ("makeFallthrough", "makeNamedNotSupported")
 
-# `__global__` kernel definition. Allows leading `template <...>`,
-# `static`/`inline`, and `__launch_bounds__`/`C10_LAUNCH_BOUNDS_*` attributes
-# in either order around the keyword.
+# `__global__` kernel definition; attributes may flank the keyword.
+_KERNEL_ATTR = (
+    r"(?:"
+    r"(?:static|inline|__forceinline__)"
+    # call-like macro, e.g. `__launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))`
+    r"|(?:[A-Za-z_]\w*)\s*\((?:[^()]|\([^()]*\))*\)"
+    r"|__[A-Za-z0-9_]+__"
+    r")(?:\s|//[^\n]*\n)+"  # separator may include a `//` comment line
+)
+_KERNEL_RETURN_TYPE = (
+    r"(?:typename\s+)?"
+    r"[A-Za-z_]\w*(?:::[A-Za-z_]\w*)*"
+    # template args may contain parens and comparisons, e.g. `<(width > 0) && ...>`
+    r"(?:\s*<(?:[^<>()]|\([^()]*\)|<[^<>]*>)*>)?"
+    r"(?:\s*[*&]+)?"
+)
 _KERNEL_PATTERN = re.compile(
     r"(?:template\s*<[^>]+>\s*)?"
-    r"(?:(?:static|inline|__forceinline__)\s+)*"
-    r"(?:(?:__launch_bounds__|C10_LAUNCH_BOUNDS_\d+)\s*\([^)]*\)\s*)*"
+    rf"(?:{_KERNEL_ATTR})*"
     r"__global__\s+"
-    r"(?:(?:static|inline|__forceinline__)\s+)*"
-    r"void\s+(\w+)(?:<([^>]+)>)?\s*\(([^)]*)\)"
+    rf"(?:{_KERNEL_ATTR})*"
+    rf"{_KERNEL_RETURN_TYPE}\s+"
+    rf"(?:{_KERNEL_ATTR})*"  # e.g. `void __launch_bounds__(256) name(...)`
+    r"(\w+)(?:<([^>]+)>)?\s*\(([^)]*)\)"
 )
 
 # `__device__` helper. CUDA helpers commonly stack `__host__ __device__`
