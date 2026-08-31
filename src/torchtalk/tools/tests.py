@@ -177,8 +177,8 @@ async def _do_list_test_utils() -> str:
     for path, info in utility_info.items():
         if path in _state.test_utilities:
             exists = True
-        elif _state.pytorch_source:
-            exists = (Path(_state.pytorch_source) / path).exists()
+        elif _state.source:
+            exists = (Path(_state.source) / path).exists()
         else:
             exists = False
         status = "[ok]" if exists else "[missing]"

@@ -14,7 +14,7 @@ def server_state(mock_state):
     s = mock_state
     s.bindings = [{"python_name": "add", "dispatch_key": "CPU"}]
     s.native_functions = {"add": {"base_name": "add"}}
-    s.pytorch_source = "/fake/pytorch"
+    s.source = "/fake/pytorch"
     s.cpp_extractor = None
     s.cpp_building = False
     s.py_modules = {}
@@ -31,7 +31,7 @@ def server_state(mock_state):
 
 
 class TestGetStatus:
-    def test_shows_pytorch_source(self, server_state):
+    def test_shows_source(self, server_state):
         out = asyncio.run(get_status())
         assert "/fake/pytorch" in out
 
@@ -61,7 +61,7 @@ class TestGetStatus:
         assert "Functions: 51,000" in out
 
     def test_cpp_unavailable_no_source(self, server_state):
-        server_state.pytorch_source = None
+        server_state.source = None
         out = asyncio.run(get_status())
         assert "Not available" in out
 
@@ -101,6 +101,6 @@ class TestRunServer:
         monkeypatch.setattr("torchtalk.server.mcp.run", lambda **kw: None)
         monkeypatch.setattr("threading.Thread", FakeThread)
 
-        run_server(pytorch_source="/fake", transport="stdio")
+        run_server(source="/fake", transport="stdio")
 
         assert captured["daemon"] is True

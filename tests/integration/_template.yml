@@ -1,0 +1,51 @@
+# Template for a new integration target. Copy to tests/integration/<name>.yml
+# (files starting with "_" are ignored by the loader) and fill in every value.
+#
+# The file drives two things:
+#   1. tests/test_binding_detector_pytorch.py — each `anchors` entry becomes a
+#      parametrized test that runs when $env_var points at a checkout.
+#   2. .github/workflows/integration-tests.yml — add <name> to `matrix.target`
+#      so CI does a sparse clone of `repo`@`ref` restricted to `sparse_paths`.
+#
+# Verify locally:
+#   export <ENV_VAR>=/path/to/checkout
+#   python -m pytest tests/test_binding_detector_pytorch.py -v -k <name>
+
+repo: org/repo            # GitHub "owner/name" used for the CI sparse clone
+ref: v0.0.0               # tag or SHA — pin it; anchors are version-specific
+env_var: FRAMEWORK_SOURCE # env var that points at a local checkout
+
+# Directories CI needs. Keep this minimal — the whole repo is NOT cloned.
+sparse_paths:
+  - csrc
+  - pkg/nn
+
+# Anchors: concrete facts about the pinned ref that the detectors must find.
+# Pick things that are stable across patch releases and cheap to verify by
+# hand (grep them first). Supported checks:
+#
+#   pybind_name             `file` defines a pybind11 function named `value`
+#   torch_library_cpp_name  `file` registers a TORCH_LIBRARY op whose C++
+#                           implementation is named `value`
+#   has_cuda_kernel         at least one file under `dir` matching `glob`
+#                           (and containing `content_filter`) yields a kernel
+#   has_at_dispatch         at least one file under `dir` uses AT_DISPATCH_*
+#   has_binding_types       bindings under `dir` cover every type in `value`
+#                           (e.g. [pybind11, torch_library])
+anchors:
+  - file: csrc/bindings.cpp
+    check: pybind_name
+    value: some_exported_function
+
+  - file: csrc/ops.cpp
+    check: torch_library_cpp_name
+    value: some_cpp_impl
+
+  - dir: csrc
+    check: has_cuda_kernel
+    glob: "*.cu"
+    content_filter: __global__
+
+  - dir: csrc
+    check: has_binding_types
+    value: [pybind11, torch_library]

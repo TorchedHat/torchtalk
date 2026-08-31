@@ -25,16 +25,33 @@ def _activate_harness(name: str | None) -> bool:
     Returns False (after logging) when the harness is not registered.
     """
     from torchtalk.config import default_harness
-    from torchtalk.harness import set_active_harness
+    from torchtalk.harness import ManifestError, set_active_harness
 
     target = name or default_harness()
     if not target:
         return True
     try:
         set_active_harness(target)
-    except KeyError as e:
+    except (KeyError, ManifestError) as e:
         log.error(str(e))
         return False
+    return True
+
+
+def _prepare_harness(args, source: str | None = None) -> bool:
+    """Activate --harness / configured default, then any repo `.torchtalk.toml`.
+
+    Every command that reads or writes the cache must go through here so the
+    same manifest (and therefore the same package name / search dirs) is used
+    for build, update, serve, status and snapshots.
+    """
+    from torchtalk.config import resolve_source
+
+    if not _activate_harness(args.harness):
+        return False
+    source = resolve_source(cli_flag=source or getattr(args, "source", None))
+    if source:
+        _apply_repo_manifest(source, args.harness)
     return True
 
 
@@ -208,11 +225,11 @@ def cmd_mcp_serve(args):
     from torchtalk.formatting import set_formatter_mode
     from torchtalk.server import run_server
 
-    if not _activate_harness(args.harness):
+    if not _prepare_harness(args):
         return 1
     set_formatter_mode(args.format)
     run_server(
-        pytorch_source=args.source,
+        source=args.source,
         index_path=args.index,
         transport=args.transport,
     )
@@ -221,22 +238,35 @@ def cmd_mcp_serve(args):
 
 def _apply_repo_manifest(source: str, explicit_harness: str | None) -> None:
     """Prefer a `.torchtalk.toml` shipped in the checkout unless --harness was given."""
-    from torchtalk.harness import ManifestError, activate_repo_manifest
+    from torchtalk.harness import (
+        ManifestError,
+        activate_repo_manifest,
+        active_harness_name,
+    )
 
     if explicit_harness:
         return
+    previous = active_harness_name()
     try:
         name = activate_repo_manifest(source)
     except ManifestError as e:
         log.warning("Ignoring repo manifest: %s", e)
         return
-    if name:
+    if name and name != previous:
+        log.warning(
+            "Repo manifest .torchtalk.toml selects harness %r (was %r); "
+            "pass --harness to override",
+            name,
+            previous,
+        )
+    elif name:
         log.info("Using repo-local manifest .torchtalk.toml (harness %r)", name)
 
 
 def cmd_index_build(args):
     """Build or refresh the index for a source checkout and exit."""
     from torchtalk.config import resolve_source
+    from torchtalk.harness import active_harness_name
     from torchtalk.indexer import build_index
 
     if not _activate_harness(args.harness):
@@ -250,6 +280,7 @@ def cmd_index_build(args):
     stats = build_index(source, wait_for_cpp=not args.no_wait)
 
     print(f"Index built for {source}")
+    print(f"  Harness:          {active_harness_name()}")
     print(f"  Bindings:         {stats['bindings']:,}")
     print(f"  CUDA kernels:     {stats['cuda_kernels']:,}")
     print(f"  Native functions: {stats['native_functions']:,}")
@@ -341,7 +372,7 @@ def cmd_snapshot_save(args):
     """Save current cache as a named snapshot."""
     from torchtalk.snapshots import SnapshotError, save_snapshot
 
-    if not _activate_harness(args.harness):
+    if not _prepare_harness(args):
         return 1
     try:
         manifest = save_snapshot(args.name)
@@ -361,7 +392,7 @@ def cmd_snapshot_load(args):
     """Load a named snapshot into the active cache."""
     from torchtalk.snapshots import SnapshotError, find_nearest_snapshot, load_snapshot
 
-    if not _activate_harness(args.harness):
+    if not _prepare_harness(args):
         return 1
     name = args.name
     force = args.force

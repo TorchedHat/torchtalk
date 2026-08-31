@@ -141,13 +141,13 @@ class TestImplsFromExtractor:
     @pytest.fixture(autouse=True)
     def reset_state(self):
         prior = indexer._state.cpp_extractor
-        prior_src = indexer._state.pytorch_source
-        indexer._state.pytorch_source = None
+        prior_src = indexer._state.source
+        indexer._state.source = None
         try:
             yield
         finally:
             indexer._state.cpp_extractor = prior
-            indexer._state.pytorch_source = prior_src
+            indexer._state.source = prior_src
 
     def _fake_extractor(self, locations: dict) -> SimpleNamespace:
         return SimpleNamespace(function_locations=locations)
@@ -192,7 +192,7 @@ class TestImplsFromExtractor:
         assert _impls_from_extractor("nope") == []
 
     def test_out_of_tree_matches_filtered(self):
-        indexer._state.pytorch_source = "/src/pytorch"
+        indexer._state.source = "/src/pytorch"
         indexer._state.cpp_extractor = self._fake_extractor(
             {
                 "at::native::t": ("/src/pytorch/aten/T.cpp", 10),
@@ -280,18 +280,18 @@ class TestPyCppEdgesCache:
     @pytest.fixture(autouse=True)
     def reset_state(self):
         prior_edges = indexer._state.py_to_cpp_edges
-        prior_src = indexer._state.pytorch_source
+        prior_src = indexer._state.source
         try:
             yield
         finally:
             indexer._state.py_to_cpp_edges = prior_edges
-            indexer._state.pytorch_source = prior_src
+            indexer._state.source = prior_src
 
     def test_save_and_load_round_trip(self, tmp_path, monkeypatch):
         monkeypatch.setattr(
             indexer, "_source_fingerprint", lambda _: "deadbeefdeadbeef"
         )
-        indexer._state.pytorch_source = "/fake/source"
+        indexer._state.source = "/fake/source"
         indexer._state.py_to_cpp_edges = {
             "aten::add": [{"caller_qualname": "torch.x.f", "file": "/x.py", "line": 5}]
         }
@@ -304,7 +304,7 @@ class TestPyCppEdgesCache:
 
     def test_load_rejects_stale_fingerprint(self, tmp_path, monkeypatch):
         monkeypatch.setattr(indexer, "_source_fingerprint", lambda _: "fp_v1")
-        indexer._state.pytorch_source = "/fake/source"
+        indexer._state.source = "/fake/source"
         indexer._state.py_to_cpp_edges = {"aten::add": []}
         cache = tmp_path / "edges.json"
         _save_py_cpp_edges_cache(cache)
@@ -669,7 +669,7 @@ class TestParseOpInfoRegistry:
 
         _state.opinfo_registry = {}
         _state.opinfo_alias_map = {}
-        _state.pytorch_source = str(tmp_path)
+        _state.source = str(tmp_path)
 
         opinfo_file = tmp_path / "opinfos.py"
         opinfo_file.write_text(

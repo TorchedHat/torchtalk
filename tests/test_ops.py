@@ -17,7 +17,7 @@ def state_without_call_graph():
         s.bindings,
         s.cuda_kernels,
         s.cpp_extractor,
-        s.pytorch_source,
+        s.source,
     )
     s.native_functions = {
         "add": {
@@ -37,7 +37,7 @@ def state_without_call_graph():
         {"name": "add_kernel", "file_path": "/src/a.cu", "line_number": 3}
     ]
     s.cpp_extractor = None
-    s.pytorch_source = "/src"
+    s.source = "/src"
     indexer._build_indexes(s)
     try:
         yield s
@@ -47,7 +47,7 @@ def state_without_call_graph():
             s.bindings,
             s.cuda_kernels,
             s.cpp_extractor,
-            s.pytorch_source,
+            s.source,
         ) = saved
         indexer._build_indexes(s)
 

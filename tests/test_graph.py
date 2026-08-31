@@ -67,14 +67,14 @@ class _FakeExtractor:
 @pytest.fixture
 def reset_extractor():
     prior = indexer._state.cpp_extractor
-    prior_src = indexer._state.pytorch_source
-    indexer._state.pytorch_source = "/fake/source"
+    prior_src = indexer._state.source
+    indexer._state.source = "/fake/source"
     indexer._state.bindings = [{"python_name": "fake"}]  # satisfies _ensure_loaded
     try:
         yield
     finally:
         indexer._state.cpp_extractor = prior
-        indexer._state.pytorch_source = prior_src
+        indexer._state.source = prior_src
         indexer._state.bindings = []
 
 

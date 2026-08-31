@@ -102,8 +102,8 @@ _NO_IMPL_MARKERS = ("makeFallthrough", "makeNamedNotSupported")
 _KERNEL_ATTR = (
     r"(?:"
     r"(?:static|inline|__forceinline__)"
-    # call-like macro, e.g. `__launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))`
-    r"|(?:[A-Za-z_]\w*)\s*\((?:[^()]|\([^()]*\))*\)"
+    # call-like macro, e.g. `__attribute__((amdgpu_waves_per_eu(1, 1)))`
+    r"|(?:[A-Za-z_]\w*)\s*\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\)"
     r"|__[A-Za-z0-9_]+__"
     r")(?:\s|//[^\n]*\n)+"  # separator may include a `//` comment line
 )
@@ -115,13 +115,13 @@ _KERNEL_RETURN_TYPE = (
     r"(?:\s*[*&]+)?"
 )
 _KERNEL_PATTERN = re.compile(
-    r"(?:template\s*<[^>]+>\s*)?"
+    r"(?P<tmpl>template\s*<[^>]+>\s*)?"
     rf"(?:{_KERNEL_ATTR})*"
-    r"__global__\s+"
+    r"(?P<kw>__global__)\s+"
     rf"(?:{_KERNEL_ATTR})*"
     rf"{_KERNEL_RETURN_TYPE}\s+"
     rf"(?:{_KERNEL_ATTR})*"  # e.g. `void __launch_bounds__(256) name(...)`
-    r"(\w+)(?:<([^>]+)>)?\s*\(([^)]*)\)"
+    r"(?P<name>\w+)(?:<(?P<targs>[^>]+)>)?\s*\((?P<args>[^)]*)\)"
 )
 
 # `__device__` helper. CUDA helpers commonly stack `__host__ __device__`
@@ -581,10 +581,13 @@ class BindingDetector:
 
     def _detect_cuda_kernels(self, content: str, file_path: str, graph: BindingGraph):
         for match in _KERNEL_PATTERN.finditer(content):
-            kernel_name = match.group(1)
-            template_params = match.group(2)
-            parameters = match.group(3)
-            line_number = content[: match.start()].count("\n") + 1
+            kernel_name = match.group("name")
+            template_params = match.group("targs")
+            parameters = match.group("args")
+            # Anchor the line on `template` / `__global__`, not on a leading
+            # attribute that the regex may have consumed from the previous line.
+            anchor = match.start("tmpl") if match.group("tmpl") else match.start("kw")
+            line_number = content[:anchor].count("\n") + 1
 
             kernel = CUDAKernel(
                 name=kernel_name,

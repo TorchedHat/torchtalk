@@ -30,6 +30,8 @@ def _load_manifests() -> list[dict]:
     manifests = []
     if MANIFESTS_DIR.exists():
         for path in sorted(MANIFESTS_DIR.glob("*.yml")):
+            if path.name.startswith("_"):
+                continue  # _template.yml and other non-target files
             with open(path) as f:
                 manifest = yaml.safe_load(f)
                 manifest["_name"] = path.stem

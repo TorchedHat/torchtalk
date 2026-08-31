@@ -37,8 +37,8 @@ async def get_status() -> str:
     md = create_formatter()
     md.h2("TorchTalk Status")
 
-    if _state.pytorch_source:
-        md.code("PyTorch Source", _state.pytorch_source)
+    if _state.source:
+        md.code("PyTorch Source", _state.source)
     else:
         md.bold("PyTorch Source", "Not configured")
     md.blank()
@@ -83,8 +83,8 @@ async def get_status() -> str:
         md.item(f"Call edges: {stats['total_call_edges']:,}", 1)
     else:
         md.bold("Status", "Not available")
-        if _state.pytorch_source:
-            src = Path(_state.pytorch_source)
+        if _state.source:
+            src = Path(_state.source)
             # PyTorch's `python setup.py develop` lands compile_commands.json
             # in `build/`; some checkouts have it at the root. Check both,
             # matching cli.py / indexer.py / cpp_call_graph.py.
@@ -302,7 +302,7 @@ async def affected(funcs: str, depth: int = 3) -> str:
 
 
 def run_server(
-    pytorch_source: str | None = None,
+    source: str | None = None,
     index_path: str | None = None,
     transport: str = "stdio",
 ):
@@ -311,7 +311,7 @@ def run_server(
     error via `_ensure_loaded` until the data is ready."""
     import threading
 
-    source = pytorch_source or _auto_detect_source()
+    source = source or _auto_detect_source()
 
     def _bg_init():
         try:

@@ -118,7 +118,7 @@ def test_tool_state(mock_state):
             "exists": True,
         },
     }
-    s.pytorch_source = None
+    s.source = None
     indexer._build_indexes(s)
     return s
 

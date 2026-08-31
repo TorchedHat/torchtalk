@@ -115,9 +115,11 @@ def main():
 
     thresholds = get_harness(args.harness).manifest.expected_minimums
     failures = []
-    for key, threshold in thresholds.items():
-        field = key
-        actual = stats.get(field, 0)
+    for field, threshold in thresholds.items():
+        if field not in stats:
+            failures.append(f"{field}: not a stat key (have {sorted(stats)})")
+            continue
+        actual = stats[field]
         print(f"  {field}: {actual} (threshold: >= {threshold})")
         if actual < threshold:
             failures.append(f"{field}: {actual} < {threshold}")

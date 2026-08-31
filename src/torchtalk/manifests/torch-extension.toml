@@ -47,10 +47,10 @@ registration_macros = [
     "RegisterOperators",
 ]
 call_wrappers = [
+    "TORCH_FN_BOXED",
+    "TORCH_FN",
     "TORCH_BOX",
     "TORCH_SELECTIVE_FN",
-    "TORCH_FN",
-    "TORCH_SELECTIVE_SCHEMA",
 ]
 
 [python.op_namespaces]
