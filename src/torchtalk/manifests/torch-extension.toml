@@ -55,3 +55,16 @@ call_wrappers = [
 
 [python.op_namespaces]
 torch = "aten"
+
+# Resolver lists for cross-package refs (docs/bridge-design.md).
+[bridge]
+cpp_namespaces = [
+    "at",
+    "c10",
+    "torch",
+]
+base_class_namespaces = [
+    "torch.nn",
+    "torch.autograd",
+    "torch.optim",
+]

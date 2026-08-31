@@ -255,6 +255,7 @@ def cmd_index_build(args):
     print(f"  Native functions: {stats['native_functions']:,}")
     print(f"  Python modules:   {stats['python_modules']:,}")
     print(f"  nn.Module classes:{stats['nn_modules']:>8,}")
+    print(f"  External refs:    {stats.get('external_refs', 0):,}")
     print(f"  Test files:       {stats['test_files']:,}")
     if stats["call_graph_building"]:
         print("  C++ call graph:   building in background")

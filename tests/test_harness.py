@@ -122,6 +122,27 @@ class TestTomlManifests:
         assert PYTORCH_MANIFEST.expected_minimums["native_functions"] == 2400
         assert PYTORCH_MANIFEST.depends_on == ()
 
+    def test_bridge_section_inherited_from_torch_extension(self):
+        base = harness_mod.load_builtin_manifest("torch-extension")
+        assert "at" in base.cpp_namespaces and "c10" in base.cpp_namespaces
+        assert "torch.nn" in base.base_class_namespaces
+        assert harness_mod.VLLM_MANIFEST.cpp_namespaces == base.cpp_namespaces
+        assert (
+            harness_mod.VLLM_MANIFEST.base_class_namespaces
+            == base.base_class_namespaces
+        )
+        assert harness_mod.PYTORCH_MANIFEST.cpp_namespaces == ()
+
+    def test_bridge_section_loads_from_toml(self, tmp_path):
+        p = tmp_path / "x.toml"
+        p.write_text(
+            '[package]\nname = "x"\nextends = "torch-extension"\n'
+            '[bridge]\ncpp_namespaces = ["at"]\nbase_class_namespaces = ["torch.nn"]\n'
+        )
+        m = harness_mod.load_manifest(p)
+        assert m.cpp_namespaces == ("at",)
+        assert m.base_class_namespaces == ("torch.nn",)
+
     def test_vllm_extends_torch_extension(self):
         m = harness_mod.VLLM_MANIFEST
         base = harness_mod.load_builtin_manifest("torch-extension")
