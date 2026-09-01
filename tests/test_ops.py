@@ -187,13 +187,11 @@ class TestGetNativeFunc:
         assert result["name"] == "relu"
 
     def test_case_insensitive_key(self, ops_state):
-        result = _get_native_func("softmax")
+        # Key and base_name differ, so only the key arm can match.
+        ops_state.native_functions["Foo_Bar"] = {"name": "Foo_Bar", "base_name": "zzz"}
+        result = _get_native_func("foo_bar")
         assert result is not None
-        assert result["name"] == "softmax"
-
-        result = _get_native_func("SOFTMAX")
-        assert result is not None
-        assert result["base_name"].lower() == "softmax"
+        assert result["name"] == "Foo_Bar"
 
     def test_base_name_fallback(self, ops_state):
         # Drop the exact "softmax" key so lookup walks to base_name.
@@ -236,13 +234,20 @@ class TestSimilarFunctions:
         assert long_key not in result
         assert short_key in result
 
-    def test_limit_and_unique(self, ops_state):
+    def test_dedups_key_matched_by_both_passes(self, ops_state):
+        # "softmaxx" matches on substring and again on levenshtein distance 1.
+        ops_state.native_functions["softmaxx"] = {
+            "name": "softmaxx",
+            "base_name": "softmaxx",
+        }
+        result = _similar_functions("softmax")
+        assert result.count("softmaxx") == 1
+
+    def test_limit(self, ops_state):
         for i in range(15):
             name = f"fn_{i:02d}"
             ops_state.native_functions[name] = {"name": name, "base_name": name}
-        result = _similar_functions("fn_", limit=3)
-        assert len(result) == 3
-        assert len(set(result)) == 3
+        assert len(_similar_functions("fn_", limit=3)) == 3
 
 
 class TestSearchBindings:
