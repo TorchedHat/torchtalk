@@ -949,8 +949,6 @@ class TestApiSources:
             depth=1,
         )
         assert result["python_apis"] == ["foo"]
-        assert isinstance(result["python_apis"], list)
-        assert all(isinstance(a, str) for a in result["python_apis"])
 
 
 class TestFilenameFamily:
