@@ -616,7 +616,7 @@ class TestIncludeDirsPersistence:
 
 
 class _FakePool:
-    def __init__(self, processes=None):
+    def __init__(self, processes=None, initializer=None):
         pass
 
     def __enter__(self):
