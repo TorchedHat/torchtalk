@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """C++ call graph extraction using libclang with parallel processing."""
 
+import contextlib
+import ctypes
 import json
 import logging
 import os
+import signal
+import sys
 from collections import defaultdict
-from multiprocessing import Pool, cpu_count
+from multiprocessing import Pool
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +26,26 @@ try:
 except ImportError:
     LIBCLANG_AVAILABLE = False
     log.warning("libclang not available - C++ call graph extraction disabled")
+
+
+def _default_workers() -> int:
+    # Size off the CPUs actually schedulable here, since cpu_count() reports host
+    # CPUs and overshoots under a container quota.
+    try:
+        usable = len(os.sched_getaffinity(0))
+    except AttributeError:
+        usable = os.cpu_count() or 1
+    return max(1, int(usable * 0.8))
+
+
+def _worker_init() -> None:
+    # Ask the kernel to signal each worker when its parent dies, so a SIGKILLed
+    # server cannot strand a pool that would otherwise block on the task queue
+    # forever.
+    if sys.platform == "linux":
+        with contextlib.suppress(OSError):
+            ctypes.CDLL("libc.so.6", use_errno=True).prctl(1, signal.SIGTERM)
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
 
 
 def _rel_to_root(path: str, source_root: str) -> str | None:
@@ -400,10 +424,10 @@ class CppCallGraphExtractor:
         log.info(f"Processing {len(entries)} C++ files with parallel libclang...")
 
         if num_workers is None:
-            num_workers = max(1, int(cpu_count() * 0.8))
+            num_workers = _default_workers()
         log.info(f"Using {num_workers} parallel workers")
 
-        with Pool(processes=num_workers) as pool:
+        with Pool(processes=num_workers, initializer=_worker_init) as pool:
             results = pool.map(_parse_single_file, entries)
 
         # Merge results, attributing each record to the file where the
@@ -584,9 +608,9 @@ class CppCallGraphExtractor:
             cuda_env = _discover_cuda_env()
             translated = [(fp, _translate_args(fp, a, cuda_env)) for fp, a in entries]
             if num_workers is None:
-                num_workers = max(1, int(cpu_count() * 0.8))
+                num_workers = _default_workers()
             if len(translated) > 1 and num_workers > 1:
-                with Pool(processes=num_workers) as pool:
+                with Pool(processes=num_workers, initializer=_worker_init) as pool:
                     results = pool.map(_parse_single_file, translated)
             else:
                 results = [_parse_single_file(e) for e in translated]
