@@ -21,9 +21,6 @@ sparse_paths:
   - pkg/nn
 
 # Anchors: concrete facts about the pinned ref that the detectors must find.
-# Every anchor must name the harness that supplies its conventions. Add
-# `optional: true` only when an intentionally version-conditional path may be
-# absent; a missing required path fails the test.
 # Pick things that are stable across patch releases and cheap to verify by
 # hand (grep them first). Supported checks:
 #
