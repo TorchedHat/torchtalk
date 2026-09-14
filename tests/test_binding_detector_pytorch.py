@@ -20,6 +20,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from torchtalk import harness as harness_mod
 from torchtalk.analysis.binding_detector import BindingDetector, BindingType
 
 MANIFESTS_DIR = Path(__file__).parent / "integration"
@@ -49,6 +50,29 @@ def _source_path(manifest: dict) -> Path | None:
     return None
 
 
+def _configured_detector(manifest: dict) -> BindingDetector:
+    """Build a detector using the conventions named by the manifest filename."""
+    conventions = harness_mod.get_harness(manifest["_name"]).manifest
+    return BindingDetector(
+        macro_aliases=conventions.cpp_macro_aliases,
+        token_map=conventions.cpp_token_map,
+        exclude_patterns=conventions.exclude_patterns,
+        registration_macros=conventions.registration_macros,
+        call_wrappers=conventions.cpp_call_wrappers or None,
+    )
+
+
+def _anchor_path(manifest: dict, source: Path, anchor: dict, key: str) -> Path:
+    """Resolve an anchor path, skipping when the sparse checkout lacks it."""
+    path = source / anchor[key]
+    if path.exists():
+        return path
+    pytest.skip(
+        f"Anchor path unavailable for {manifest['_name']}: {path} "
+        f"(source root: {source})"
+    )
+
+
 MANIFESTS = _load_manifests()
 
 
@@ -75,17 +99,6 @@ def _anchor_params() -> list[tuple[dict, dict, Path | None]]:
 
 PARAMS = _anchor_params()
 
-pytestmark = pytest.mark.skipif(
-    not PARAMS or all(p[2] is None for p in PARAMS),
-    reason="No integration manifests with available source checkouts",
-)
-
-
-@pytest.fixture
-def detector():
-    """Create a BindingDetector instance."""
-    return BindingDetector()
-
 
 class TestIntegrationAnchors:
     """Parametrized integration tests driven by YAML manifests."""
@@ -95,31 +108,34 @@ class TestIntegrationAnchors:
         PARAMS,
         ids=_anchor_ids() if PARAMS else [],
     )
-    def test_anchor(self, detector, manifest, anchor, source):
+    def test_anchor(self, manifest, anchor, source):
         """Verify a single anchor from the integration manifest."""
         if source is None:
-            pytest.skip(f"{manifest.get('env_var')} not set")
+            pytest.skip(f"Checkout unavailable: {manifest.get('env_var')} is not set")
+        detector = _configured_detector(manifest)
+        self._run_anchor(manifest, detector, source, anchor)
+
+    def _run_anchor(self, manifest, detector, source, anchor):
+        """Run an already configured detector against one anchor."""
 
         check = anchor["check"]
 
         if check == "pybind_name":
-            self._check_pybind_name(detector, source, anchor)
+            self._check_pybind_name(manifest, detector, source, anchor)
         elif check == "torch_library_cpp_name":
-            self._check_torch_library_cpp_name(detector, source, anchor)
+            self._check_torch_library_cpp_name(manifest, detector, source, anchor)
         elif check == "has_cuda_kernel":
-            self._check_has_cuda_kernel(detector, source, anchor)
+            self._check_has_cuda_kernel(manifest, detector, source, anchor)
         elif check == "has_at_dispatch":
-            self._check_has_at_dispatch(detector, source, anchor)
+            self._check_has_at_dispatch(manifest, detector, source, anchor)
         elif check == "has_binding_types":
-            self._check_has_binding_types(detector, source, anchor)
+            self._check_has_binding_types(manifest, detector, source, anchor)
         else:
             pytest.fail(f"Unknown check type: {check}")
 
-    def _check_pybind_name(self, detector, source, anchor):
+    def _check_pybind_name(self, manifest, detector, source, anchor):
         """Assert a specific python_name exists in bindings for a file."""
-        path = source / anchor["file"]
-        if not path.exists():
-            pytest.skip(f"File not found: {path}")
+        path = _anchor_path(manifest, source, anchor, "file")
 
         content = path.read_text(errors="replace")
         graph = detector.detect_bindings(str(path), content)
@@ -130,11 +146,9 @@ class TestIntegrationAnchors:
             f"Expected {expected} in {anchor['file']}, got: {sorted(names)[:10]}"
         )
 
-    def _check_torch_library_cpp_name(self, detector, source, anchor):
+    def _check_torch_library_cpp_name(self, manifest, detector, source, anchor):
         """Assert a specific cpp_name exists in TORCH_LIBRARY bindings."""
-        path = source / anchor["file"]
-        if not path.exists():
-            pytest.skip(f"File not found: {path}")
+        path = _anchor_path(manifest, source, anchor, "file")
 
         content = path.read_text(errors="replace")
         graph = detector.detect_bindings(str(path), content)
@@ -145,11 +159,9 @@ class TestIntegrationAnchors:
             f"Expected {expected} in {anchor['file']}, got: {sorted(cpp_names)}"
         )
 
-    def _check_has_cuda_kernel(self, detector, source, anchor):
+    def _check_has_cuda_kernel(self, manifest, detector, source, anchor):
         """Assert at least one CUDA kernel with a non-empty name is found."""
-        scan_dir = source / anchor["dir"]
-        if not scan_dir.exists():
-            pytest.skip(f"Directory not found: {scan_dir}")
+        scan_dir = _anchor_path(manifest, source, anchor, "dir")
 
         glob_pattern = anchor.get("glob", "*.cu")
         content_filter = anchor.get("content_filter", "__global__")
@@ -169,11 +181,9 @@ class TestIntegrationAnchors:
             f"Kernel in {anchor['dir']} must have a non-empty name"
         )
 
-    def _check_has_at_dispatch(self, detector, source, anchor):
+    def _check_has_at_dispatch(self, manifest, detector, source, anchor):
         """Assert at least one AT_DISPATCH binding with a cpp_name is found."""
-        scan_dir = source / anchor["dir"]
-        if not scan_dir.exists():
-            pytest.skip(f"Directory not found: {scan_dir}")
+        scan_dir = _anchor_path(manifest, source, anchor, "dir")
 
         glob_pattern = anchor.get("glob", "*.cpp")
         content_filter = anchor.get("content_filter", "AT_DISPATCH")
@@ -200,11 +210,9 @@ class TestIntegrationAnchors:
             f"AT_DISPATCH binding in {anchor['dir']} must have a non-empty cpp_name"
         )
 
-    def _check_has_binding_types(self, detector, source, anchor):
+    def _check_has_binding_types(self, manifest, detector, source, anchor):
         """Assert specific binding types are present in a directory scan."""
-        scan_dir = source / anchor["dir"]
-        if not scan_dir.exists():
-            pytest.skip(f"Directory not found: {scan_dir}")
+        scan_dir = _anchor_path(manifest, source, anchor, "dir")
 
         graph = detector.detect_bindings_in_directory(str(scan_dir))
         types = {b.binding_type for b in graph.bindings}
@@ -213,3 +221,38 @@ class TestIntegrationAnchors:
             assert expected_type in types, (
                 f"Expected {expected_type} in {anchor['dir']}, got: {sorted(types)}"
             )
+
+
+class TestIntegrationAnchorHarnesses:
+    """Hermetic regressions for manifest-derived detector conventions."""
+
+    def test_vllm_manifest_conventions_detect_expanded_library(self, tmp_path):
+        source = tmp_path / "vllm"
+        binding_file = source / "csrc" / "torch_bindings.cpp"
+        binding_file.parent.mkdir(parents=True)
+        binding_file.write_text(
+            "TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {\n"
+            '  ops.impl("rms_norm", rms_norm_impl);\n'
+            "}\n"
+        )
+        manifest = {"_name": "vllm", "env_var": "VLLM_SOURCE"}
+        plain = BindingDetector().detect_bindings(
+            str(binding_file), binding_file.read_text()
+        )
+        assert "rms_norm_impl" not in {b.cpp_name for b in plain.bindings}
+
+        configured = _configured_detector(manifest).detect_bindings(
+            str(binding_file), binding_file.read_text()
+        )
+        assert "rms_norm_impl" in {b.cpp_name for b in configured.bindings}
+
+    def test_missing_anchor_path_skips_with_context(self, tmp_path):
+        manifest = {"_name": "vllm", "env_var": "VLLM_SOURCE"}
+        anchor = {
+            "file": "csrc/missing.cpp",
+            "check": "torch_library_cpp_name",
+            "value": "rms_norm_impl",
+        }
+
+        with pytest.raises(pytest.skip.Exception, match=r"vllm.*source root"):
+            TestIntegrationAnchors().test_anchor(manifest, anchor, tmp_path)
