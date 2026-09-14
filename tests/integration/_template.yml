@@ -37,22 +37,18 @@ sparse_paths:
 #                           (e.g. [pybind11, torch_library])
 anchors:
   - file: csrc/bindings.cpp
-    harness: your-harness
     check: pybind_name
     value: some_exported_function
 
   - file: csrc/ops.cpp
-    harness: your-harness
     check: torch_library_cpp_name
     value: some_cpp_impl
 
   - dir: csrc
-    harness: your-harness
     check: has_cuda_kernel
     glob: "*.cu"
     content_filter: __global__
 
   - dir: csrc
-    harness: your-harness
     check: has_binding_types
     value: [pybind11, torch_library]
