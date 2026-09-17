@@ -49,8 +49,11 @@ flowchart LR
 ## Quick Start
 
 ```bash
+pip install -r requirements.txt
 pip install -e .
 ```
+
+The `clang` bindings must match the system `libclang.so` major (19+). Check with `python -m torchtalk.analysis.libclang_env`.
 
 TorchTalk is a standard MCP server and works with any MCP client. Register it with your agent:
 

@@ -55,10 +55,20 @@ class TestGetStatus:
         ext.get_call_graph_data.return_value = {
             "stats": {"total_functions": 51000, "total_call_edges": 51000}
         }
+        ext.coverage_summary.return_value = {"ok": 844}
         server_state.cpp_extractor = ext
         out = asyncio.run(get_status())
         assert "Ready" in out
         assert "Functions: 51,000" in out
+        assert "844" in out
+
+    def test_cpp_failed_shows_error(self, server_state):
+        server_state.cpp_extractor = None
+        server_state.cpp_building = False
+        server_state.cpp_error = "libclang check FAILED: bindings 18.1.1 too old"
+        out = asyncio.run(get_status())
+        assert "FAILED" in out
+        assert "too old" in out
 
     def test_cpp_unavailable_no_source(self, server_state):
         server_state.source = None

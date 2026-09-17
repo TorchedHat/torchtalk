@@ -290,6 +290,10 @@ def cmd_index_build(args):
     print(f"  Test files:       {stats['test_files']:,}")
     if stats["call_graph_building"]:
         print("  C++ call graph:   building in background")
+    elif stats.get("call_graph_error"):
+        print("  C++ call graph:   FAILED")
+        print(f"    {stats['call_graph_error']}")
+        return 1
     else:
         print(f"  C++ call graph:   {stats['call_graph_functions']:,} functions")
     return 0

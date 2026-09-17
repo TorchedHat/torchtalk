@@ -8,7 +8,7 @@ from typing import Literal
 
 from mcp.server.fastmcp import FastMCP
 
-from .formatting import create_formatter
+from .formatting import coverage_note, create_formatter
 from .indexer import (
     _auto_detect_source,
     _init_from_source,
@@ -81,6 +81,11 @@ async def get_status() -> str:
         md.bold("Status", "Ready")
         md.item(f"Functions: {stats['total_functions']:,}", 1)
         md.item(f"Call edges: {stats['total_call_edges']:,}", 1)
+        if note := coverage_note(_state.cpp_extractor):
+            md.item(note, 1)
+    elif _state.cpp_error:
+        md.bold("Status", "FAILED")
+        md.item(_state.cpp_error, 1)
     else:
         md.bold("Status", "Not available")
         if _state.source:
@@ -151,11 +156,14 @@ async def get_status() -> str:
         md.blank()
 
     ready = "Ready" if _state.bindings else "Not ready"
-    cpp_ready = (
-        "Ready"
-        if _state.cpp_extractor
-        else ("Building..." if _state.cpp_building else "Not ready")
-    )
+    if _state.cpp_extractor:
+        cpp_ready = "Ready"
+    elif _state.cpp_building:
+        cpp_ready = "Building..."
+    elif _state.cpp_error:
+        cpp_ready = "FAILED"
+    else:
+        cpp_ready = "Not ready"
     py_ready = "Ready" if _state.py_modules else "Not ready"
     test_ready = "Ready" if _state.test_files else "Not ready"
 
