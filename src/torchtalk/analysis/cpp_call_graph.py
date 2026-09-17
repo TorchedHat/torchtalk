@@ -5,11 +5,11 @@ import contextlib
 import ctypes
 import json
 import logging
+import multiprocessing
 import os
 import signal
 import sys
 from collections import defaultdict
-import multiprocessing
 from pathlib import Path
 from typing import Any
 
