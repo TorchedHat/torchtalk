@@ -629,6 +629,10 @@ class _FakePool:
         return [fn(i) for i in items]
 
 
+class _FakeContext:
+    Pool = _FakePool
+
+
 class TestSupportedExtensions:
     """.cc/.cxx parse like .cpp; .cu is attempted even without a CUDA env."""
 
@@ -649,7 +653,9 @@ class TestSupportedExtensions:
             cpp_call_graph, "should_exclude", lambda _p, _pat=None: False
         )
         monkeypatch.setattr(cpp_call_graph, "should_include_dir", lambda _p, _d: True)
-        monkeypatch.setattr(cpp_call_graph, "Pool", _FakePool)
+        monkeypatch.setattr(
+            cpp_call_graph.multiprocessing, "get_context", lambda _method: _FakeContext
+        )
 
         parsed: list[str] = []
 
