@@ -9,7 +9,7 @@ import os
 import signal
 import sys
 from collections import defaultdict
-from multiprocessing import Pool
+import multiprocessing
 from pathlib import Path
 from typing import Any
 
@@ -427,7 +427,8 @@ class CppCallGraphExtractor:
             num_workers = _default_workers()
         log.info(f"Using {num_workers} parallel workers")
 
-        with Pool(processes=num_workers, initializer=_worker_init) as pool:
+        ctx = multiprocessing.get_context("forkserver")
+        with ctx.Pool(processes=num_workers, initializer=_worker_init) as pool:
             results = pool.map(_parse_single_file, entries)
 
         # Merge results, attributing each record to the file where the
@@ -610,7 +611,8 @@ class CppCallGraphExtractor:
             if num_workers is None:
                 num_workers = _default_workers()
             if len(translated) > 1 and num_workers > 1:
-                with Pool(processes=num_workers, initializer=_worker_init) as pool:
+                ctx = multiprocessing.get_context("forkserver")
+                with ctx.Pool(processes=num_workers, initializer=_worker_init) as pool:
                     results = pool.map(_parse_single_file, translated)
             else:
                 results = [_parse_single_file(e) for e in translated]
