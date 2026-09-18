@@ -53,7 +53,8 @@ pip install -r requirements.txt
 pip install -e .
 ```
 
-The `clang` bindings must match the system `libclang.so` major (19+). Check with `python -m torchtalk.analysis.libclang_env`.
+The C++ call graph needs `libclang` installed. Set `LIBCLANG_LIBRARY_FILE` to
+use a specific copy.
 
 TorchTalk is a standard MCP server and works with any MCP client. Register it with your agent:
 

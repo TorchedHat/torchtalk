@@ -1,5 +1,4 @@
-# clang bindings must match the system libclang.so major (>= 19).
-clang==21.1.7
+clang>=19
 
 mcp==1.30.0
 pathspec==1.1.1

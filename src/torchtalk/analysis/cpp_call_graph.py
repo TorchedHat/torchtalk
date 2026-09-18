@@ -17,7 +17,6 @@ from typing import Any
 
 from .helpers import fuzzy_distance_limit, levenshtein_distance
 from .libclang_env import (
-    ENV_LIBRARY_FILE,
     LibclangEnv,
     check_libclang,
     configure,
@@ -125,9 +124,7 @@ def _worker_init(
             daemon=True,
         ).start()
     # Workers are fresh interpreters; load the libclang the parent verified.
-    if library_file:
-        os.environ.setdefault(ENV_LIBRARY_FILE, library_file)
-        configure(library_file)
+    configure(library_file)
 
 
 def _rel_to_root(path: str, source_root: str) -> str | None:
