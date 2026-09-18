@@ -49,8 +49,12 @@ flowchart LR
 ## Quick Start
 
 ```bash
+pip install -r requirements.txt
 pip install -e .
 ```
+
+The C++ call graph needs `libclang` installed. Set `LIBCLANG_LIBRARY_FILE` to
+use a specific copy.
 
 TorchTalk is a standard MCP server and works with any MCP client. Register it with your agent:
 

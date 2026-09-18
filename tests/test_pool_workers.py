@@ -8,10 +8,15 @@ import signal
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 import pytest
 
-from torchtalk.analysis.cpp_call_graph import _default_workers, _worker_init
+from torchtalk.analysis.cpp_call_graph import (
+    _default_workers,
+    _proc_start_time,
+    _worker_init,
+)
 
 
 def test_default_workers_uses_affinity_not_host_cpus(monkeypatch):
@@ -39,41 +44,33 @@ def test_worker_init_ignores_sigint():
         signal.signal(signal.SIGINT, original)
 
 
-PARENT = """
-import os, signal, sys, time
-from multiprocessing import Pool
-from torchtalk.analysis.cpp_call_graph import _worker_init
-
-def work(i):
-    time.sleep(300)
-
-if __name__ == "__main__":
-    pool = Pool(processes=2, initializer=_worker_init)
-    print(" ".join(str(p.pid) for p in pool._pool), flush=True)
-    pool.map_async(work, range(2))
-    time.sleep(300)
-"""
+POOL_PARENT = Path(__file__).with_name("helpers") / "pool_parent.py"
 
 
-@pytest.mark.skipif(sys.platform != "linux", reason="PDEATHSIG is Linux-only")
-def test_workers_die_when_parent_is_killed():
+def _alive(pid: int) -> bool:
+    return os.path.isdir(f"/proc/{pid}")
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="needs /proc and PDEATHSIG")
+@pytest.mark.parametrize("start_method", ["fork", "forkserver"])
+def test_workers_die_when_parent_is_killed(start_method):
     proc = subprocess.Popen(
-        [sys.executable, "-c", PARENT], stdout=subprocess.PIPE, text=True
+        [sys.executable, str(POOL_PARENT), start_method],
+        stdout=subprocess.PIPE,
+        text=True,
     )
+    workers: list[int] = []
     try:
         workers = [int(pid) for pid in proc.stdout.readline().split()]
         assert workers
-        time.sleep(2)
+        time.sleep(2)  # let workers finish _worker_init
         os.kill(proc.pid, signal.SIGKILL)
         proc.wait(timeout=10)
 
         deadline = time.time() + 15
-        while time.time() < deadline:
-            if not any(os.path.isdir(f"/proc/{pid}") for pid in workers):
-                break
+        while time.time() < deadline and any(_alive(pid) for pid in workers):
             time.sleep(0.25)
-
-        survivors = [pid for pid in workers if os.path.isdir(f"/proc/{pid}")]
+        survivors = [pid for pid in workers if _alive(pid)]
         assert not survivors, f"orphaned workers survived: {survivors}"
     finally:
         if proc.poll() is None:
@@ -81,3 +78,12 @@ def test_workers_die_when_parent_is_killed():
         for pid in workers:
             with contextlib.suppress(OSError):
                 os.kill(pid, signal.SIGKILL)
+
+
+def test_proc_start_time_of_self_and_missing_pid():
+    st = _proc_start_time(os.getpid())
+    if sys.platform != "linux":
+        assert st is None
+        return
+    assert st is not None and st.isdigit()
+    assert _proc_start_time(2**22 + 12345) is None

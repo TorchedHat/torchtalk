@@ -9,11 +9,18 @@ import multiprocessing
 import os
 import signal
 import sys
+import threading
+import time
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
 from .helpers import fuzzy_distance_limit, levenshtein_distance
+from .libclang_env import (
+    LibclangEnv,
+    check_libclang,
+    configure,
+)
 from .patterns import CPP_SEARCH_DIRS, should_exclude, should_include_dir
 
 log = logging.getLogger(__name__)
@@ -28,6 +35,26 @@ except ImportError:
     log.warning("libclang not available - C++ call graph extraction disabled")
 
 
+# Fraction of TUs that must parse; below this the build fails (default 1.0).
+ENV_MIN_TU_SUCCESS = "TORCHTALK_MIN_TU_SUCCESS"
+
+
+class CallGraphBuildError(RuntimeError):
+    """Raised when too few translation units parsed to trust the result."""
+
+
+def _min_tu_success() -> float:
+    raw = os.environ.get(ENV_MIN_TU_SUCCESS)
+    if raw is None:
+        return 1.0
+    try:
+        value = float(raw)
+    except ValueError:
+        log.warning(f"Ignoring non-numeric {ENV_MIN_TU_SUCCESS}={raw!r}")
+        return 1.0
+    return min(1.0, max(0.0, value))
+
+
 def _default_workers() -> int:
     # Size off the CPUs actually schedulable here, since cpu_count() reports host
     # CPUs and overshoots under a container quota.
@@ -38,14 +65,66 @@ def _default_workers() -> int:
     return max(1, int(usable * 0.8))
 
 
-def _worker_init() -> None:
-    # Ask the kernel to signal each worker when its parent dies, so a SIGKILLed
-    # server cannot strand a pool that would otherwise block on the task queue
-    # forever.
+def _pool_context() -> multiprocessing.context.BaseContext:
+    try:
+        return multiprocessing.get_context("forkserver")
+    except ValueError:  # not available on this platform (Windows); use default
+        return multiprocessing.get_context()
+
+
+# Bound by name so tests can substitute a fake pool.
+Pool = _pool_context().Pool
+
+
+def _proc_start_time(pid: int) -> str | None:
+    """Kernel start time of `pid`, or None; used to detect pid reuse."""
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            stat = f.read()
+    except OSError:
+        return None
+    # comm may contain spaces, so split after the closing paren.
+    fields = stat.rsplit(")", 1)[-1].split()
+    return fields[19] if len(fields) > 19 else None
+
+
+def _parent_watchdog(parent_pid: int, parent_start: str | None) -> None:
+    """Exit once the server is gone; PDEATHSIG only tracks the fork server."""
+    while True:
+        time.sleep(1.0)
+        try:
+            os.kill(parent_pid, 0)
+        except ProcessLookupError:
+            os._exit(0)
+        except PermissionError:
+            os._exit(0)  # pid now belongs to another user's process
+        if parent_start is not None and _proc_start_time(parent_pid) != parent_start:
+            os._exit(0)
+
+
+def _worker_initargs(library_file: str | None) -> tuple[str | None, int, str | None]:
+    return (library_file, os.getpid(), _proc_start_time(os.getpid()))
+
+
+def _worker_init(
+    library_file: str | None = None,
+    parent_pid: int | None = None,
+    parent_start: str | None = None,
+) -> None:
+    # PDEATHSIG covers "fork"; the watchdog thread covers "forkserver".
     if sys.platform == "linux":
         with contextlib.suppress(OSError):
             ctypes.CDLL("libc.so.6", use_errno=True).prctl(1, signal.SIGTERM)
     signal.signal(signal.SIGINT, signal.SIG_IGN)
+    if parent_pid is not None and parent_pid != os.getpid():
+        threading.Thread(
+            target=_parent_watchdog,
+            args=(parent_pid, parent_start),
+            name="parent-watchdog",
+            daemon=True,
+        ).start()
+    # Workers are fresh interpreters; load the libclang the parent verified.
+    configure(library_file)
 
 
 def _rel_to_root(path: str, source_root: str) -> str | None:
@@ -219,6 +298,8 @@ def _parse_single_file(args: tuple[str, list[str]]) -> dict[str, Any]:
         "includes": [],
         "success": False,
         "error": None,
+        "error_count": 0,
+        "first_error": None,
     }
 
     try:
@@ -230,8 +311,16 @@ def _parse_single_file(args: tuple[str, list[str]]) -> dict[str, Any]:
         )
 
         if tu is None:
-            result["error"] = "parse failed"
+            result["error"] = "libclang returned no translation unit"
             return result
+
+        for diag in tu.diagnostics:
+            if diag.severity >= 3:  # Error or Fatal
+                result["error_count"] += 1
+                if result["first_error"] is None:
+                    loc = diag.location
+                    where = f"{loc.file}:{loc.line}" if loc.file else "?"
+                    result["first_error"] = f"{where}: {diag.spelling}"
 
         callees, callers, function_locations = defaultdict(set), defaultdict(set), {}
 
@@ -287,9 +376,66 @@ def _parse_single_file(args: tuple[str, list[str]]) -> dict[str, Any]:
         result["includes"] = includes
         result["success"] = True
     except Exception as e:
-        result["error"] = str(e)
+        # The parent groups failures by this string.
+        result["error"] = f"{type(e).__name__}: {e}"
 
     return result
+
+
+def _report_parse_results(results: list[dict[str, Any]], source_root: str) -> None:
+    """Log failed and degraded TUs grouped by cause."""
+    failures: dict[str, list[str]] = defaultdict(list)
+    degraded: dict[str, list[str]] = defaultdict(list)
+    for r in results:
+        rel = _rel_to_root(r.get("file", ""), source_root) or r.get("file", "?")
+        if not r["success"]:
+            failures[r.get("error") or "unknown error"].append(rel)
+        elif r.get("error_count"):
+            key = r.get("first_error") or "unknown diagnostic"
+            # Drop the file:line prefix so identical messages group.
+            degraded[key.split(": ", 1)[-1]].append(rel)
+
+    for err, files in sorted(failures.items(), key=lambda kv: -len(kv[1])):
+        examples = ", ".join(files[:5])
+        more = f" (+{len(files) - 5} more)" if len(files) > 5 else ""
+        log.warning(f"{len(files)} TU(s) failed to parse: {err} [{examples}{more}]")
+        log.debug(f"Failed TUs for {err!r}: {files}")
+        if "Unknown" in err and "kind" in err:
+            log.warning(
+                "  ^ unknown cursor/type kind: the python clang bindings are "
+                "older than libclang or than the sources need. Install matching "
+                "bindings and library of the same LLVM major (>= 19)."
+            )
+
+    if degraded:
+        total = sum(len(v) for v in degraded.values())
+        log.warning(
+            f"{total} TU(s) parsed with compiler errors (results may be "
+            "incomplete). Most common:"
+        )
+        for msg, files in sorted(degraded.items(), key=lambda kv: -len(kv[1]))[:5]:
+            log.warning(f"  {len(files)}x {msg} (e.g. {files[0]})")
+        if any("file not found" in m for m in degraded):
+            log.warning(
+                "  ^ missing headers: check include paths in compile_commands.json "
+                "and that a clang resource dir was found (see libclang check "
+                "line above)."
+            )
+
+
+def _enforce_coverage(success_count: int, total: int) -> None:
+    """Fail the build when fewer TUs parsed than the configured threshold."""
+    if total == 0:
+        return
+    threshold = _min_tu_success()
+    ratio = success_count / total
+    if ratio < threshold:
+        raise CallGraphBuildError(
+            f"C++ call graph build failed: {success_count}/{total} translation "
+            f"units parsed ({ratio:.1%}), below the required {threshold:.0%}. "
+            "See the warnings above for the causes. To accept a partial graph "
+            f"deliberately, set {ENV_MIN_TU_SUCCESS} (e.g. 0.9)."
+        )
 
 
 class CppCallGraphExtractor:
@@ -298,7 +444,9 @@ class CppCallGraphExtractor:
     def __init__(self, cache_dir: Path | None = None):
         if not LIBCLANG_AVAILABLE:
             raise RuntimeError(
-                "libclang is not available. Install with: pip install libclang"
+                "python clang bindings are not importable. Install the `clang` "
+                "package matching your system libclang (e.g. `pip install "
+                "'clang==19.*'` or Fedora `python3-clang`)."
             )
 
         self.cache_dir = (
@@ -328,6 +476,9 @@ class CppCallGraphExtractor:
         # Union of -I dirs seen in compile_commands.json, repo-relative, sorted.
         self.include_dirs: list[str] = []
 
+        # Set on first parse; loading a cache needs no toolchain.
+        self.libclang_env: LibclangEnv | None = None
+
     def extract_from_pytorch_parallel(
         self,
         pytorch_source: str,
@@ -342,7 +493,12 @@ class CppCallGraphExtractor:
             num_workers: Number of parallel workers (default: 80% of CPU count)
             include_dirs: Directory patterns to include (default: PyTorch dirs)
             exclude_patterns: Path exclusion patterns (default: PyTorch patterns)
+
+        Raises LibclangSetupError on a bad toolchain and CallGraphBuildError
+        when fewer TUs parsed than TORCHTALK_MIN_TU_SUCCESS allows.
         """
+        # Fail fast on a bad toolchain before parsing anything.
+        env = self._check_toolchain()
         source = Path(pytorch_source)
 
         # Use default directories if not specified
@@ -394,7 +550,12 @@ class CppCallGraphExtractor:
 
             command = entry.get("command", "")
             args = command.split()[1:] if command else entry.get("arguments", [])[1:]
-            entries.append((file_path, _translate_args(file_path, args, cuda_env)))
+            entries.append(
+                (
+                    file_path,
+                    _translate_args(file_path, args, cuda_env),
+                )
+            )
             covered_files.add(file_path)
             if template_raw_args is None:
                 template_raw_args = args
@@ -427,8 +588,11 @@ class CppCallGraphExtractor:
             num_workers = _default_workers()
         log.info(f"Using {num_workers} parallel workers")
 
-        ctx = multiprocessing.get_context("forkserver")
-        with ctx.Pool(processes=num_workers, initializer=_worker_init) as pool:
+        with Pool(
+            processes=num_workers,
+            initializer=_worker_init,
+            initargs=_worker_initargs(env.library_file),
+        ) as pool:
             results = pool.map(_parse_single_file, entries)
 
         # Merge results, attributing each record to the file where the
@@ -447,13 +611,21 @@ class CppCallGraphExtractor:
 
         self._rebuild_aggregates()
 
-        log.info(f"Completed: {success_count}/{len(entries)} files succeeded")
+        _report_parse_results(results, str(source))
+        level = logging.INFO if success_count == len(entries) else logging.WARNING
+        log.log(level, f"Completed: {success_count}/{len(entries)} files succeeded")
         log.info(
             f"Extracted {len(self.function_locations)} functions, "
             f"{sum(len(v) for v in self.callees.values())} call edges"
         )
+        _enforce_coverage(success_count, len(entries))
 
         return self.get_call_graph_data()
+
+    def _check_toolchain(self) -> LibclangEnv:
+        if self.libclang_env is None:
+            self.libclang_env = check_libclang()
+        return self.libclang_env
 
     def get_call_graph_data(self) -> dict[str, Any]:
         # Intern tu_includes paths: PyTorch has ~8k unique headers but ~2M
@@ -606,16 +778,23 @@ class CppCallGraphExtractor:
 
         results: list[dict[str, Any]] = []
         if entries:
+            env = self._check_toolchain()
             cuda_env = _discover_cuda_env()
             translated = [(fp, _translate_args(fp, a, cuda_env)) for fp, a in entries]
             if num_workers is None:
                 num_workers = _default_workers()
             if len(translated) > 1 and num_workers > 1:
-                ctx = multiprocessing.get_context("forkserver")
-                with ctx.Pool(processes=num_workers, initializer=_worker_init) as pool:
+                with Pool(
+                    processes=num_workers,
+                    initializer=_worker_init,
+                    initargs=_worker_initargs(env.library_file),
+                ) as pool:
                     results = pool.map(_parse_single_file, translated)
             else:
+                _worker_init(env.library_file)
                 results = [_parse_single_file(e) for e in translated]
+            if source_root:
+                _report_parse_results(results, source_root)
 
             # Records are keyed by DEFINING file, so header-defined (inline/
             # template) functions live under the header's record — which the

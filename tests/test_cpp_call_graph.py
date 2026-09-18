@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 
@@ -13,13 +14,26 @@ from torchtalk.analysis.cpp_call_graph import (
     _synthesize_missing_cu_entries,
     _translate_args,
 )
+from torchtalk.analysis.libclang_env import LibclangEnv, LibclangSetupError
 
 pytestmark = pytest.mark.skipif(not LIBCLANG_AVAILABLE, reason="libclang not available")
 
 
+FAKE_LIBCLANG_ENV = LibclangEnv(
+    library_file="/fake/libclang.so",
+    library_version="22.1.8",
+    library_major=22,
+    bindings_version="22.1.8",
+    bindings_major=22,
+)
+
+
 @pytest.fixture
 def extractor(tmp_path):
-    return CppCallGraphExtractor(cache_dir=tmp_path)
+    ext = CppCallGraphExtractor(cache_dir=tmp_path)
+    # Skip the real toolchain check.
+    ext.libclang_env = FAKE_LIBCLANG_ENV
+    return ext
 
 
 def _seed(ext: CppCallGraphExtractor, records: dict[str, dict]) -> None:
@@ -616,7 +630,7 @@ class TestIncludeDirsPersistence:
 
 
 class _FakePool:
-    def __init__(self, processes=None, initializer=None):
+    def __init__(self, processes=None, initializer=None, initargs=()):
         pass
 
     def __enter__(self):
@@ -627,10 +641,6 @@ class _FakePool:
 
     def map(self, fn, items):
         return [fn(i) for i in items]
-
-
-class _FakeContext:
-    Pool = _FakePool
 
 
 class TestSupportedExtensions:
@@ -653,9 +663,7 @@ class TestSupportedExtensions:
             cpp_call_graph, "should_exclude", lambda _p, _pat=None: False
         )
         monkeypatch.setattr(cpp_call_graph, "should_include_dir", lambda _p, _d: True)
-        monkeypatch.setattr(
-            cpp_call_graph.multiprocessing, "get_context", lambda _method: _FakeContext
-        )
+        monkeypatch.setattr(cpp_call_graph, "Pool", _FakePool)
 
         parsed: list[str] = []
 
@@ -851,3 +859,35 @@ class TestLevenshteinCap:
         assert extractor.match_functions("softmax_kernal", fuzzy=True) == [
             "softmax_kernel"
         ]
+
+
+class TestToolchainCheck:
+    def test_check_runs_once_and_is_cached(self, tmp_path, monkeypatch):
+        calls = []
+
+        def fake_check(library_file=None):
+            calls.append(library_file)
+            return FAKE_LIBCLANG_ENV
+
+        monkeypatch.setattr(cpp_call_graph, "check_libclang", fake_check)
+        ext = CppCallGraphExtractor(cache_dir=tmp_path)
+        assert ext.libclang_env is None
+        assert ext._check_toolchain() is FAKE_LIBCLANG_ENV
+        assert ext._check_toolchain() is FAKE_LIBCLANG_ENV
+        assert calls == [None]
+
+    def test_setup_error_aborts_extract_before_parsing(self, tmp_path, monkeypatch):
+        def boom(library_file=None):
+            raise LibclangSetupError("bindings 18 < 19")
+
+        monkeypatch.setattr(cpp_call_graph, "check_libclang", boom)
+        monkeypatch.setattr(cpp_call_graph, "Pool", _FakePool)
+        ext = CppCallGraphExtractor(cache_dir=tmp_path)
+        with pytest.raises(LibclangSetupError, match="18 < 19"):
+            ext.extract_from_pytorch_parallel(str(tmp_path), num_workers=1)
+
+    def test_worker_initargs_carry_library_and_server_identity(self):
+        lib, pid, start = cpp_call_graph._worker_initargs("/fake/libclang.so")
+        assert lib == "/fake/libclang.so"
+        assert pid == os.getpid()
+        assert start == cpp_call_graph._proc_start_time(os.getpid())

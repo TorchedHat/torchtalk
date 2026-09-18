@@ -78,6 +78,7 @@ class ServerState:
     cpp_extractor: Any = None
     cpp_building: bool = False
     cpp_thread: Any = None
+    cpp_error: str | None = None
 
 
 _state = ServerState()
@@ -562,6 +563,7 @@ def _init_cpp_call_graph(source: str):
 
         def build():
             global _state
+            _state.cpp_error = None
             try:
                 ext = CppCallGraphExtractor(cache_dir=cg_cache_dir)
                 ext.extract_from_pytorch_parallel(
@@ -575,7 +577,8 @@ def _init_cpp_call_graph(source: str):
                     f"C++ call graph ready: {len(ext.function_locations)} functions"
                 )
             except Exception as e:
-                log.warning(f"C++ call graph build failed: {e}")
+                _state.cpp_error = str(e)
+                log.error(f"C++ call graph build failed: {e}")
             finally:
                 _state.cpp_building = False
 
@@ -585,7 +588,8 @@ def _init_cpp_call_graph(source: str):
         _state.cpp_thread.start()
 
     except Exception as e:
-        log.warning(f"Failed to init C++ call graph: {e}")
+        _state.cpp_error = str(e)
+        log.error(f"Failed to init C++ call graph: {e}")
 
 
 def _cpp_status() -> str:
@@ -1656,6 +1660,7 @@ def build_index(source: str, wait_for_cpp: bool = True) -> dict:
         "derivatives": len(_state.derivatives),
         "call_graph_functions": cg_functions,
         "call_graph_building": _state.cpp_building,
+        "call_graph_error": _state.cpp_error,
         "python_modules": len(_state.py_modules),
         "nn_modules": len(_state.nn_modules),
         "external_refs": len(_state.external_refs),
