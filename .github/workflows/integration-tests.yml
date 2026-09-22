@@ -6,6 +6,7 @@ on:
     branches: [main]
     paths:
       - "src/torchtalk/analysis/**"
+      - "src/torchtalk/integration_manifest.py"
       - "tests/test_binding_detector_pytorch.py"
       - "tests/integration/**"
       - ".github/workflows/integration-tests.yml"
@@ -32,10 +33,12 @@ jobs:
         id: manifest
         run: |
           python3 << 'SCRIPT'
-          import yaml, os
+          import os
+          from torchtalk.integration_manifest import load_integration_manifest
 
-          with open("tests/integration/${{ matrix.target }}.yml") as f:
-              m = yaml.safe_load(f)
+          m = load_integration_manifest(
+              "tests/integration/${{ matrix.target }}.yml"
+          )
 
           out = os.environ["GITHUB_OUTPUT"]
           with open(out, "a") as f:

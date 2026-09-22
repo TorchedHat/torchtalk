@@ -1,5 +1,6 @@
 # Template for a new integration target. Copy to tests/integration/<name>.yml
 # (files starting with "_" are ignored by the loader) and fill in every value.
+# The filename selects the registered harness; do not add a `harness` field.
 #
 # The file drives two things:
 #   1. tests/test_binding_detector_pytorch.py — each `anchors` entry becomes a
@@ -31,7 +32,7 @@ sparse_paths:
 #                           (and containing `content_filter`) yields a kernel
 #   has_at_dispatch         at least one file under `dir` uses AT_DISPATCH_*
 #   has_binding_types       bindings under `dir` cover every type in `value`
-#                           (e.g. [pybind11, torch_library])
+#                           (e.g. [pybind_function, torch_library_impl])
 anchors:
   - file: csrc/bindings.cpp
     check: pybind_name
@@ -48,4 +49,4 @@ anchors:
 
   - dir: csrc
     check: has_binding_types
-    value: [pybind11, torch_library]
+    value: [pybind_function, torch_library_impl]

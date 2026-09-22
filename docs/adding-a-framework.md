@@ -80,10 +80,18 @@ Manifests are loaded with `load_builtin_manifest("myfw")` and registered under
 ## 2. Integration anchors (`tests/integration/<name>.yml`)
 
 Copy `tests/integration/_template.yml` (files starting with `_` are skipped by
-the loader). Each anchor is a fact about the pinned `ref` that a detector must
-reproduce — a specific pybind name, a `TORCH_LIBRARY` C++ impl, "this dir has
-CUDA kernels". Grep each one by hand first; pick things that survive patch
-releases.
+the loader). The filename is the harness identity: `<name>.yml` must match a
+registered `<name>` harness; do not add a `harness` field. Each anchor is a
+fact about the pinned `ref` that a detector must reproduce — a specific pybind
+name, a `TORCH_LIBRARY` C++ impl, "this dir has CUDA kernels". Grep each one by
+hand first; pick things that survive patch releases.
+
+Integration manifests are validated before checkout or source analysis. They
+must contain `repo`, `ref`, `env_var`, `sparse_paths`, and `anchors`; unknown
+fields fail validation. Anchor fields are check-specific: file checks require
+`file` and `value`, directory checks require `dir`, and `has_binding_types`
+uses real detector values such as `pybind_function` and `torch_library_impl`.
+Use only paths relative to the target checkout.
 
 Keep `sparse_paths` minimal — CI sparse-clones only those directories.
 
@@ -93,6 +101,7 @@ Then add `<name>` to `matrix.target` in
 Verify:
 
 ```sh
+python -m pytest tests/test_integration_manifest.py -q
 export MYFW_SOURCE=/path/to/myfw       # the env_var you set in the yml
 python -m pytest tests/test_binding_detector_pytorch.py -v -k myfw
 ```

@@ -18,10 +18,10 @@ import os
 from pathlib import Path
 
 import pytest
-import yaml
 
 from torchtalk import harness as harness_mod
 from torchtalk.analysis.binding_detector import BindingDetector, BindingType
+from torchtalk.integration_manifest import load_integration_manifest
 
 MANIFESTS_DIR = Path(__file__).parent / "integration"
 
@@ -33,10 +33,7 @@ def _load_manifests() -> list[dict]:
         for path in sorted(MANIFESTS_DIR.glob("*.yml")):
             if path.name.startswith("_"):
                 continue  # _template.yml and other non-target files
-            with open(path) as f:
-                manifest = yaml.safe_load(f)
-                manifest["_name"] = path.stem
-                manifests.append(manifest)
+            manifests.append(load_integration_manifest(path))
     return manifests
 
 

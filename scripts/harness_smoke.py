@@ -18,10 +18,12 @@ import sys
 import tempfile
 from pathlib import Path
 
-import yaml
-
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 from torchtalk.harness import get_harness, list_harnesses
+from torchtalk.integration_manifest import (
+    IntegrationManifestError,
+    load_integration_manifest,
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MANIFESTS_DIR = REPO_ROOT / "tests" / "integration"
@@ -33,10 +35,10 @@ _STABLE_TAG = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
 def _load_manifest(target: str) -> dict:
     """Load the integration manifest for a target."""
     path = MANIFESTS_DIR / f"{target}.yml"
-    if not path.exists():
-        sys.exit(f"Manifest not found: {path}")
-    with open(path) as f:
-        return yaml.safe_load(f)
+    try:
+        return load_integration_manifest(path)
+    except IntegrationManifestError as exc:
+        sys.exit(str(exc))
 
 
 def _clone_url(repo: str) -> str:
