@@ -6,6 +6,7 @@ on:
     branches: [main]
     paths:
       - "src/torchtalk/analysis/**"
+      - "src/torchtalk/manifests/**"
       - "tests/test_binding_detector_pytorch.py"
       - "tests/integration/**"
       - ".github/workflows/integration-tests.yml"
@@ -15,7 +16,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        target: [pytorch]
+        target: [pytorch, executorch]
     steps:
       - name: Checkout torchtalk
         uses: actions/checkout@v4

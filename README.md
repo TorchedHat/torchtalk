@@ -83,6 +83,7 @@ Framework conventions are data, not code. Each framework is described by a TOML 
 |---------|----------------|--------|
 | `pytorch` | Full pipeline, including `native_functions.yaml`, `derivatives.yaml`, ATen dispatch, and autograd | ![Supported](https://img.shields.io/badge/-Supported-2da44e) |
 | `vllm` | Custom ops in `csrc/` (`torch.ops._C`) and the model and quantization registries | ![Supported](https://img.shields.io/badge/-Supported-2da44e) |
+| `executorch` | Python modules, pybind bindings, and existing `TORCH_LIBRARY` registrations | ![Supported](https://img.shields.io/badge/-Supported-2da44e) |
 | 3rd-party PyTorch extensions | `torchvision` and other extensions, built on the `torch-extension` base harness | ![In progress](https://img.shields.io/badge/-In%20progress-d4a72c) |
 
 Select a harness with `--harness` anywhere a source is indexed or served:
@@ -90,6 +91,9 @@ Select a harness with `--harness` anywhere a source is indexed or served:
 ```bash
 torchtalk index build --source /path/to/vllm --harness vllm
 ```
+
+ExecuTorch setup and validation evidence are documented in
+[docs/executorch-harness.md](docs/executorch-harness.md).
 
 A repo can also ship its own `.torchtalk.toml` at its root, which
 `index build` and `index update` activate automatically. Manifests support

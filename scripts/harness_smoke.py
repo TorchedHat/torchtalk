@@ -21,7 +21,7 @@ from pathlib import Path
 import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
-from torchtalk.harness import get_harness, list_harnesses
+from torchtalk.harness import builtin_manifest_names, get_harness
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MANIFESTS_DIR = REPO_ROOT / "tests" / "integration"
@@ -90,7 +90,7 @@ def sparse_clone(repo_url: str, ref: str, paths: list[str], dest: Path) -> None:
 
 def main():
     targets = sorted(
-        n for n in list_harnesses() if get_harness(n).manifest.expected_minimums
+        n for n in builtin_manifest_names() if get_harness(n).manifest.expected_minimums
     )
     parser = argparse.ArgumentParser(description="Harness smoke test")
     parser.add_argument("--harness", required=True, choices=targets)

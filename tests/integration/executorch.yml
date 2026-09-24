@@ -1,0 +1,25 @@
+repo: pytorch/executorch
+ref: v1.5.1
+env_var: EXECUTORCH_SOURCE
+sparse_paths:
+  - src/executorch
+  - backends
+  - codegen
+  - devtools
+  - exir
+  - export
+  - extension
+  - kernels/portable
+  - kernels/quantized
+  - runtime
+  - schema
+  - util
+
+anchors:
+  - file: extension/training/pybindings/_training_lib.cpp
+    check: pybind_name
+    value: get_sgd_optimizer
+
+  - file: extension/llm/custom_ops/op_sdpa_aot.cpp
+    check: torch_library_cpp_name
+    value: update_cache_out_no_context

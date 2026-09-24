@@ -1,0 +1,51 @@
+# ExecuTorch (pytorch/executorch). The Python package is assembled from the
+# tracked src/executorch symlink forest, while native sources live at repo root.
+
+[package]
+name = "executorch"
+extends = "torch-extension"
+depends_on = [
+    "pytorch",
+]
+
+[paths]
+cpp_search_dirs = [
+    "extension/llm/custom_ops",
+    "extension/training/pybindings",
+]
+python_search_dirs = [
+    "src/executorch/backends",
+    "src/executorch/codegen",
+    "src/executorch/devtools",
+    "src/executorch/exir",
+    "src/executorch/export",
+    "src/executorch/extension",
+    "src/executorch/kernels/portable",
+    "src/executorch/kernels/quantized",
+    "src/executorch/runtime",
+    "src/executorch/schema",
+    "src/executorch/util",
+]
+python_package_roots = [
+    "executorch",
+]
+test_search_dirs = []
+exclude_patterns = [
+    "/test/",
+    "/tests/",
+    "test_",
+    "_test.",
+    "/third_party/",
+    "/third-party/",
+    "/generated/",
+    "/build/",
+    "/cmake-out/",
+    "/buck-out/",
+    "__pycache__",
+    "/benchmarks/",
+    "/examples/",
+]
+
+[expected_minimums]
+bindings = 40
+python_modules = 1735
