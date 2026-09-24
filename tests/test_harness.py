@@ -52,9 +52,10 @@ class TestHarnessRegistry:
 
 
 class TestRealRepoManifests:
-    def test_vllm_and_torchvision_registered(self):
+    def test_repo_manifests_load(self):
         assert harness_mod.get_harness("vllm").manifest.package == "vllm"
         assert harness_mod.get_harness("torchvision").manifest.package == "torchvision"
+        assert harness_mod.get_harness("executorch").manifest.package == "executorch"
 
 
 class TestCachePathsHarnessQualified:
@@ -164,6 +165,16 @@ class TestTomlManifests:
         assert m.registration_calls[1].key_arg == 0
         assert m.string_dispatchers == {"collective_rpc": 0}
         assert len(m.string_registries) == 10
+
+    def test_executorch_extends_torch_extension(self):
+        m = harness_mod.get_harness("executorch").manifest
+        assert m.depends_on == ("pytorch",)
+        assert m.cpp_search_dirs == (
+            "extension/llm/custom_ops",
+            "extension/training/pybindings",
+        )
+        assert m.python_package_roots == ("executorch",)
+        assert m.expected_minimums == {"bindings": 40, "python_modules": 1735}
 
     def test_extends_replaces_not_appends(self, tmp_path):
         child = tmp_path / "child.toml"
