@@ -91,7 +91,10 @@ must contain `repo`, `ref`, `env_var`, `sparse_paths`, and `anchors`; unknown
 fields fail validation. Anchor fields are check-specific: file checks require
 `file` and `value`, directory checks require `dir`, and `has_binding_types`
 uses real detector values such as `pybind_function` and `torch_library_impl`.
-Use only paths relative to the target checkout.
+Every anchor path must be covered by `sparse_paths`. Use only paths relative to
+the target checkout. `ref` must be a version tag (`vMAJOR.MINOR.PATCH`, with an
+optional prerelease) or a full commit SHA; branch names are rejected. A commit
+SHA provides the immutable pin, while tags can be moved upstream.
 
 Keep `sparse_paths` minimal — CI sparse-clones only those directories.
 

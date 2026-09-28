@@ -9,7 +9,9 @@ import pytest
 import yaml
 
 from torchtalk import harness as harness_mod
+from torchtalk import integration_manifest as integration_manifest_mod
 from torchtalk.analysis.binding_detector import BindingType
+from torchtalk.harness import ManifestError
 from torchtalk.integration_manifest import (
     IntegrationManifestError,
     load_integration_manifest,
@@ -147,16 +149,34 @@ class TestIntegrationManifestRootAndTopLevel:
             _load(tmp_path, data)
 
     @pytest.mark.parametrize(
-        "repo", ["org", "https://github.com/org/repo", "org/repo/extra", ""]
+        "repo",
+        [
+            "org",
+            "https://github.com/org/repo",
+            "org/repo/extra",
+            "",
+            "../..",
+            "./repo",
+            "org/.",
+            "org/..",
+            "-/-",
+        ],
     )
     def test_rejects_bad_repo(self, tmp_path, repo):
         with pytest.raises(IntegrationManifestError, match="repo"):
             _load(tmp_path, _valid_manifest(repo=repo))
 
-    @pytest.mark.parametrize("ref", ["", " HEAD", "HEAD", "v1\n2"])
+    @pytest.mark.parametrize(
+        "ref", ["", " HEAD", "HEAD", "main", "release/1.0", "v1\n2"]
+    )
     def test_rejects_bad_ref(self, tmp_path, ref):
         with pytest.raises(IntegrationManifestError, match="ref"):
             _load(tmp_path, _valid_manifest(ref=ref))
+
+    def test_accepts_full_commit_sha(self, tmp_path):
+        ref = "a" * 40
+        manifest = _load(tmp_path, _valid_manifest(ref=ref))
+        assert manifest["ref"] == ref
 
     @pytest.mark.parametrize(
         "env_var", ["pytorch_source", "1SOURCE", "SOURCE-NAME", ""]
@@ -172,6 +192,50 @@ class TestIntegrationManifestRootAndTopLevel:
     def test_rejects_bad_sparse_paths(self, tmp_path, sparse_paths):
         with pytest.raises(IntegrationManifestError, match="sparse_paths"):
             _load(tmp_path, _valid_manifest(sparse_paths=sparse_paths))
+
+    @pytest.mark.parametrize(
+        "sparse_path,anchor_path",
+        [
+            ("torch/csrc", "aten/src/ATen/native/RNN.cpp"),
+            ("torch/csrc", "torch/csrc2/Module.cpp"),
+        ],
+    )
+    def test_rejects_anchor_outside_sparse_paths(
+        self, tmp_path, sparse_path, anchor_path
+    ):
+        data = _valid_manifest(
+            sparse_paths=[sparse_path],
+            anchors=[
+                {
+                    "file": anchor_path,
+                    "check": "pybind_name",
+                    "value": "example",
+                }
+            ],
+        )
+        with pytest.raises(IntegrationManifestError, match="not covered"):
+            _load(tmp_path, data)
+
+    @pytest.mark.parametrize(
+        "sparse_path,anchor",
+        [
+            (
+                "torch/csrc",
+                {"file": "torch/csrc/Module.cpp", "check": "pybind_name", "value": "x"},
+            ),
+            (
+                "torch/csrc/Module.cpp",
+                {"file": "torch/csrc/Module.cpp", "check": "pybind_name", "value": "x"},
+            ),
+            ("torch/csrc", {"dir": "torch/csrc", "check": "has_cuda_kernel"}),
+        ],
+    )
+    def test_accepts_anchor_covered_by_sparse_path(self, tmp_path, sparse_path, anchor):
+        manifest = _load(
+            tmp_path,
+            _valid_manifest(sparse_paths=[sparse_path], anchors=[anchor]),
+        )
+        assert manifest["anchors"] == [anchor]
 
 
 class TestIntegrationManifestAnchors:
@@ -234,6 +298,17 @@ class TestIntegrationManifestHarnessIdentity:
     def test_rejects_template_filename(self, tmp_path):
         with pytest.raises(IntegrationManifestError, match="reserved"):
             _load(tmp_path, _valid_manifest(), name="_template.yml")
+
+    def test_wraps_malformed_harness_manifest(self, tmp_path, monkeypatch):
+        def malformed_harness(_target):
+            raise ManifestError("invalid TOML")
+
+        monkeypatch.setattr(integration_manifest_mod, "get_harness", malformed_harness)
+        with pytest.raises(
+            IntegrationManifestError,
+            match=r"invalid harness manifest.*invalid TOML",
+        ):
+            _load(tmp_path, _valid_manifest())
 
 
 def test_all_integration_consumers_use_shared_loader():

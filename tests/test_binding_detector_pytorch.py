@@ -21,19 +21,31 @@ import pytest
 
 from torchtalk import harness as harness_mod
 from torchtalk.analysis.binding_detector import BindingDetector, BindingType
-from torchtalk.integration_manifest import load_integration_manifest
+from torchtalk.integration_manifest import (
+    IntegrationManifestError,
+    load_integration_manifest,
+)
 
 MANIFESTS_DIR = Path(__file__).parent / "integration"
 
 
+def _manifest_paths() -> list[Path]:
+    """List target YAML manifests, excluding templates."""
+    return sorted(
+        path for path in MANIFESTS_DIR.glob("*.yml") if not path.name.startswith("_")
+    )
+
+
 def _load_manifests() -> list[dict]:
-    """Load all YAML manifests from tests/integration/."""
+    """Load valid manifests for anchor parametrization without collection errors."""
     manifests = []
-    if MANIFESTS_DIR.exists():
-        for path in sorted(MANIFESTS_DIR.glob("*.yml")):
-            if path.name.startswith("_"):
-                continue  # _template.yml and other non-target files
+    for path in _manifest_paths():
+        try:
             manifests.append(load_integration_manifest(path))
+        except IntegrationManifestError:
+            # A separate test reports this as a normal failure; keep other
+            # manifests and hermetic tests collectable.
+            continue
     return manifests
 
 
@@ -95,6 +107,12 @@ def _anchor_params() -> list[tuple[dict, dict, Path | None]]:
 
 
 PARAMS = _anchor_params()
+
+
+@pytest.mark.parametrize("manifest_path", _manifest_paths(), ids=lambda path: path.stem)
+def test_integration_manifest_is_valid(manifest_path):
+    """Report invalid checked-in YAML as a test failure, not a collection error."""
+    load_integration_manifest(manifest_path)
 
 
 class TestIntegrationAnchors:

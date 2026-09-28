@@ -15,7 +15,7 @@ from typing import Any
 import yaml
 
 from .analysis.binding_detector import BindingType
-from .harness import get_harness
+from .harness import ManifestError, get_harness
 
 
 class IntegrationManifestError(ValueError):
@@ -53,8 +53,12 @@ _UniqueKeyLoader.add_constructor(
 )
 
 
-_REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+_REPO_COMPONENT_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 _ENV_VAR_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
+_COMMIT_SHA_RE = re.compile(r"^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$")
+_VERSION_TAG_RE = re.compile(
+    r"^v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$"
+)
 _TOP_LEVEL_FIELDS = {"repo", "ref", "env_var", "sparse_paths", "anchors"}
 _BINDING_TYPES = frozenset(item.value for item in BindingType)
 _ABSTRACT_TARGETS = {"torch-extension"}
@@ -104,7 +108,12 @@ def _validate_relative_path(value: Any, *, origin: str, location: str) -> str:
 
 def _validate_repo(value: Any, *, origin: str) -> str:
     value = _require_string(value, origin=origin, location="repo")
-    if not _REPO_RE.fullmatch(value):
+    components = value.split("/")
+    if len(components) != 2 or any(
+        not _REPO_COMPONENT_RE.fullmatch(component)
+        or not re.search(r"[A-Za-z0-9]", component)
+        for component in components
+    ):
         _fail(origin, "repo", "must be a GitHub owner/repo string")
     return value
 
@@ -112,9 +121,14 @@ def _validate_repo(value: Any, *, origin: str) -> str:
 def _validate_ref(value: Any, *, origin: str) -> str:
     value = _require_string(value, origin=origin, location="ref")
     if value != value.strip() or "\n" in value or "\r" in value:
-        _fail(origin, "ref", "must be a single-line, trimmed pinned ref")
-    if value.upper() == "HEAD":
-        _fail(origin, "ref", "must be a pinned tag or commit, not HEAD")
+        _fail(origin, "ref", "must be a single-line, trimmed version tag or commit SHA")
+    if not (_VERSION_TAG_RE.fullmatch(value) or _COMMIT_SHA_RE.fullmatch(value)):
+        _fail(
+            origin,
+            "ref",
+            "must be a version tag (vMAJOR.MINOR.PATCH) or full commit SHA; "
+            "branch refs such as 'main' are not allowed",
+        )
     return value
 
 
@@ -209,6 +223,23 @@ def _validate_anchor(anchor: Any, *, origin: str, index: int) -> dict[str, Any]:
     return normalized
 
 
+def _validate_anchor_sparse_coverage(
+    anchors: list[dict[str, Any]], sparse_paths: list[str], *, origin: str
+) -> None:
+    for index, anchor in enumerate(anchors):
+        field = "file" if "file" in anchor else "dir"
+        anchor_path = anchor[field]
+        if not any(
+            anchor_path == sparse_path or anchor_path.startswith(f"{sparse_path}/")
+            for sparse_path in sparse_paths
+        ):
+            _fail(
+                origin,
+                f"anchors[{index}].{field}",
+                f"path {anchor_path!r} is not covered by any sparse_paths entry",
+            )
+
+
 def validate_integration_manifest(
     data: Any, *, target: str, origin: str
 ) -> dict[str, Any]:
@@ -237,6 +268,10 @@ def validate_integration_manifest(
             "filename",
             f"filename-derived harness {target!r} is not registered",
         )
+    except ManifestError as exc:
+        raise IntegrationManifestError(
+            f"{origin}: filename: invalid harness manifest for {target!r}: {exc}"
+        ) from exc
     if harness.manifest.package != target:
         _fail(
             origin,
@@ -248,15 +283,18 @@ def validate_integration_manifest(
     anchors = data["anchors"]
     if not isinstance(anchors, list) or not anchors:
         _fail(origin, "anchors", "must be a non-empty list of anchor mappings")
+    sparse_paths = _validate_sparse_paths(data["sparse_paths"], origin=origin)
+    validated_anchors = [
+        _validate_anchor(anchor, origin=origin, index=index)
+        for index, anchor in enumerate(anchors)
+    ]
+    _validate_anchor_sparse_coverage(validated_anchors, sparse_paths, origin=origin)
     return {
         "repo": _validate_repo(data["repo"], origin=origin),
         "ref": _validate_ref(data["ref"], origin=origin),
         "env_var": _validate_env_var(data["env_var"], origin=origin),
-        "sparse_paths": _validate_sparse_paths(data["sparse_paths"], origin=origin),
-        "anchors": [
-            _validate_anchor(anchor, origin=origin, index=index)
-            for index, anchor in enumerate(anchors)
-        ],
+        "sparse_paths": sparse_paths,
+        "anchors": validated_anchors,
         "_name": target,
     }
 
