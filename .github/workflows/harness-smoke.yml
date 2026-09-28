@@ -6,6 +6,7 @@ on:
     branches: [main]
     paths:
       - "src/torchtalk/harness.py"
+      - "src/torchtalk/integration_manifest.py"
       - "src/torchtalk/analysis/patterns.py"
       - "src/torchtalk/analysis/extractors.py"
       - "src/torchtalk/analysis/binding_detector.py"

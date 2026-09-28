@@ -12,57 +12,34 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import re
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
-import yaml
-
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 from torchtalk.harness import get_harness, list_harnesses
+from torchtalk.integration_manifest import (
+    IntegrationManifestError,
+    load_integration_manifest,
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MANIFESTS_DIR = REPO_ROOT / "tests" / "integration"
 
 
-_STABLE_TAG = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
-
-
 def _load_manifest(target: str) -> dict:
     """Load the integration manifest for a target."""
     path = MANIFESTS_DIR / f"{target}.yml"
-    if not path.exists():
-        sys.exit(f"Manifest not found: {path}")
-    with open(path) as f:
-        return yaml.safe_load(f)
+    try:
+        return load_integration_manifest(path)
+    except IntegrationManifestError as exc:
+        sys.exit(str(exc))
 
 
 def _clone_url(repo: str) -> str:
     """Convert owner/repo to a clone URL."""
     return f"https://github.com/{repo}.git"
-
-
-def latest_stable_tag(repo_url: str) -> str:
-    """Resolve the latest stable release tag (excludes -rc, -beta, etc.)."""
-    result = subprocess.run(
-        ["git", "ls-remote", "--tags", repo_url],
-        capture_output=True,
-        text=True,
-        check=True,
-        timeout=30,
-    )
-    tags = []
-    for line in result.stdout.splitlines():
-        ref = line.split("\t")[1].removeprefix("refs/tags/")
-        m = _STABLE_TAG.match(ref)
-        if m:
-            tags.append((int(m.group(1)), int(m.group(2)), int(m.group(3)), ref))
-    if not tags:
-        raise RuntimeError(f"No stable tags found in {repo_url}")
-    tags.sort()
-    return tags[-1][3]
 
 
 def sparse_clone(repo_url: str, ref: str, paths: list[str], dest: Path) -> None:
@@ -71,21 +48,26 @@ def sparse_clone(repo_url: str, ref: str, paths: list[str], dest: Path) -> None:
             "git",
             "clone",
             "--depth=1",
-            "--branch",
-            ref,
-            "--sparse",
+            "--filter=blob:none",
             "--no-checkout",
             repo_url,
             str(dest),
         ],
         check=True,
     )
+    is_commit_sha = len(ref) in {40, 64} and all(
+        char in "0123456789abcdefABCDEF" for char in ref
+    )
+    refspec = ref if is_commit_sha else f"refs/tags/{ref}"
+    subprocess.run(
+        ["git", "fetch", "--depth=1", "origin", refspec], cwd=dest, check=True
+    )
     subprocess.run(
         ["git", "sparse-checkout", "set", *paths],
         cwd=dest,
         check=True,
     )
-    subprocess.run(["git", "checkout"], cwd=dest, check=True)
+    subprocess.run(["git", "checkout", "--detach", "FETCH_HEAD"], cwd=dest, check=True)
 
 
 def main():
@@ -96,12 +78,16 @@ def main():
     parser.add_argument("--harness", required=True, choices=targets)
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--source", type=Path)
-    group.add_argument("--clone", action="store_true")
+    group.add_argument(
+        "--clone",
+        action="store_true",
+        help="clone the manifest's pinned version tag or commit SHA",
+    )
     args = parser.parse_args()
 
     manifest = _load_manifest(args.harness)
     repo_url = _clone_url(manifest["repo"])
-    ref = manifest.get("ref") or latest_stable_tag(repo_url)
+    ref = manifest["ref"]
     sparse_paths = manifest["sparse_paths"]
 
     if args.clone:
