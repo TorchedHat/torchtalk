@@ -44,13 +44,13 @@ jobs:
             REPO: ${{ github.repository }}
             PR NUMBER: ${{ github.event.issue.pull_request && github.event.issue.number || github.event.pull_request.number }}
 
-            Review this PR against the code in src/torchtalk/ and the rules in CLAUDE.md.
+            Review this PR against the code in src/torchtalk/ and the rules in AGENTS.md.
 
             Focus on substantive issues:
             - Bugs and regressions against existing behavior, especially edge cases like
               null/None fields, empty lists, and missing keys.
             - Scope creep: features added beyond what the PR description states.
-            - Adherence to CLAUDE.md: dead code, module size (under 500 LOC), single-sentence
+            - Adherence to AGENTS.md: dead code, module size (under 500 LOC), single-sentence
               tool docstrings, Protocol over ABC, composition over inheritance.
             - Missing test coverage for changed code paths.
             - Performance regressions on hot paths.

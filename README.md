@@ -62,12 +62,18 @@ TorchTalk is a standard MCP server and works with any MCP client. Register it wi
 # Claude Code
 claude mcp add torchtalk -s user -- torchtalk mcp-serve --source /path/to/pytorch
 
-# Cursor (copies rules and registers the MCP server in a project)
+# Codex
+codex mcp add torchtalk -- torchtalk mcp-serve --source /path/to/pytorch
+
+# Cursor (copies the skill and command, registers the server in a project)
 torchtalk cursor-add -C /path/to/your/project -p /path/to/pytorch
 
 # Any other MCP client points at this command
 torchtalk mcp-serve --source /path/to/pytorch
 ```
+
+Repo instructions for agents live in `AGENTS.md`, which Claude Code, Codex,
+Cursor and Gemini CLI read. See [docs/agent-setup.md](docs/agent-setup.md).
 
 On first run TorchTalk builds its index and caches it under `~/.cache/torchtalk/`.
 The C++ call graph continues building in the background, so the tools work immediately. You need a
@@ -231,7 +237,7 @@ torchtalk/
 ├── src/torchtalk/
 │   ├── server.py              # MCP server (get_status + 6 query tools)
 │   ├── indexer.py             # Data loading, caching, initialization
-│   ├── cli.py                 # CLI (torchtalk mcp-serve)
+│   ├── cli.py                 # CLI (init, index, mcp-serve, snapshot, cursor-add)
 │   ├── harness.py             # ConventionManifest: TOML loading, extends, registry
 │   ├── manifests/             # Built-in harnesses (pytorch, vllm, torchvision, torch-extension)
 │   ├── formatting.py          # Response formatting (CompactText/Markdown)
@@ -244,7 +250,9 @@ torchtalk/
 │       └── patterns.py            # Search directories, exclusion patterns
 ├── docs/
 │   ├── adding-a-framework.md  # Onboard a new framework (manifest, anchors, minimums)
+│   ├── agent-setup.md         # Register the server with Claude Code, Codex, Cursor, Gemini
 │   └── bridge-design.md       # ExternalRef / cross-package bridge design
+├── AGENTS.md                  # Instructions read by coding agents (CLAUDE.md imports it)
 ├── .mcp.json                  # MCP server config
 └── pyproject.toml             # Package config
 ```
