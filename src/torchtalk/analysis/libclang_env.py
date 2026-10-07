@@ -193,7 +193,7 @@ def check_libclang() -> LibclangEnv:
     return env
 
 
-def main(argv: list[str] | None = None) -> int:
+def main() -> int:
     logging.basicConfig(format="%(levelname)s: %(message)s")
     try:
         env = check_libclang()

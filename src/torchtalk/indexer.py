@@ -52,7 +52,6 @@ class ServerState:
 
     py_modules: dict[str, Any] = field(default_factory=dict)
     py_classes: dict[str, list[Any]] = field(default_factory=dict)
-    py_functions: dict[str, list[Any]] = field(default_factory=dict)
     nn_modules: list[Any] = field(default_factory=list)
     py_to_cpp_edges: dict[str, list[dict]] = field(default_factory=dict)
     alias_map: dict[str, str] = field(default_factory=dict)
@@ -669,7 +668,6 @@ def _init_python_modules(source: str):
             index = build_module_index(all_modules)
             _state.py_modules = all_modules
             _state.py_classes = index["by_class"]
-            _state.py_functions = index["by_function"]
             _state.nn_modules = index["nn_modules"]
             log.info(
                 f"Loaded {len(all_modules)} Python modules, "
