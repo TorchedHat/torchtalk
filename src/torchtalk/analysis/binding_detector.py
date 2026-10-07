@@ -24,7 +24,6 @@ class BindingType(Enum):
     TORCH_OP = "torch_op"  # m.def("op", ...)
     CUDA_KERNEL = "cuda_kernel"  # __global__ void kernel(...)
     CUDA_DEVICE_FUNC = "cuda_device_func"  # __device__ helper (callee-from-kernel)
-    CUDA_WRAPPER = "cuda_wrapper"  # C++ function that calls CUDA kernel
     AT_DISPATCH = "at_dispatch"  # AT_DISPATCH_FLOATING_TYPES(...)
 
 
@@ -257,7 +256,7 @@ class BindingDetector:
         modules = []
 
         if node.type == "function_definition":
-            text = self._get_node_text(node, content)
+            text = self._get_node_text(node)
             match = re.search(r"PYBIND11_MODULE\s*\(\s*(\w+)\s*,", text)
             if match:
                 module_name = match.group(1)
@@ -285,7 +284,7 @@ class BindingDetector:
         if not body:
             return
 
-        body_text = self._get_node_text(body, content)
+        body_text = self._get_node_text(body)
         body_start_line = body.start_point.row + 1
 
         self._extract_function_bindings(
@@ -413,7 +412,6 @@ class BindingDetector:
                 start_line,
                 file_path,
                 module_name,
-                cpp_class,
                 python_name,
                 graph,
             )
@@ -425,7 +423,6 @@ class BindingDetector:
         start_line: int,
         file_path: str,
         module_name: str,
-        cpp_class: str,
         python_class: str,
         graph: BindingGraph,
     ):
@@ -688,7 +685,7 @@ class BindingDetector:
                 return name
         return None
 
-    def _get_node_text(self, node, content: str) -> str:
+    def _get_node_text(self, node) -> str:
         return (node.text or b"").decode("utf-8", errors="replace")
 
     def detect_bindings_in_directory(self, directory: str) -> BindingGraph:
