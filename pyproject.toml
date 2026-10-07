@@ -54,9 +54,9 @@ dev = [
 torchtalk = "torchtalk.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/adabeyta/torchtalk"
-Repository = "https://github.com/adabeyta/torchtalk.git"
-Issues = "https://github.com/adabeyta/torchtalk/issues"
+Homepage = "https://github.com/TorchedHat/torchtalk"
+Repository = "https://github.com/TorchedHat/torchtalk.git"
+Issues = "https://github.com/TorchedHat/torchtalk/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/torchtalk"]

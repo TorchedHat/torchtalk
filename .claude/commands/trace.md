@@ -10,6 +10,6 @@ Trace the PyTorch function `$ARGUMENTS`:
 2. Use the `mcp__torchtalk__graph` tool with function_name="$ARGUMENTS" and mode="calls" to show outbound dependencies
 3. Summarize the dispatch path and implementation locations
 
-IMPORTANT: Use the MCP tools directly. Do NOT try to import/run Python code from torchtalk.server.
+Use the MCP tools directly. Do not import or run Python code from torchtalk.server.
 
 Show file:line references for each layer.
