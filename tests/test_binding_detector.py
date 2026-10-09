@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from torchtalk.analysis.binding_detector import (
     _DEVICE_PATTERN,
     _KERNEL_PATTERN,
@@ -128,6 +130,28 @@ class TestImplRegex:
         bindings = self._detect(src)
         cpp_names = {cpp for _, cpp in bindings}
         assert "unsupportedDynamicOp" in cpp_names
+
+    def test_dispatch_key_argument(self):
+        src = """
+        TORCH_LIBRARY(ext, m) {
+            m.impl("foo", torch::kCUDA, &foo_cuda);
+            m.impl("bar", c10::DispatchKey::CPU, TORCH_FN(bar_cpu));
+            m.impl("baz", &baz);
+            m.impl("qux", torch::dispatch(DispatchKey::Autograd, TORCH_FN(ns::qux)));
+        }
+        """
+        graph = BindingDetector().detect_bindings("test.cpp", src)
+        impls = {
+            b.python_name: (b.cpp_name, b.dispatch_key)
+            for b in graph.bindings
+            if b.binding_type == BindingType.TORCH_LIBRARY_IMPL.value
+        }
+        assert impls == {
+            "ext.foo": ("foo_cuda", "CUDA"),
+            "ext.bar": ("bar_cpu", "CPU"),
+            "ext.baz": ("baz", None),
+            "ext.qux": ("qux", "Autograd"),
+        }
 
 
 class TestKernelPattern:
@@ -373,6 +397,20 @@ class TestManifestMacroConfig:
         graph = self._detector().detect_bindings("/w.cpp", code)
         assert {b.namespace for b in graph.bindings if b.namespace} == {"_C"}
 
+    def test_paste_macro_names_library(self):
+        code = (
+            "TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _custom_ar), ar) {\n"
+            '  ar.def("qr_max_size() -> int");\n'
+            "}\n"
+        )
+        assert self._detector().detect_bindings("/b.cpp", code).bindings == []
+        detector = self._detector()
+        detector.paste_macros = ("CONCAT",)
+        graph = detector.detect_bindings("/b.cpp", code)
+        assert [(b.namespace, b.cpp_name) for b in graph.bindings] == [
+            ("_C_custom_ar", "qr_max_size")
+        ]
+
 
 class TestModuleVarTorchOps:
     def test_library_block_uses_declared_module_variable(self):
@@ -492,6 +530,19 @@ class TestSearchDirBounds:
         detector = BindingDetector(search_dirs=("nonexistent",))
         graph = detector.detect_bindings_in_directory(str(repo))
         assert graph.bindings == []
+
+    def test_headers_scanned(self, tmp_path_factory):
+        repo = tmp_path_factory.mktemp("scandir")
+        (repo / "csrc").mkdir()
+        (repo / "csrc" / "kernel.h").write_text(
+            "template <int N>\n__global__ void marlin(const int* a) {}\n"
+        )
+        graph = BindingDetector(search_dirs=("csrc",)).detect_bindings_in_directory(
+            str(repo)
+        )
+        assert [(k.name, Path(k.file_path).name) for k in graph.cuda_kernels] == [
+            ("marlin", "kernel.h")
+        ]
 
 
 class TestManifestExcludeAndPrefilter:

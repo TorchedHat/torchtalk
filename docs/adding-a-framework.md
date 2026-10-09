@@ -39,6 +39,7 @@ python_package_roots = ["myfw"]
 
 [cpp]
 # call_wrappers = ["MYFW_BOX"]        # macros that wrap fn pointers in registrations
+# paste_macros = ["CONCAT"]           # CONCAT(a, b) is read as the identifier ab
 
 # [python.op_namespaces]
 # myfw = "myfw"                       # TORCH_LIBRARY(myfw, m) → "myfw::"

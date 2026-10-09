@@ -73,8 +73,13 @@ def _dispatch_table(md, bindings: list[dict]) -> None:
 
 
 def _exact_bindings(name: str) -> list[dict]:
-    """Bindings registered under `name`, as a Python name or a C++ name."""
-    return _state.by_python_name.get(name) or _state.by_cpp_name.get(name, [])
+    """Bindings registered under `name`, as a Python name or a C++ name.
+
+    Both lookups are merged: an AT_DISPATCH site named after its op would
+    otherwise hide the op's TORCH_LIBRARY registrations. `_dispatch_table`
+    drops the duplicates.
+    """
+    return _state.by_cpp_name.get(name, []) + _state.by_python_name.get(name, [])
 
 
 def _bindings_for_symbol(cpp_symbol: str) -> list[dict]:

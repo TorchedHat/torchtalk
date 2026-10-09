@@ -13,9 +13,13 @@ from typing import Any
 
 from .analysis.helpers import fuzzy_distance_limit, levenshtein_distance, truncate
 from .analysis.patterns import (
+    CPP_HEADER_EXTS,
+    CPP_SOURCE_EXTS,
+    is_vendor_path,
+)
+from .analysis.patterns import (
     has_test_patterns as _has_test_patterns,
 )
-from .analysis.patterns import is_vendor_path
 from .analysis.patterns import (
     should_exclude as _should_exclude,
 )
@@ -115,11 +119,12 @@ def _source_fingerprint(source: str) -> str:
     return hashlib.md5(f"tree:{count}:{newest}".encode()).hexdigest()[:16]
 
 
-# Bump when the bindings-cache schema changes (e.g. a new field added to
-# `native_functions` entries). v2 introduced `python_module`; v3 added
-# package identity to metadata; v4 added the `registrations` section; v5
-# renamed binding "line" → "line_number".
-_BINDINGS_CACHE_FORMAT_VERSION = 5
+# Bump when the bindings-cache schema or the detector's output changes; the
+# source fingerprint only covers the indexed checkout. v2 introduced
+# `python_module`; v3 added package identity to metadata; v4 added the
+# `registrations` section; v5 renamed binding "line" → "line_number"; v6
+# changed detector output (e.g. header files, impl dispatch keys).
+_BINDINGS_CACHE_FORMAT_VERSION = 6
 
 
 def _cache_metadata(source: str, manifest: ConventionManifest | None = None) -> dict:
@@ -438,6 +443,7 @@ def _build_index(
     detector = BindingDetector(
         macro_aliases=manifest.cpp_macro_aliases,
         token_map=manifest.cpp_token_map,
+        paste_macros=manifest.cpp_paste_macros,
         search_dirs=manifest.cpp_search_dirs,
         exclude_patterns=manifest.exclude_patterns,
         registration_macros=manifest.registration_macros,
@@ -1374,8 +1380,6 @@ def update_index(source: str, since: str, on_uncovered: str = "warn") -> dict:
     except (subprocess.CalledProcessError, FileNotFoundError) as e:
         raise RuntimeError(f"git diff failed: {e}") from e
 
-    cpp_exts = (".cpp", ".cc", ".cxx", ".cu", ".cuh")
-    header_exts = (".h", ".hpp", ".hxx", ".hh", ".inc")
     yaml_files = {
         p for p in (active.native_functions_yaml, active.derivatives_yaml) if p
     }
@@ -1391,14 +1395,16 @@ def update_index(source: str, since: str, on_uncovered: str = "warn") -> dict:
         status, path = parts[0], parts[-1]
         if path in yaml_files:
             yaml_changed = True
-        if path.endswith(header_exts):
+        if path.endswith(CPP_HEADER_EXTS):
             changed_headers.add(path)
             continue
-        if not path.endswith(cpp_exts):
+        if not path.endswith(CPP_SOURCE_EXTS):
             continue
         (removed_cpp if status.startswith("D") else changed_cpp).add(path)
 
-    dirty = changed_cpp | removed_cpp
+    # Headers are rescanned for bindings like sources; a deleted one simply
+    # drops out below because it no longer exists.
+    dirty = changed_cpp | removed_cpp | changed_headers
     prior_source = manifest.pytorch_source
     new_bindings = [
         b
@@ -1414,6 +1420,7 @@ def update_index(source: str, since: str, on_uncovered: str = "warn") -> dict:
     detector = BindingDetector(
         macro_aliases=active.cpp_macro_aliases,
         token_map=active.cpp_token_map,
+        paste_macros=active.cpp_paste_macros,
         registration_macros=active.registration_macros,
         source_root=source,
     )
@@ -1422,7 +1429,7 @@ def update_index(source: str, since: str, on_uncovered: str = "warn") -> dict:
     # patterns, and the binding-pattern prefilter must all match
     # detect_bindings_in_directory, or incremental results diverge.
     bounds = tuple(d.rstrip("/") + "/" for d in active.cpp_search_dirs)
-    for rel in changed_cpp:
+    for rel in changed_cpp | changed_headers:
         if bounds and not rel.startswith(bounds):
             continue
         # Exclusion runs on the repo-relative path: patterns describe repo

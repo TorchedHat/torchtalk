@@ -222,6 +222,34 @@ class TestTraceImplDedupe:
         assert "add_v1" in out
 
 
+class TestTraceMergesNameLookups:
+    def test_dispatch_site_does_not_hide_registration(self, state_without_call_graph):
+        s = state_without_call_graph
+        s.native_functions = {}
+        s.bindings = [
+            {
+                "python_name": "wvSplitK",
+                "cpp_name": "wvSplitK",
+                "type": "at_dispatch",
+                "file_path": "/src/k.cu",
+                "line_number": 9,
+            },
+            {
+                "python_name": "_rocm_C.wvSplitK",
+                "cpp_name": "wvSplitK",
+                "type": "torch_library_impl",
+                "dispatch_key": "CUDA",
+                "file_path": "/src/b.cpp",
+                "line_number": 3,
+            },
+        ]
+        indexer._build_indexes(s)
+        out = asyncio.run(trace("wvSplitK", focus="dispatch"))
+        assert "k.cu:9" in out
+        assert "b.cpp:3" in out
+        assert out.count("k.cu:9") == 1
+
+
 class TestTraceFuzzyLabeling:
     def test_fuzzy_dispatch_labeled_and_no_contradiction(
         self, state_without_call_graph

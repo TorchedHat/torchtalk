@@ -9,7 +9,12 @@ from pathlib import Path
 from typing import Any
 
 from .helpers import relative_to
-from .patterns import has_binding_patterns, should_exclude
+from .patterns import (
+    CPP_HEADER_EXTS,
+    CPP_SOURCE_EXTS,
+    has_binding_patterns,
+    should_exclude,
+)
 
 log = logging.getLogger(__name__)
 
@@ -182,6 +187,7 @@ class BindingDetector:
         self,
         macro_aliases: dict[str, str] | None = None,
         token_map: dict[str, str | dict[str, str]] | None = None,
+        paste_macros: tuple[str, ...] | None = None,
         search_dirs: tuple[str, ...] | None = None,
         exclude_patterns: tuple[str, ...] | None = None,
         registration_macros: tuple[str, ...] | None = None,
@@ -194,6 +200,7 @@ class BindingDetector:
         self.cuda_parser = get_parser("cuda")  # If available, falls back to cpp
         self.macro_aliases = macro_aliases or {}
         self.token_map = token_map or {}
+        self.paste_macros = paste_macros or ()
         self.search_dirs = search_dirs or ()
         # Empty tuples fall back to the PyTorch defaults in patterns.py.
         self.exclude_patterns = exclude_patterns or ()
@@ -215,6 +222,12 @@ class BindingDetector:
                     continue
                 value = value[prefixes[-1]]
             content = re.sub(rf"\b{re.escape(token)}\b", value, content)
+        for macro in self.paste_macros:
+            content = re.sub(
+                rf"\b{re.escape(macro)}\([ \t]*(\w+)[ \t]*,[ \t]*(\w+)[ \t]*\)",
+                r"\1\2",
+                content,
+            )
         return content
 
     def has_binding_markers(self, content: str) -> bool:
@@ -231,10 +244,9 @@ class BindingDetector:
         """Parse a C++/CUDA file and extract bindings."""
         graph = BindingGraph()
 
-        if self.macro_aliases or self.token_map:
-            content = self._preprocess(content, file_path)
+        content = self._preprocess(content, file_path)
 
-        is_cuda = file_path.endswith((".cu", ".cuh"))
+        is_cuda = file_path.endswith((".cu", ".cuh")) or "__global__" in content
         parser = self.cuda_parser if is_cuda else self.cpp_parser
 
         try:
@@ -574,17 +586,27 @@ class BindingDetector:
         # m.impl("op_name", function_ptr) — function_ptr may be wrapped in
         # TORCH_FN(...), TORCH_FN_BOXED(...), prefixed with `&`, or namespaced
         # (`at::native::foo`). Capture the full target then strip wrappers.
-        impl_pattern = rf'{mv}\.impl\s*\(\s*"([^"]+)"\s*,\s*([^,;]+?)\s*(?:[,)]|;)'
+        # A dispatch key may precede it, bare or via torch::dispatch:
+        # m.impl("op", torch::kCUDA, &fn) or
+        # m.impl("op", torch::dispatch(c10::DispatchKey::CUDA, &fn)).
+        impl_pattern = (
+            rf'{mv}\.impl\s*\(\s*"([^"]+)"\s*,\s*(?:torch::dispatch\s*\(\s*)?'
+            r"(?:([\w:]+)\s*,\s*)?([^,;]+?)\s*(?:[,)]|;)"
+        )
         for match in re.finditer(impl_pattern, block_content):
-            op_name = match.group(1)
+            op_name, key, target = match.groups()
             # Strip overload suffix (`abs.out` → `abs`) so cpp_name is searchable
             # via the bare op name when raw target is a no-impl marker.
             bare_op = op_name.split(".", 1)[0]
             cpp_func = _clean_impl_target(
-                match.group(2), op_name=bare_op, wrappers=self.call_wrappers
+                target, op_name=bare_op, wrappers=self.call_wrappers
             )
             if not cpp_func:
                 continue
+            # `torch::kCUDA` and `c10::DispatchKey::CUDA` both name CUDA.
+            key_name = (
+                re.sub(r"^k(?=[A-Z])", "", key.rsplit("::", 1)[-1]) if key else None
+            )
             line_offset = block_content[: match.start()].count("\n")
 
             binding = Binding(
@@ -593,7 +615,7 @@ class BindingDetector:
                 binding_type=BindingType.TORCH_LIBRARY_IMPL.value,
                 file_path=file_path,
                 line_number=base_line + line_offset,
-                dispatch_key=dispatch_key,
+                dispatch_key=key_name or dispatch_key,
                 namespace=namespace,
             )
             graph.add_binding(binding)
@@ -720,11 +742,8 @@ class BindingDetector:
         else:
             roots = [dir_path]
 
-        extensions = ["*.cpp", "*.cc", "*.cxx", "*.cu", "*.cuh"]
-        files: list[Path] = []
-        for root in roots:
-            for ext in extensions:
-                files.extend(root.rglob(ext))
+        exts = CPP_SOURCE_EXTS + CPP_HEADER_EXTS
+        files = [p for root in roots for p in root.rglob("*") if p.suffix in exts]
         files = list(dict.fromkeys(files))
 
         log.info(f"Scanning {len(files)} C++/CUDA files for bindings...")

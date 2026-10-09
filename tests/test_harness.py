@@ -96,6 +96,7 @@ class TestManifestOpFields:
         assert m.decomp_alias_paths == ()
         assert m.dispatch_stub_root == ""
         assert m.cpp_call_wrappers == ()
+        assert m.cpp_paste_macros == ()
 
 
 class TestTomlManifests:
@@ -132,7 +133,7 @@ class TestTomlManifests:
         assert PYTORCH_MANIFEST.depends_on == ()
 
     def test_vllm_expected_minimums(self):
-        assert harness_mod.VLLM_MANIFEST.expected_minimums["bindings"] == 1088
+        assert harness_mod.VLLM_MANIFEST.expected_minimums["bindings"] == 1116
         assert "native_functions" not in harness_mod.VLLM_MANIFEST.expected_minimums
 
     def test_bridge_section_inherited_from_torch_extension(self):
@@ -170,6 +171,7 @@ class TestTomlManifests:
         assert m.cpp_token_map == {
             "TORCH_EXTENSION_NAME": {"": "_C", "csrc/rocm/": "_rocm_C"}
         }
+        assert m.cpp_paste_macros == ("CONCAT",)
         assert m.registration_calls[0].call == "direct_register_custom_op"
         assert m.registration_calls[1].key_arg == 0
         assert m.string_dispatchers == {"collective_rpc": 0}

@@ -57,6 +57,9 @@ class ConventionManifest:
     # the longest prefix matching the file wins and "" is the default.
     cpp_macro_aliases: dict[str, str] = field(default_factory=dict)
     cpp_token_map: dict[str, str | dict[str, str]] = field(default_factory=dict)
+    # Token-pasting macros: a single-line, non-nested `CONCAT(a, b)` is read
+    # as the identifier `ab`.
+    cpp_paste_macros: tuple[str, ...] = ()
     # Python extractor config (analysis/extractors.py):
     # decorator qualname → registry it populates
     decorator_registries: dict[str, str] = field(default_factory=dict)
@@ -116,6 +119,7 @@ _SECTION_FIELDS: dict[str, dict[str, str]] = {
         "registration_macros": "registration_macros",
         "macro_aliases": "cpp_macro_aliases",
         "token_map": "cpp_token_map",
+        "paste_macros": "cpp_paste_macros",
         "call_wrappers": "cpp_call_wrappers",
     },
     "python": {
