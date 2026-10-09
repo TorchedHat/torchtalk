@@ -5,8 +5,8 @@ The *bridge* connects two indexed packages so questions like "which vLLM
 kernels call this ATen op?" or "what breaks in vLLM if `torch.nn.Module`
 changes?" can be answered from static analysis alone.
 
-This document fixes the data model. Phase C (`Workspace`, resolvers, cross
-tools) builds on it; PR-4 ships the primitive and the cheapest edge.
+This document fixes the data model. Import, op and C++ edges are collected
+today and resolved against a dependency's own index; the rest is roadmap.
 
 ## One primitive: `ExternalRef`
 
@@ -34,12 +34,12 @@ signal), not dropped.
 
 | kind          | collected from                                   | resolver list (manifest)      | status |
 |---------------|--------------------------------------------------|-------------------------------|--------|
-| `import`      | top-level and nested `import` / `from ... import` statements         | `python_package_roots` of dep | PR-4   |
-| `op`          | `torch.ops.aten.X`, `torch.X` calls               | `[python] op_namespaces`      | C2     |
-| `cpp`         | `at::X`, `c10::X` in C++ sources                  | `[bridge] cpp_namespaces`     | C2     |
-| `base_class`  | `class Foo(torch.nn.Module)`                      | `[bridge] base_class_namespaces` | C2  |
-| `provides`    | `TORCH_LIBRARY` / `register_op` registrations     | (direction flipped: this package *defines* `to_name`) | C2 |
-| `version_pin` | `requirements*.txt`, `pyproject.toml`             | none — package-level edge     | C2     |
+| `import`      | top-level and nested `import` / `from ... import` statements         | `python_package_roots` of dep | done   |
+| `op`          | `torch.ops.aten.X`, `torch.X` calls (the Py→C++ edges) | `[python] op_namespaces` of dep | done |
+| `cpp`         | `at::X`, `c10::X` callees in the C++ call graph   | `[bridge] cpp_namespaces`     | done   |
+| `base_class`  | `class Foo(torch.nn.Module)`                      | `[bridge] base_class_namespaces` | roadmap |
+| `provides`    | `TORCH_LIBRARY` / `register_op` registrations     | (direction flipped: this package *defines* `to_name`) | roadmap |
+| `version_pin` | `requirements*.txt`, `pyproject.toml`             | none — package-level edge     | roadmap |
 
 Everything is a manifest list, not code: adding a framework means listing
 which namespaces belong to its dependency, never adding a new edge class.
@@ -70,6 +70,9 @@ torch = "aten"                    # torch.X  -> aten::X
 [bridge]
 cpp_namespaces = ["at", "c10", "torch"]
 base_class_namespaces = ["torch.nn", "torch.autograd", "torch.optim"]
+
+[bridge.cpp_op_namespaces]
+at = "aten"                       # at::X -> aten::X when the call graph has no definition
 ```
 
 `torch-extension.toml` carries these, so every extension profile inherits
@@ -86,17 +89,35 @@ them via `extends`.
 
 ## Storage
 
-Python analysis is not cached in the JSON index (it runs at load), so
-external refs live in `ServerState.external_refs` as plain dicts and are
-recomputed per load. The count is reported as `external_refs` in the
+External refs live in `ServerState.external_refs` as plain dicts and are
+recomputed per load: import and op refs from the Python pass, cpp refs once
+the C++ call graph is ready. The count is reported as `external_refs` in the
 stats returned by `build_index` / `update_index` and in `torchtalk index
-build` output. The snapshot schema (v3) is untouched; resolved bridge
-results get their own cache and a v4 schema in C2.
+build` output. The snapshot schema is untouched.
+
+## Resolution
+
+Refs resolve against the dependency's own cached index, loaded read-only
+(`indexer.dependency_index`) from the source `resolve_source(dep)` names.
+The dependency is never rebuilt from the extension side; `get_status` says
+how to build it when it is missing.
+
+- `op` `aten::X`: the dispatch kernels of the dependency's `native_functions`
+  entry (a structured op's kernels sit on its `out=` delegate), then
+  implementations named after the op, then registration bindings. Kernels
+  with no indexed body are listed at the `native_functions.yaml` that
+  declares them, with no line.
+- `cpp`: an exact match in the dependency call graph's function locations;
+  otherwise `cpp_op_namespaces` maps the namespace onto the op path. When
+  neither resolves, the extension's own call graph may still show where the
+  symbol is declared in the installed headers.
+- `import`: listed, not resolved (dependency Python modules are not cached).
+
+The dependency's `native_functions` also feed the extension's alias map, so
+plain `torch.X()` calls become `aten::X` edges even though the extension
+has no `native_functions.yaml` of its own.
 
 ## Roadmap
 
-- **PR-4 (this):** `ExternalRef`, `collect_import_refs`, `[bridge]` fields,
-  stats + CLI count.
-- **C1:** `Workspace` holding N packages; tools take `package=`.
-- **C2:** op/cpp/base_class/provides resolvers, version-pin edge,
-  `bridge(symbol)`, `trace`/`affected --across`, bridge cache + snapshot v4.
+- `base_class` and `provides` edges, version pins.
+- `affected --across`: changed PyTorch functions to impacted extension tests.

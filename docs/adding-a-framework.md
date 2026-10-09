@@ -45,7 +45,7 @@ python_package_roots = ["myfw"]
 # myfw = "myfw"                       # TORCH_LIBRARY(myfw, m) → "myfw::"
 
 [bridge]
-# cpp_namespaces / base_class_namespaces — inherited from torch-extension
+# cpp_namespaces / base_class_namespaces / cpp_op_namespaces — inherited from torch-extension
 
 # [tests.utility_notes]                 # shown by tests(mode="utils")
 # "myfw/testing/utils.py" = "Shared fixtures and tensor factories"
@@ -61,7 +61,7 @@ Rules:
 
 - `extends` — keys in the child **replace** the base value (tuples are not
   appended). List everything you need.
-- `depends_on` — names of other harnesses. Each import/op/base-class reference
+- `depends_on` — names of other harnesses. Each import, op or C++ reference
   from your package into those packages becomes an `ExternalRef` edge
   (see `docs/bridge-design.md`). Almost always `["pytorch"]`.
 - `[paths] cpp_search_dirs` is the only required key. Everything else has a

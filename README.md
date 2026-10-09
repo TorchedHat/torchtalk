@@ -38,7 +38,7 @@ flowchart LR
 - **Dispatch mapping.** See which backend (CPU, CUDA, MPS) handles each operation.
 - **C++ call graphs.** Function definitions and call edges extracted with libclang, including CUDA kernel launches.
 - **Test discovery.** Find the existing tests for any operator before writing new ones.
-- **Cross-framework edges.** Every import from an extension into its base framework becomes an `ExternalRef` edge. Indexing vLLM v0.31.0 produces 2,413 of them across 2,569 modules.
+- **Cross-framework edges.** Imports, `torch.*` op calls and `at::`/`c10::`/`torch::` C++ calls from an extension into its base framework become `ExternalRef` edges. With a PyTorch index on the same machine, `bridge` and `trace` resolve them to the PyTorch source that implements them.
 - **Framework agnostic.** Conventions live in TOML manifests, not code. Onboarding a new framework is a small data PR.
 - **CI friendly.** Build the index nightly, snapshot it, and restore it in PR jobs in seconds.
 
@@ -120,6 +120,21 @@ A repo can also ship its own `.torchtalk.toml` at its root, which
 the harnesses that receive `ExternalRef` edges, and `expected_minimums` for
 the counts the smoke test must reach.
 
+### Bridging into PyTorch
+
+An extension index records which PyTorch ops and C++ APIs it calls. To
+resolve those to PyTorch source, build a PyTorch index once and tell
+TorchTalk where the checkout is:
+
+```bash
+torchtalk index build --source /path/to/pytorch --harness pytorch
+torchtalk init --source /path/to/pytorch --harness pytorch   # or TORCHTALK_SOURCE_PYTORCH
+torchtalk mcp-serve --source /path/to/vllm --harness vllm
+```
+
+`get_status` shows whether the PyTorch index was found. Without it the
+edges are still listed, just not resolved.
+
 **Adding your framework** takes a manifest, an integration-anchor file, and
 expected minimums. Each is a small PR with a verify command. Follow
 [docs/adding-a-framework.md](docs/adding-a-framework.md)
@@ -131,12 +146,13 @@ and open a tracking issue from the
 | Tool | Description |
 |------|-------------|
 | `get_status()` | TorchTalk readiness summary across bindings, call graph, modules, tests |
-| `trace(func, focus?)` | Trace any op: Python → YAML → C++ → file:line |
+| `trace(func, focus?)` | Trace any op: Python → YAML → C++ → file:line, plus the base-framework ops it calls |
 | `search(query, mode?, backend?, limit?)` | mode="bindings": dispatch registrations. mode="kernels": CUDA kernel launches |
 | `graph(func, mode?, depth?, fuzzy_all_levels?, walk_python?, focus?)` | mode="callers": inbound. mode="calls": outbound. mode="impact": transitive callers |
 | `modules(name, mode?, focus?)` | mode="trace": class details (focus="full" adds bases/docstring). mode="list": browse by category ("nn", "optim", "all") |
 | `tests(query?, mode?, limit?, focus?)` | mode="find": search tests (focus narrows to functions/classes/files). mode="utils": list utilities. mode="file_info": test file details |
 | `affected(funcs, depth?)` | Map changed C++ functions (comma-separated) to impacted Python test files |
+| `bridge(symbol, mode?, limit?)` | mode="uses": PyTorch ops and C++ APIs a symbol calls, resolved to file:line. mode="used_by": extension code that references a PyTorch symbol |
 
 ## CLI
 
@@ -243,7 +259,7 @@ torchtalk snapshot diff nightly/latest current --json \
 | `derivatives.yaml` | Backward pass formulas for autograd (`pytorch` harness) |
 | C++ source | TORCH_LIBRARY bindings, pybind11, CUDA kernels |
 | Python source | Modules, classes, method signatures |
-| Python imports | `ExternalRef` edges into the harnesses listed in `depends_on` |
+| Python imports, `torch.*` calls, C++ calls | `ExternalRef` edges into the harnesses listed in `depends_on` |
 | Test files | Test classes, test functions, OpInfo registry |
 
 </details>
@@ -254,7 +270,7 @@ torchtalk snapshot diff nightly/latest current --json \
 ```
 torchtalk/
 ├── src/torchtalk/
-│   ├── server.py              # MCP server (get_status + 6 query tools)
+│   ├── server.py              # MCP server (get_status + 7 query tools)
 │   ├── indexer.py             # Data loading, caching, initialization
 │   ├── cli.py                 # CLI (init, index, mcp-serve, snapshot, cursor-add)
 │   ├── harness.py             # ConventionManifest: TOML loading, extends, registry

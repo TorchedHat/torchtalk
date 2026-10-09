@@ -1,7 +1,7 @@
 ---
 name: torchtalk-analyzer
 description: Analyze PyTorch internals across Python, C++, and CUDA layers. Use when asked about how PyTorch operators work internally, where functions are implemented (CPU/CUDA backends), what would break if code is modified (impact analysis), how torch.nn modules connect to native code, or finding tests for PyTorch operators. Covers ATen ops, nn.Module classes, dispatch mechanisms, and test infrastructure.
-allowed-tools: mcp__torchtalk__get_status, mcp__torchtalk__trace, mcp__torchtalk__search, mcp__torchtalk__graph, mcp__torchtalk__modules, mcp__torchtalk__tests, mcp__torchtalk__affected, Read, Grep, Glob
+allowed-tools: mcp__torchtalk__get_status, mcp__torchtalk__trace, mcp__torchtalk__search, mcp__torchtalk__graph, mcp__torchtalk__modules, mcp__torchtalk__tests, mcp__torchtalk__affected, mcp__torchtalk__bridge, Read, Grep, Glob
 ---
 
 # TorchTalk PyTorch Analyzer
@@ -30,6 +30,7 @@ get_status()  # Check what's loaded and available
 | `modules(name, mode?, focus?)` | mode="trace": class details (focus="full" adds bases/docstring). mode="list": browse by category ("nn", "optim", "all") |
 | `tests(query?, mode?, limit?, focus?)` | mode="find": search tests (focus narrows to functions/classes/files). mode="utils": list utilities (query/focus ignored). mode="file_info": test file details |
 | `affected(funcs, depth?)` | Map changed C++ functions (comma-separated) to impacted Python test files |
+| `bridge(symbol, mode?, limit?)` | mode="uses": PyTorch ops and C++ APIs an extension symbol calls, resolved to PyTorch file:line. mode="used_by": extension symbols that reference a PyTorch symbol |
 
 ## Common Workflows
 

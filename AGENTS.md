@@ -9,8 +9,9 @@ server).
 
 TorchTalk is an MCP server that answers structural questions about PyTorch
 and PyTorch-based codebases with file and line evidence. It indexes a source
-checkout once, caches the result, and exposes seven tools (`get_status`,
-`trace`, `search`, `graph`, `modules`, `tests`, `affected`) over MCP.
+checkout once, caches the result, and exposes eight tools (`get_status`,
+`trace`, `search`, `graph`, `modules`, `tests`, `affected`, `bridge`) over
+MCP.
 Framework conventions live in TOML manifests ("harnesses"), not in code.
 
 ## Commands
@@ -42,7 +43,7 @@ A repo can ship its own `.torchtalk.toml` to activate a harness automatically.
 
 ```
 src/torchtalk/
-├── server.py                # FastMCP app: the 7 tool definitions and run_server
+├── server.py                # FastMCP app: the 8 tool definitions and run_server
 ├── cli.py                   # CLI: init, status, index, mcp-serve, snapshot, cursor-add
 ├── indexer.py               # Index build, cache load/save, incremental update, _state
 ├── harness.py               # ConventionManifest: TOML loading, extends, registry
@@ -65,7 +66,7 @@ src/torchtalk/
     ├── libclang_env.py      # libclang discovery and version check
     ├── python_analyzer.py   # Python module/class analysis (AST)
     ├── extractors.py        # Manifest-driven registration extractors (Python AST)
-    ├── external_refs.py     # ExternalRef edges: imports into depends_on harnesses
+    ├── external_refs.py     # ExternalRef edges: imports, op and C++ calls into depends_on harnesses
     ├── affected.py          # Changed C++ funcs -> impacted Python tests
     ├── alias_map.py         # Python call -> C++ symbol aliases (native_functions.yaml)
     ├── backward_bridge.py   # Backward ATen functions -> forward ops
@@ -93,7 +94,8 @@ under the platform cache dir (`~/.cache/torchtalk/` on Linux).
 search dirs, binding macros, registries and `expected_minimums` for one
 framework. `extends` inherits (torchvision and vllm build on
 `torch-extension`), `depends_on` names the harnesses that receive
-`ExternalRef` edges.
+`ExternalRef` edges. `indexer.dependency_index(name)` loads a dependency's
+cached index read-only so `bridge` and `trace` can resolve those edges.
 
 **Analysis** (`analysis/`): tree-sitter for bindings, libclang for the C++
 call graph (needs `compile_commands.json` for full coverage), Python AST for
@@ -117,6 +119,7 @@ In Claude Code they appear as `mcp__torchtalk__<name>`.
 | `modules` | `(name, mode="trace", focus="methods")` | mode `trace`: class details (focus `full` adds bases/docstring); `list`: browse a category (`nn`, `optim`, `all`) |
 | `tests` | `(query="", mode="find", limit=10, focus="all")` | mode `find` (focus `functions`/`classes`/`files`), `utils`, `file_info` |
 | `affected` | `(funcs, depth=3)` | Comma-separated C++ function names -> impacted Python test files |
+| `bridge` | `(symbol, mode="uses", limit=20)` | mode `uses`: ops and C++ APIs `symbol` calls in a `depends_on` harness, resolved through that harness's index; `used_by`: symbols here that reference a dependency symbol |
 
 `graph` needs the C++ call graph, which needs `compile_commands.json` from a
 build of the indexed source. Everything else works from source alone.
