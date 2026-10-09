@@ -290,7 +290,7 @@ class TestPyCppEdgesCache:
 
     def test_save_and_load_round_trip(self, tmp_path, monkeypatch):
         monkeypatch.setattr(
-            indexer, "_source_fingerprint", lambda _: "deadbeefdeadbeef"
+            indexer, "_source_fingerprint", lambda *_a: "deadbeefdeadbeef"
         )
         indexer._state.source = "/fake/source"
         indexer._state.py_to_cpp_edges = {
@@ -304,18 +304,18 @@ class TestPyCppEdgesCache:
         assert "aten::add" in indexer._state.py_to_cpp_edges
 
     def test_load_rejects_stale_fingerprint(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(indexer, "_source_fingerprint", lambda _: "fp_v1")
+        monkeypatch.setattr(indexer, "_source_fingerprint", lambda *_a: "fp_v1")
         indexer._state.source = "/fake/source"
         indexer._state.py_to_cpp_edges = {"aten::add": []}
         cache = tmp_path / "edges.json"
         _save_py_cpp_edges_cache(cache)
 
-        monkeypatch.setattr(indexer, "_source_fingerprint", lambda _: "fp_v2")
+        monkeypatch.setattr(indexer, "_source_fingerprint", lambda *_a: "fp_v2")
         indexer._state.py_to_cpp_edges = {}
         assert _load_py_cpp_edges_cache(cache, "/fake/source") is False
 
     def test_load_rejects_old_version(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(indexer, "_source_fingerprint", lambda _: "fp")
+        monkeypatch.setattr(indexer, "_source_fingerprint", lambda *_a: "fp")
         cache = tmp_path / "edges.json"
         cache.write_text(
             json.dumps(
@@ -523,7 +523,7 @@ class TestUpdateIndex:
         monkeypatch.setattr(snapshots, "SNAPSHOTS_DIR", cache / "snapshots")
         monkeypatch.setattr(indexer, "CACHE_DIR", cache)
         monkeypatch.setattr(indexer, "_cache_path", lambda _s: cache / "bindings.json")
-        monkeypatch.setattr(indexer, "_source_fingerprint", lambda _s: "newfp")
+        monkeypatch.setattr(indexer, "_source_fingerprint", lambda *_a: "newfp")
         monkeypatch.setattr(
             indexer,
             "detect_package_identity",
@@ -736,7 +736,7 @@ class TestCollectTestAttrHits:
 class TestCacheValidPackageIdentity:
     @pytest.fixture(autouse=True)
     def stub_identity(self, monkeypatch):
-        monkeypatch.setattr(indexer, "_source_fingerprint", lambda _s: "fp")
+        monkeypatch.setattr(indexer, "_source_fingerprint", lambda *_a: "fp")
         monkeypatch.setattr(
             indexer,
             "detect_package_identity",
@@ -892,7 +892,7 @@ class TestUpdateIndexMetadata:
         monkeypatch.setattr(snapshots, "SNAPSHOTS_DIR", cache / "snapshots")
         monkeypatch.setattr(indexer, "CACHE_DIR", cache)
         monkeypatch.setattr(indexer, "_cache_path", lambda _s: cache_file)
-        monkeypatch.setattr(indexer, "_source_fingerprint", lambda _s: "fp")
+        monkeypatch.setattr(indexer, "_source_fingerprint", lambda *_a: "fp")
         monkeypatch.setattr(
             indexer,
             "detect_package_identity",

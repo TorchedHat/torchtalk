@@ -7,6 +7,7 @@ import hashlib
 import json
 import logging
 import re
+import threading
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -58,7 +59,11 @@ class ServerState:
     py_to_cpp_edges: dict[str, list[dict]] = field(default_factory=dict)
     alias_map: dict[str, str] = field(default_factory=dict)
     # Outgoing cross-package refs (analysis/external_refs.py), as dicts.
+    # Import and op kinds come from the Python pass, cpp from the call
+    # graph; each pass replaces only its own kinds (`_replace_external_refs`).
     external_refs: list[dict] = field(default_factory=list)
+    # Call graph function → (file, line) of a dependency, read from its cache.
+    cpp_locations: dict[str, tuple[str, int]] = field(default_factory=dict)
 
     test_files: dict[str, dict] = field(default_factory=dict)
     test_classes: dict[str, list[dict]] = field(default_factory=dict)
@@ -83,6 +88,10 @@ class ServerState:
 
 
 _state = ServerState()
+_refs_lock = threading.Lock()
+
+# Read-only indexes of `depends_on` packages, loaded once per process.
+_dependencies: dict[str, ServerState] = {}
 
 
 def _cache_path(source: str) -> Path:
@@ -90,7 +99,7 @@ def _cache_path(source: str) -> Path:
     return cache_paths(source)["bindings"]
 
 
-def _source_fingerprint(source: str) -> str:
+def _source_fingerprint(source: str, manifest: ConventionManifest | None = None) -> str:
     """Fingerprint source to detect changes.
 
     Git checkouts get a content fingerprint (HEAD tree + dirty diff), so
@@ -103,7 +112,7 @@ def _source_fingerprint(source: str) -> str:
     if fp:
         return fp
     src = Path(source)
-    manifest = active_manifest()
+    manifest = manifest or active_manifest()
     newest, count = 0.0, 0
     for d in sorted({*manifest.cpp_search_dirs, *manifest.python_search_dirs}):
         root = src / d
@@ -132,14 +141,19 @@ def _cache_metadata(source: str, manifest: ConventionManifest | None = None) -> 
     manifest = manifest or active_manifest()
     return {
         "source_path": source,
-        "source_fingerprint": _source_fingerprint(source),
+        "source_fingerprint": _source_fingerprint(source, manifest),
         "format_version": _BINDINGS_CACHE_FORMAT_VERSION,
         "package": asdict(detect_package_identity(source, manifest.package)),
     }
 
 
-def _cache_valid(cache: Path, source: str) -> bool:
-    """Check if cache is valid."""
+def _cache_valid(
+    cache: Path,
+    source: str,
+    package: str | None = None,
+    fingerprint: str | None = None,
+) -> bool:
+    """Check if cache is valid. `package` defaults to the active harness."""
     if not cache.exists():
         return False
     try:
@@ -149,10 +163,11 @@ def _cache_valid(cache: Path, source: str) -> bool:
         if meta.get("format_version") != _BINDINGS_CACHE_FORMAT_VERSION:
             return False
         if meta.get("package") != asdict(
-            detect_package_identity(source, active_manifest().package)
+            detect_package_identity(source, package or active_manifest().package)
         ):
             return False
-        return meta.get("source_fingerprint") == _source_fingerprint(source)
+        fingerprint = fingerprint or _source_fingerprint(source)
+        return meta.get("source_fingerprint") == fingerprint
     except Exception:
         return False
 
@@ -511,27 +526,93 @@ def _build_indexes(state: ServerState):
                 state.ops_by_file.setdefault(fp, set()).add(op_name)
 
 
-def _load_from_json(path: str):
-    """Load bindings from JSON file."""
-    global _state
+def _load_from_json(path: str, state: ServerState | None = None) -> ServerState:
+    """Load bindings from JSON file into `state` (the server state by default)."""
+    state = _state if state is None else state
 
     log.info(f"Loading bindings from {path}...")
     with open(path) as f:
         data = json.load(f)
 
-    _state.bindings = data.get("bindings", [])
-    _state.cuda_kernels = data.get("cuda_kernels", [])
-    _state.native_functions = data.get("native_functions", {})
-    _state.derivatives = data.get("derivatives", {})
-    _state.native_implementations = data.get("native_implementations", {})
-    _state.symbol_to_file = data.get("symbol_to_file", {})
-    _state.registrations = data.get("registrations", {})
+    state.bindings = data.get("bindings", [])
+    state.cuda_kernels = data.get("cuda_kernels", [])
+    state.native_functions = data.get("native_functions", {})
+    state.derivatives = data.get("derivatives", {})
+    state.native_implementations = data.get("native_implementations", {})
+    state.symbol_to_file = data.get("symbol_to_file", {})
+    state.registrations = data.get("registrations", {})
 
-    _build_indexes(_state)
+    _build_indexes(state)
 
     log.info(
-        f"Loaded {len(_state.bindings)} bindings, "
-        f"{len(_state.cuda_kernels)} CUDA kernels"
+        f"Loaded {len(state.bindings)} bindings, {len(state.cuda_kernels)} CUDA kernels"
+    )
+    return state
+
+
+def dependency_index(name: str) -> ServerState | None:
+    """Read-only index of a `depends_on` package, or None when unavailable.
+
+    Loaded from the bindings cache that `torchtalk index build --harness
+    <name>` wrote for the source `resolve_source(name)` points at, plus the
+    function locations of its C++ call graph cache when one exists. The
+    cache must be current for that checkout: a stale one is reported by
+    `dependency_status`, never rebuilt from here.
+    """
+    from .analysis.external_refs import bridge_manifests
+
+    if name in _dependencies:
+        return _dependencies[name]
+    source = resolve_source(name)
+    if not source:
+        return None
+    source = str(Path(source).resolve())
+    # Fingerprint with the dependency's own manifest: that is what its
+    # build used, and both cache files must match it.
+    fp = _source_fingerprint(source, bridge_manifests(active_manifest()).get(name))
+    paths = cache_paths(source, package=name)
+    if not _cache_valid(paths["bindings"], source, package=name, fingerprint=fp):
+        return None
+    dep = _load_from_json(str(paths["bindings"]), ServerState())
+    dep.source = source
+    dep.package = detect_package_identity(source, name)
+    dep.cpp_locations = _cached_cpp_locations(paths["callgraph"], fp)
+    _dependencies[name] = dep
+    log.info(
+        f"Dependency index {name}: {len(dep.native_functions)} native functions, "
+        f"{len(dep.bindings)} bindings, {len(dep.cpp_locations)} C++ locations"
+    )
+    return dep
+
+
+def _cached_cpp_locations(path: Path, fingerprint: str) -> dict[str, tuple[str, int]]:
+    """Function locations from a current call graph cache file; {} when unusable."""
+    from .analysis.cpp_call_graph import _CALL_GRAPH_CACHE_FORMAT_VERSION
+
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if data.get("format_version") != _CALL_GRAPH_CACHE_FORMAT_VERSION:
+        return {}
+    if data.get("source_fingerprint") != fingerprint:
+        return {}
+    return {k: tuple(v) for k, v in data.get("function_locations", {}).items()}
+
+
+def dependency_status(name: str) -> str:
+    """Why `dependency_index(name)` is unavailable; empty when it loads."""
+    if dependency_index(name) is not None:
+        return ""
+    source = resolve_source(name)
+    if not source:
+        return (
+            f"no source configured for {name}: run `torchtalk init --source "
+            f"<path> --harness {name}` or set TORCHTALK_SOURCE_{name.upper()}"
+        )
+    return (
+        f"no current index for {name} at {source}: run "
+        f"`torchtalk index build --harness {name} --source {source}`"
     )
 
 
@@ -542,12 +623,14 @@ def _init_cpp_call_graph(source: str):
     try:
         from .analysis.cpp_call_graph import LIBCLANG_AVAILABLE, CppCallGraphExtractor
 
+        _replace_external_refs([], ("cpp",))
         if not LIBCLANG_AVAILABLE:
             log.info("libclang not available - C++ call graph disabled")
             return
 
         cg_cache_dir = CACHE_DIR / "call_graph"
         cache_key = cache_paths(source)["callgraph"].stem
+        manifest = active_manifest()
 
         extractor = CppCallGraphExtractor(cache_dir=cg_cache_dir)
         if extractor.load_cache(
@@ -558,13 +641,10 @@ def _init_cpp_call_graph(source: str):
                 f"Loaded C++ call graph from cache "
                 f"({len(extractor.function_locations)} functions)"
             )
+            _init_cpp_refs(manifest, source)
             return
 
         # Build in background
-        import threading
-
-        manifest = active_manifest()
-
         def build():
             global _state
             _state.cpp_error = None
@@ -580,6 +660,7 @@ def _init_cpp_call_graph(source: str):
                 log.info(
                     f"C++ call graph ready: {len(ext.function_locations)} functions"
                 )
+                _init_cpp_refs(manifest, source)
             except Exception as e:
                 _state.cpp_error = str(e)
                 log.error(f"C++ call graph build failed: {e}")
@@ -651,18 +732,15 @@ def _ensure_loaded(component: str = "bindings"):
 def _init_python_modules(source: str):
     """Initialize Python module analysis using configured search directories."""
     global _state
-    _state.external_refs = []
+    _replace_external_refs([], ("import", "op"))
 
     try:
-        from .analysis.alias_map import build_function_alias_map
         from .analysis.python_analyzer import PythonAnalyzer, build_module_index
 
-        _state.alias_map = build_function_alias_map(
-            _state.native_functions, active_manifest().op_namespaces or None
-        )
+        manifest = active_manifest()
+        _state.alias_map = _build_alias_map(manifest)
         log.info(f"Alias map: {len(_state.alias_map)} torch.<op> aliases")
 
-        manifest = active_manifest()
         src = Path(source)
         analyzer = PythonAnalyzer(
             alias_map=_state.alias_map,
@@ -698,21 +776,78 @@ def _init_python_modules(source: str):
         log.warning(f"Failed to analyze Python modules: {e}")
 
 
-def _init_external_refs(modules: dict[str, Any], manifest, source: str) -> None:
-    """Collect import edges into `depends_on` packages (PR-4 bridge smoke test)."""
-    from torchtalk.analysis.external_refs import collect_import_refs
+def _build_alias_map(manifest: ConventionManifest) -> dict[str, str]:
+    """`torch.<op>` → `aten::<op>` aliases from this package's native functions.
 
-    try:
-        refs = collect_import_refs(modules, manifest, source=source)
-    except Exception as e:  # never block indexing on the bridge
-        log.warning(f"External ref collection failed: {e}")
-        refs = []
-    _state.external_refs = [r.to_dict() for r in refs]
+    An extension has no native_functions.yaml of its own, so for each
+    `[python.op_namespaces]` entry whose C++ namespace a dependency defines
+    the aliases come from that dependency's index instead. Without the
+    dependency index only `torch.ops.*` call forms reach the bridge.
+    """
+    from .analysis.alias_map import build_function_alias_map
+    from .analysis.external_refs import op_namespace_targets
+
+    aliases = build_function_alias_map(
+        _state.native_functions, manifest.op_namespaces or None
+    )
+    owners = op_namespace_targets(manifest)
+    for dep in dict.fromkeys(owners.values()):
+        namespaces = {
+            py: cpp
+            for py, cpp in manifest.op_namespaces.items()
+            if owners.get(cpp) == dep
+        }
+        index = dependency_index(dep)
+        if namespaces and index is not None:
+            aliases.update(build_function_alias_map(index.native_functions, namespaces))
+    return aliases
+
+
+def _replace_external_refs(refs: list, kinds: tuple[str, ...]) -> None:
+    """Swap in freshly collected refs of `kinds`, keeping the other kinds."""
+    with _refs_lock:
+        kept = [r for r in _state.external_refs if r["kind"] not in kinds]
+        _state.external_refs = kept + [r.to_dict() for r in refs]
+
+
+def _log_external_refs(refs: list, what: str) -> None:
     if refs:
         by_pkg: dict[str, int] = {}
         for r in refs:
             by_pkg[r.to_package] = by_pkg.get(r.to_package, 0) + 1
-        log.info(f"External refs: {len(refs)} import edges {by_pkg}")
+        log.info(f"External refs: {len(refs)} {what} edges {by_pkg}")
+
+
+def _init_external_refs(modules: dict[str, Any], manifest, source: str) -> None:
+    """Collect import and op edges into `depends_on` packages."""
+    from .analysis.external_refs import collect_import_refs, collect_op_refs
+
+    try:
+        refs = collect_import_refs(modules, manifest, source=source)
+        _log_external_refs(refs, "import")
+        ops = collect_op_refs(_state.py_to_cpp_edges, manifest, source=source)
+        _log_external_refs(ops, "op")
+        refs += ops
+    except Exception as e:  # never block indexing on the bridge
+        log.warning(f"External ref collection failed: {e}")
+        refs = []
+    _replace_external_refs(refs, ("import", "op"))
+
+
+def _init_cpp_refs(manifest: ConventionManifest, source: str) -> None:
+    """Collect C++ edges into `[bridge] cpp_namespaces` once the call graph is up."""
+    from .analysis.external_refs import collect_cpp_refs
+
+    ext = _state.cpp_extractor
+    try:
+        refs = collect_cpp_refs(
+            ext.callees, ext.function_locations, manifest, source=source
+        )
+        _log_external_refs(refs, "cpp")
+    except Exception as e:
+        log.warning(f"External ref collection failed: {e}")
+        refs = []
+    _replace_external_refs(refs, ("cpp",))
 
 
 # v3: edges now include import-aware resolution (`linalg.cross(...)` →
@@ -744,11 +879,17 @@ def _build_py_to_cpp_edges(modules: dict[str, Any]) -> dict[str, list[dict]]:
     return edges
 
 
+def _alias_map_digest() -> str:
+    items = json.dumps(sorted(_state.alias_map.items()))
+    return hashlib.md5(items.encode()).hexdigest()
+
+
 def _save_py_cpp_edges_cache(path: Path) -> None:
     """Persist the py→cpp edge index to JSON, versioned and fingerprinted."""
     payload = {
         "version": _PY_CPP_EDGES_CACHE_VERSION,
         "fingerprint": _source_fingerprint(_state.source or ""),
+        "aliases": _alias_map_digest(),
         "edges": _state.py_to_cpp_edges,
     }
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -764,6 +905,10 @@ def _load_py_cpp_edges_cache(path: Path, source: str) -> bool:
     if payload.get("version") != _PY_CPP_EDGES_CACHE_VERSION:
         return False
     if payload.get("fingerprint") != _source_fingerprint(source):
+        return False
+    # The edges depend on the alias map, which changes with the dependency
+    # index; a different map means a rebuild.
+    if payload.get("aliases") != _alias_map_digest():
         return False
     _state.py_to_cpp_edges = payload.get("edges", {})
     return True
