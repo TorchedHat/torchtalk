@@ -13,9 +13,6 @@ from typing import Any
 
 from .analysis.helpers import fuzzy_distance_limit, levenshtein_distance, truncate
 from .analysis.patterns import (
-    has_binding_patterns as _has_binding_patterns,
-)
-from .analysis.patterns import (
     has_test_patterns as _has_test_patterns,
 )
 from .analysis.patterns import is_vendor_path
@@ -591,6 +588,16 @@ def _init_cpp_call_graph(source: str):
         log.error(f"Failed to init C++ call graph: {e}")
 
 
+# Shown wherever a tool needs the C++ call graph and the checkout has no
+# compile database. PyTorch's own build writes one; CMake-based extensions
+# need the export flag.
+COMPILE_COMMANDS_HINT = (
+    "generate `compile_commands.json` in the checkout root or `build/` "
+    "(PyTorch: `python setup.py develop`; CMake builds: "
+    "`-DCMAKE_EXPORT_COMPILE_COMMANDS=ON`), then rebuild the index."
+)
+
+
 def _cpp_status() -> str:
     """Get C++ call graph status. Empty string if ready."""
     if _state.cpp_building:
@@ -606,10 +613,12 @@ def _cpp_status() -> str:
                 return (
                     "C++ call graph unavailable - "
                     "`compile_commands.json` not found.\n\n"
-                    "**To enable:** Build PyTorch once:\n"
-                    f"```\ncd {_state.source}\npython setup.py develop\n```"
+                    f"**To enable:** {COMPILE_COMMANDS_HINT}"
                 )
-        return "C++ call graph unavailable. Install libclang or build PyTorch."
+        return (
+            "C++ call graph unavailable. Install libclang and generate "
+            "`compile_commands.json`."
+        )
 
     return ""
 
@@ -646,11 +655,12 @@ def _init_python_modules(source: str):
         log.info(f"Alias map: {len(_state.alias_map)} torch.<op> aliases")
 
         manifest = active_manifest()
+        src = Path(source)
         analyzer = PythonAnalyzer(
             alias_map=_state.alias_map,
             package_roots=manifest.python_package_roots or None,
+            source_root=src,
         )
-        src = Path(source)
 
         dirs_to_analyze = [src / d for d in manifest.python_search_dirs]
 
@@ -1398,6 +1408,7 @@ def update_index(source: str, since: str, on_uncovered: str = "warn") -> dict:
     detector = BindingDetector(
         macro_aliases=active.cpp_macro_aliases,
         token_map=active.cpp_token_map,
+        registration_macros=active.registration_macros,
     )
     src = Path(source)
     # Same harness boundary as the full build: search dirs, exclusion
@@ -1418,7 +1429,7 @@ def update_index(source: str, since: str, on_uncovered: str = "warn") -> dict:
             content = full.read_text(errors="ignore")
         except OSError:
             continue
-        if not _has_binding_patterns(content, active.registration_macros):
+        if not detector.has_binding_markers(content):
             continue
         g = detector.detect_bindings(str(full), content)
         new_bindings.extend(b.to_dict() for b in g.bindings)

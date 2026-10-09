@@ -12,7 +12,7 @@ async def _do_trace_module(module_name: str, focus: str = "methods") -> str:
     _ensure_loaded()
 
     if not _state.py_classes:
-        return "Python module analysis not available. Ensure PyTorch source is loaded."
+        return "Python module analysis not available. Ensure a source is loaded."
 
     if not module_name.strip():
         return "Provide a module or class name."

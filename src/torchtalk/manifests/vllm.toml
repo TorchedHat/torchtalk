@@ -1,4 +1,5 @@
 # vLLM (vllm-project/vllm). Delta over torch-extension.
+# expected_minimums: v0.31.0 sparse-clone results (csrc, vllm, tests) minus 10%.
 
 [package]
 name = "vllm"
@@ -11,6 +12,11 @@ python_search_dirs = [
 python_package_roots = [
     "vllm",
 ]
+test_utility_modules = [
+    "tests/utils.py",
+    "tests/conftest.py",
+    "tests/kernels/utils.py",
+]
 exclude_patterns = [
     "/tests/",
     "/benchmarks/",
@@ -21,6 +27,8 @@ exclude_patterns = [
 [cpp.macro_aliases]
 TORCH_LIBRARY_EXPAND = "TORCH_LIBRARY"
 TORCH_LIBRARY_IMPL_EXPAND = "TORCH_LIBRARY_IMPL"
+# csrc/dispatch_utils.h wraps AT_DISPATCH_SWITCH; only this alias has call sites.
+VLLM_DISPATCH_FLOATING_TYPES = "AT_DISPATCH_FLOATING_TYPES"
 
 [cpp.token_map]
 TORCH_EXTENSION_NAME = "_C"
@@ -56,3 +64,12 @@ call = "direct_register_custom_op"
 key_arg = 0
 target_arg = 1
 registry = "custom_ops"
+
+[expected_minimums]
+bindings = 1013
+cuda_kernels = 200
+python_modules = 2300
+nn_modules = 1280
+external_refs = 2170
+registration_records = 550
+test_files = 1780

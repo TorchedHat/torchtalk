@@ -507,6 +507,22 @@ class TestManifestExcludeAndPrefilter:
         fallback = BindingDetector(search_dirs=("csrc",))
         assert fallback.detect_bindings_in_directory(str(repo)).bindings
 
+    def test_macro_alias_passes_prefilter(self, tmp_path_factory):
+        # vLLM's csrc/cpu files reach AT_DISPATCH only through an alias, so
+        # the raw-content prefilter must accept alias names too.
+        repo = tmp_path_factory.mktemp("scandir")
+        (repo / "csrc").mkdir()
+        (repo / "csrc" / "activation.cpp").write_text(
+            'VLLM_DISPATCH_FLOATING_TYPES(x.scalar_type(), "silu_and_mul", [&] {});\n'
+        )
+        aliases = {"VLLM_DISPATCH_FLOATING_TYPES": "AT_DISPATCH_FLOATING_TYPES"}
+        detector = BindingDetector(search_dirs=("csrc",), macro_aliases=aliases)
+        graph = detector.detect_bindings_in_directory(str(repo))
+        types = [b.binding_type for b in graph.bindings]
+        assert types == [BindingType.AT_DISPATCH.value]
+        content = (repo / "csrc" / "activation.cpp").read_text()
+        assert not BindingDetector(search_dirs=("csrc",)).has_binding_markers(content)
+
 
 class TestCallWrappers:
     def test_default_wrappers_include_box_and_selective(self):

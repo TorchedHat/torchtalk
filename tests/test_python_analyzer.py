@@ -302,6 +302,16 @@ class TestPackageRoots:
         module = analyzer.analyze_file(str(f))
         assert module.name == "vllm.engine.llm"
 
+    def test_source_root_skips_checkout_dir_named_like_package(self, tmp_path):
+        checkout = tmp_path / "vllm"
+        pkg = checkout / "vllm" / "engine"
+        pkg.mkdir(parents=True)
+        f = pkg / "llm.py"
+        f.write_text("class LLM:\n    pass\n")
+        analyzer = PythonAnalyzer(package_roots=("vllm",), source_root=checkout)
+        module = analyzer.analyze_file(str(f))
+        assert module.name == "vllm.engine.llm"
+
     def test_default_roots_unchanged(self, tmp_path):
         pkg = tmp_path / "torch" / "nn"
         pkg.mkdir(parents=True)

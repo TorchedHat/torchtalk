@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from torchtalk import indexer, snapshots
+from torchtalk.analysis.patterns import has_binding_patterns
 from torchtalk.analysis.python_analyzer import (
     PyBinding,
     PyClass,
@@ -549,6 +550,9 @@ class TestUpdateIndex:
         class FakeDetector:
             def __init__(self, **_kwargs):
                 pass
+
+            def has_binding_markers(self, content):
+                return has_binding_patterns(content)
 
             def detect_bindings(self, _path, _content):
                 return FakeBindingGraph()

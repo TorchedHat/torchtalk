@@ -1,0 +1,33 @@
+repo: vllm-project/vllm
+ref: v0.31.0
+env_var: VLLM_SOURCE
+sparse_paths:
+  - csrc
+  - vllm
+  - tests
+
+anchors:
+  - file: csrc/libtorch_stable/torch_bindings.cpp
+    check: torch_library_cpp_name
+    value: vocab_parallel_embedding
+
+  - file: csrc/cpu/torch_bindings.cpp
+    check: torch_library_cpp_name
+    value: silu_and_mul
+
+  - dir: csrc/libtorch_stable
+    check: has_cuda_kernel
+    glob: "*.cu"
+    content_filter: __global__
+
+  - dir: csrc/cpu
+    check: has_at_dispatch
+    glob: "*.cpp"
+    content_filter: VLLM_DISPATCH_FLOATING_TYPES
+
+  - dir: csrc/libtorch_stable
+    check: has_binding_types
+    value:
+      - torch_op
+      - torch_library_impl
+      - cuda_kernel

@@ -128,6 +128,10 @@ class TestTomlManifests:
         assert PYTORCH_MANIFEST.expected_minimums["native_functions"] == 2400
         assert PYTORCH_MANIFEST.depends_on == ()
 
+    def test_vllm_expected_minimums(self):
+        assert harness_mod.VLLM_MANIFEST.expected_minimums["bindings"] == 1013
+        assert "native_functions" not in harness_mod.VLLM_MANIFEST.expected_minimums
+
     def test_bridge_section_inherited_from_torch_extension(self):
         base = harness_mod.load_builtin_manifest("torch-extension")
         assert "at" in base.cpp_namespaces and "c10" in base.cpp_namespaces

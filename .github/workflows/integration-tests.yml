@@ -16,7 +16,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        target: [pytorch]
+        target: [pytorch, vllm]
     steps:
       - name: Checkout torchtalk
         uses: actions/checkout@v4

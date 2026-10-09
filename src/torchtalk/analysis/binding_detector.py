@@ -207,6 +207,16 @@ class BindingDetector:
             content = re.sub(rf"\b{re.escape(token)}\b", value, content)
         return content
 
+    def has_binding_markers(self, content: str) -> bool:
+        """Cheap substring prefilter run before parsing.
+
+        Aliases count as markers: they expand to canonical macros in
+        _preprocess, so a file that only uses the alias still has bindings.
+        """
+        return has_binding_patterns(content, self.registration_macros) or any(
+            alias in content for alias in self.macro_aliases
+        )
+
     def detect_bindings(self, file_path: str, content: str) -> BindingGraph:
         """Parse a C++/CUDA file and extract bindings."""
         graph = BindingGraph()
@@ -721,7 +731,7 @@ class BindingDetector:
                 content = cpp_file.read_text(encoding="utf-8", errors="replace")
 
                 # Fuzzy grep: check for binding-related patterns
-                if not has_binding_patterns(content, self.registration_macros):
+                if not self.has_binding_markers(content):
                     skipped_no_patterns += 1
                     continue
 

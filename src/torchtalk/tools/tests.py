@@ -6,6 +6,7 @@ from pathlib import Path
 
 from ..analysis.helpers import word_match as _word_match
 from ..formatting import create_formatter
+from ..harness import active_manifest
 from ..indexer import _ensure_loaded, _state
 
 
@@ -123,8 +124,10 @@ async def _do_list_test_utils() -> str:
     _ensure_loaded("test")
 
     md = create_formatter()
-    md.h2("PyTorch Test Utilities")
+    md.h2("Test Utilities")
 
+    # Curated details for well-known modules; other manifest entries list
+    # with their path only.
     utility_info = {
         "torch/testing/_internal/common_utils.py": {
             "name": "common_utils",
@@ -173,8 +176,12 @@ async def _do_list_test_utils() -> str:
         },
     }
 
+    utility_paths = active_manifest().test_utility_modules
     md.h3("Core Utilities")
-    for path, info in utility_info.items():
+    if not utility_paths:
+        md.text("*No test utility modules are configured for this harness*")
+    curated_hits = 0
+    for path in utility_paths:
         if path in _state.test_utilities:
             exists = True
         elif _state.source:
@@ -182,9 +189,13 @@ async def _do_list_test_utils() -> str:
         else:
             exists = False
         status = "[ok]" if exists else "[missing]"
-        md.item(f"**{info['name']}** {status}")
-        md.item(f"*{info['description']}*", 1)
-        md.item(f"Key: `{', '.join(info['key_items'][:4])}`", 1)
+        info = utility_info.get(path)
+        name = info["name"] if info else Path(path).stem
+        md.item(f"**{name}** {status}")
+        if info:
+            curated_hits += 1
+            md.item(f"*{info['description']}*", 1)
+            md.item(f"Key: `{', '.join(info['key_items'][:4])}`", 1)
         md.item(f"Path: `{path}`", 1)
         md.blank()
 
@@ -196,6 +207,9 @@ async def _do_list_test_utils() -> str:
         md.item(f"OpInfo definitions: {len(_state.opinfo_registry)}")
     else:
         md.text("*Test infrastructure not yet indexed*")
+
+    if not curated_hits:
+        return md.build()
 
     md.h3("Common Test Patterns")
     patterns = [

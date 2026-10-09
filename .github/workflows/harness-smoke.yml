@@ -18,6 +18,9 @@ on:
 jobs:
   harness-smoke:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        harness: [pytorch, vllm]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -31,4 +34,4 @@ jobs:
         run: pip install -e ".[dev]"
 
       - name: Run harness smoke test
-        run: python scripts/harness_smoke.py --harness pytorch --clone
+        run: python scripts/harness_smoke.py --harness ${{ matrix.harness }} --clone

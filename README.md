@@ -42,7 +42,7 @@ flowchart LR
 - **Dispatch mapping.** See which backend (CPU, CUDA, MPS) handles each operation.
 - **C++ call graphs.** 60K+ functions with call edges, extracted with libclang.
 - **Test discovery.** Find the existing tests for any operator before writing new ones.
-- **Cross-framework edges.** Every import from an extension into its base framework becomes an `ExternalRef` edge. Indexing vLLM produces 1,619 of them across 990 modules.
+- **Cross-framework edges.** Every import from an extension into its base framework becomes an `ExternalRef` edge. Indexing vLLM v0.31.0 produces 2,413 of them across 2,569 modules.
 - **Framework agnostic.** Conventions live in TOML manifests, not code. Onboarding a new framework is a small data PR.
 - **CI friendly.** Build the index nightly, snapshot it, and restore it in PR jobs in seconds.
 

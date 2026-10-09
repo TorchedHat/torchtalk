@@ -56,7 +56,7 @@ def _similar_functions(name: str, limit: int = 10) -> list[str]:
 async def trace(
     function_name: str, focus: Literal["full", "yaml", "dispatch"] = "full"
 ) -> str:
-    """Trace a PyTorch op from Python to C++ implementation with file:line locations."""
+    """Trace an op from Python to its C++ implementation with file:line locations."""
     _ensure_loaded()
     if not function_name.strip():
         return "Provide a function name to trace."
@@ -210,7 +210,7 @@ async def trace(
             for s in similar[:5]:
                 md.item(f"`{s}`")
         else:
-            md.text(f"Function `{function_name}` not found in PyTorch bindings.")
+            md.text(f"Function `{function_name}` not found in bindings.")
 
     return _with_note(md.build())
 

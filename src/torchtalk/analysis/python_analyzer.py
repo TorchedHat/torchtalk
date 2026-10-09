@@ -122,10 +122,12 @@ class PythonAnalyzer:
         self,
         alias_map: dict[str, str] | None = None,
         package_roots: tuple[str, ...] | None = None,
+        source_root: str | Path | None = None,
     ):
         self._module_cache: dict[str, PyModule] = {}
         self._alias_map = alias_map
         self._package_roots = package_roots or ("torch", "torchvision", "torchaudio")
+        self._source_root = Path(source_root).resolve() if source_root else None
 
     def analyze_file(self, file_path: str) -> PyModule | None:
         """Analyze a single Python file."""
@@ -182,6 +184,12 @@ class PythonAnalyzer:
 
     def _path_to_module_name(self, path: Path) -> str:
         """Convert file path to Python module name."""
+        if self._source_root is not None:
+            # A checkout is usually named after its package (vllm/vllm/...);
+            # only directories below the checkout root can be package roots.
+            resolved = path.resolve()
+            if resolved.is_relative_to(self._source_root):
+                path = resolved.relative_to(self._source_root)
         parts = path.parts
         for i, part in enumerate(parts):
             if part in self._package_roots:
