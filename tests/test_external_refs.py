@@ -8,7 +8,10 @@ from torchtalk.analysis.external_refs import (
     REF_KINDS,
     ExternalRef,
     bridge_targets,
+    collect_cpp_refs,
     collect_import_refs,
+    collect_op_refs,
+    op_namespace_targets,
     refs_by_target,
 )
 from torchtalk.analysis.python_analyzer import PyImport, PyModule
@@ -145,3 +148,81 @@ class TestBridgeTargets:
         mods = {"vllm.x": _mod("vllm.x", [("torch", "torch"), ("vllm.y", "z")])}
         refs = collect_import_refs(mods, vllm)
         assert [(r.to_name, r.to_package) for r in refs] == [("torch", "pytorch")]
+
+
+class TestCollectOpRefs:
+    def test_dependency_namespace_becomes_op_ref(self):
+        edges = {
+            "aten::silu": [
+                {
+                    "caller_qualname": "vllm.act.SiluAndMul.forward",
+                    "file": "/s/vllm/act.py",
+                    "line": 7,
+                },
+                {
+                    "caller_qualname": "vllm.act.SiluAndMul.forward",
+                    "file": "/s/vllm/act.py",
+                    "line": 7,
+                },
+            ],
+            "_C::rms_norm": [
+                {"caller_qualname": "vllm.ln.f", "file": "/s/vllm/ln.py", "line": 3}
+            ],
+            "_tensor_op": [
+                {"caller_qualname": "vllm.ln.g", "file": "/s/vllm/ln.py", "line": 4}
+            ],
+        }
+        refs = collect_op_refs(edges, _manifest(), {"aten": "pytorch"}, source="/s")
+        assert [
+            (r.from_symbol, r.to_name, r.evidence, r.kind, r.to_package) for r in refs
+        ] == [
+            (
+                "vllm.act.SiluAndMul.forward",
+                "aten::silu",
+                "vllm/act.py:7",
+                "op",
+                "pytorch",
+            )
+        ]
+
+    def test_namespaces_come_from_dependency_manifests(self):
+        assert op_namespace_targets(load_builtin_manifest("vllm")) == {
+            "aten": "pytorch"
+        }
+        assert op_namespace_targets(_manifest(depends_on=())) == {}
+
+    def test_no_targets_yields_nothing(self):
+        edges = {"aten::silu": [{"caller_qualname": "f", "file": "f.py", "line": 1}]}
+        assert collect_op_refs(edges, _manifest(depends_on=())) == []
+
+
+CALLEES = {
+    "rms_norm": {"torch::stable::contiguous", "at::empty", "helper", "TORCH_CHECK"},
+    "helper": {"c10::cuda::getCurrentCUDAStream"},
+    "torch::stable::Tensor::stride": {"at::Tensor::stride"},
+}
+LOCATIONS = {
+    "rms_norm": ("/s/csrc/layernorm.cu", 40),
+    "helper": ("/s/csrc/utils.h", 9),
+    "torch::stable::Tensor::stride": ("/site/torch/include/tensor_struct.h", 80),
+}
+
+
+class TestCollectCppRefs:
+    def test_callees_in_bridge_namespaces_become_refs(self):
+        refs = collect_cpp_refs(CALLEES, LOCATIONS, _manifest(), source="/s")
+        assert [(r.from_symbol, r.to_name, r.evidence) for r in refs] == [
+            ("helper", "c10::cuda::getCurrentCUDAStream", "csrc/utils.h:9"),
+            ("rms_norm", "at::empty", "csrc/layernorm.cu:40"),
+            ("rms_norm", "torch::stable::contiguous", "csrc/layernorm.cu:40"),
+        ]
+        assert {r.kind for r in refs} == {"cpp"}
+        assert {r.to_package for r in refs} == {"pytorch"}
+
+    def test_callers_outside_source_are_skipped(self):
+        refs = collect_cpp_refs(CALLEES, LOCATIONS, _manifest(), source="/s")
+        assert "torch::stable::Tensor::stride" not in {r.from_symbol for r in refs}
+
+    def test_needs_namespaces_and_dependency(self):
+        assert collect_cpp_refs(CALLEES, LOCATIONS, _manifest(cpp_namespaces=())) == []
+        assert collect_cpp_refs(CALLEES, LOCATIONS, _manifest(depends_on=())) == []

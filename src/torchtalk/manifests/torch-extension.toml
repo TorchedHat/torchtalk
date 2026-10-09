@@ -68,3 +68,6 @@ base_class_namespaces = [
     "torch.autograd",
     "torch.optim",
 ]
+
+[bridge.cpp_op_namespaces]
+at = "aten"

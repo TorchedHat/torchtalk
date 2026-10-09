@@ -82,6 +82,8 @@ class ConventionManifest:
     # and base-class prefixes marking cross-package subclassing (`torch.nn`).
     cpp_namespaces: tuple[str, ...] = ()
     base_class_namespaces: tuple[str, ...] = ()
+    # C++ op API namespace → op namespace, e.g. `at::silu` ↔ `aten::silu`.
+    cpp_op_namespaces: dict[str, str] = field(default_factory=dict)
     # Smoke-test floors: index stat name → minimum count (scripts/harness_smoke.py).
     expected_minimums: dict[str, int] = field(default_factory=dict)
 
@@ -135,6 +137,7 @@ _SECTION_FIELDS: dict[str, dict[str, str]] = {
     "bridge": {
         "cpp_namespaces": "cpp_namespaces",
         "base_class_namespaces": "base_class_namespaces",
+        "cpp_op_namespaces": "cpp_op_namespaces",
     },
     "tests": {"utility_notes": "test_utility_notes", "patterns": "test_patterns"},
 }
