@@ -5,10 +5,11 @@ from __future__ import annotations
 from typing import Literal
 
 from ..analysis.helpers import safe_sort_key, truncate
-from ..analysis.python_analyzer import PyClass, PyFunction
+from ..analysis.python_analyzer import PyClass
 from ..formatting import create_formatter
 from ..indexer import _ensure_loaded, _fuzzy_find, _impls_from_extractor, _state
-from .common import _rel_path, _with_note
+from .bridge import refs_for, refs_from, uses_section
+from .common import _python_symbol, _rel_path, _with_note
 
 
 def _get_native_func(name: str) -> dict | None:
@@ -94,22 +95,6 @@ def _registered_as(name: str) -> list[dict]:
     return [r for r in records if r.get("kind") == "resolved" and r.get("key") == name]
 
 
-def _python_symbol(target: str, rel_file: str) -> PyFunction | PyClass | None:
-    """The function or class a registration target names.
-
-    A bare name is accepted from the record's own file or, when unambiguous,
-    anywhere; a dotted target must match its qualified name. Anything else
-    is left unresolved rather than guessed.
-    """
-    bare = target.rsplit(".", 1)[-1]
-    found = _state.py_functions.get(bare, []) + _state.py_classes.get(bare, [])
-    pick = [s for s in found if _rel_path(s.file_path) == rel_file]
-    pick = pick or [s for s in found if s.qualified_name == target]
-    if not pick and len(found) == 1 and "." not in target:
-        pick = found
-    return pick[0] if pick else None
-
-
 async def trace(
     function_name: str, focus: Literal["full", "yaml", "dispatch"] = "full"
 ) -> str:
@@ -187,6 +172,7 @@ async def trace(
             md.blank()
 
     impls = []  # Initialize for "not found" check later
+    sources: list[str] = []  # symbols of this package whose external refs apply
     if focus == "full":
         if base_name in _state.native_implementations:
             impls.extend(_state.native_implementations[base_name])
@@ -232,6 +218,7 @@ async def trace(
                 seen.add(key)
                 unique_impls.append(impl)
 
+            sources += [impl["function_name"] for impl in unique_impls]
             md.h3("C++ Implementations")
             for impl in unique_impls[:10]:
                 path = _rel_path(impl.get("file_path", ""))
@@ -256,13 +243,22 @@ async def trace(
             if symbol is None:
                 continue
             funcs = symbol.methods if isinstance(symbol, PyClass) else [symbol]
+            sources += [f.qualified_name for f in funcs]
             calls = [b for f in funcs for b in f.cpp_bindings]
             _dispatch_table(
                 md, [b for c in calls for b in _bindings_for_symbol(c.cpp_symbol)]
             )
         md.blank()
 
-    found_anything = native or bindings or impls or registered
+    # Edges into `depends_on` packages from the symbols shown above, or from
+    # the Python function or class the query names directly.
+    refs = []
+    if focus == "full":
+        refs = refs_from(sources) or refs_for(function_name)
+        if refs:
+            uses_section(md, refs)
+
+    found_anything = native or bindings or impls or registered or refs
 
     if not found_anything:
         similar = _similar_functions(function_name)

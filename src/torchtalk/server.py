@@ -9,15 +9,18 @@ from typing import Literal
 from mcp.server.fastmcp import FastMCP
 
 from .formatting import coverage_note, create_formatter
-from .harness import active_harness_name
+from .harness import active_harness_name, active_manifest
 from .indexer import (
     COMPILE_COMMANDS_HINT,
     _auto_detect_source,
     _init_from_source,
     _load_from_json,
     _state,
+    dependency_index,
+    dependency_status,
 )
 from .tools.affected import _do_affected
+from .tools.bridge import _do_bridge
 from .tools.graph import _do_called_by, _do_calls, _do_impact
 from .tools.modules import _do_list_modules, _do_trace_module
 from .tools.ops import (
@@ -130,6 +133,26 @@ async def get_status() -> str:
         md.bold("Status", "Not loaded")
     md.blank()
 
+    manifest = active_manifest()
+    if manifest.depends_on:
+        md.h3("Bridge")
+        counts: dict[tuple[str, str], int] = {}
+        for r in _state.external_refs:
+            key = (r["to_package"], r["kind"])
+            counts[key] = counts.get(key, 0) + 1
+        for dep in manifest.depends_on:
+            kinds = ", ".join(
+                f"{kind} {n:,}"
+                for (pkg, kind), n in sorted(counts.items())
+                if pkg == dep
+            )
+            md.bold(dep, kinds or "no refs")
+            status = (
+                dependency_status(dep) or f"loaded from {dependency_index(dep).source}"
+            )
+            md.item(f"Index: {status}", 1)
+        md.blank()
+
     # Auxiliary indices — populated as side-effects of the major loaders
     # above. Listed so callers can verify the data backing `affected` and
     # `graph(walk_python=True)` is actually present.
@@ -165,6 +188,7 @@ async def get_status() -> str:
         cpp_ready = "Not ready"
     py_ready = "Ready" if _state.py_modules else "Not ready"
     test_ready = "Ready" if _state.test_files else "Not ready"
+    bridge_ready = ready if manifest.depends_on else "No depends_on"
 
     md.h3("Available Tools")
     md.table(
@@ -199,6 +223,11 @@ async def get_status() -> str:
                 "`affected`",
                 cpp_ready,
                 "Map changed C++ functions to impacted Python tests",
+            ],
+            [
+                "`bridge`",
+                bridge_ready,
+                "Edges into a depends_on harness: uses or used_by",
             ],
         ],
     )
@@ -261,6 +290,23 @@ async def graph(
             walk_python=walk_python,
         )
     return await _do_called_by(function_name)
+
+
+@mcp.tool()
+async def bridge(
+    symbol: str,
+    mode: Literal["uses", "used_by"] = "uses",
+    limit: int = 20,
+) -> str:
+    """Cross-package references between this package and its dependencies.
+
+    mode='uses': dependency symbols a function, class or C++ function of
+    this package reaches (`torch.X` calls, `torch.ops.*`, `at::`/`torch::`
+    C++ calls, imports), resolved to file:line when the dependency's index
+    is built. mode='used_by': symbols of this package that reference a
+    dependency symbol such as `aten::silu`, `at::empty` or `torch.nn.Module`.
+    """
+    return await _do_bridge(symbol, mode=mode, limit=limit)
 
 
 @mcp.tool()
