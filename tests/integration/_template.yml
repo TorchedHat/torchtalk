@@ -5,8 +5,8 @@
 # The file drives two things:
 #   1. tests/test_binding_detector_pytorch.py — each `anchors` entry becomes a
 #      parametrized test that runs when $env_var points at a checkout.
-#   2. .github/workflows/integration-tests.yml — add <name> to `matrix.target`
-#      so CI does a sparse clone of `repo`@`ref` restricted to `sparse_paths`.
+#   2. .github/workflows/integration-tests.yml — CI finds this file and does a
+#      sparse clone of `repo`@`ref` restricted to `sparse_paths`.
 #
 # Verify locally:
 #   export <ENV_VAR>=/path/to/checkout

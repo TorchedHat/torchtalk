@@ -49,6 +49,7 @@ class ServerState:
 
     py_modules: dict[str, Any] = field(default_factory=dict)
     py_classes: dict[str, list[Any]] = field(default_factory=dict)
+    py_functions: dict[str, list[Any]] = field(default_factory=dict)
     nn_modules: list[Any] = field(default_factory=list)
     py_to_cpp_edges: dict[str, list[dict]] = field(default_factory=dict)
     alias_map: dict[str, str] = field(default_factory=dict)
@@ -441,6 +442,7 @@ def _build_index(
         exclude_patterns=manifest.exclude_patterns,
         registration_macros=manifest.registration_macros,
         call_wrappers=manifest.cpp_call_wrappers or None,
+        source_root=source,
     )
     graph = detector.detect_bindings_in_directory(source)
 
@@ -678,6 +680,7 @@ def _init_python_modules(source: str):
             index = build_module_index(all_modules)
             _state.py_modules = all_modules
             _state.py_classes = index["by_class"]
+            _state.py_functions = index["by_function"]
             _state.nn_modules = index["nn_modules"]
             log.info(
                 f"Loaded {len(all_modules)} Python modules, "
@@ -1323,8 +1326,11 @@ def update_index(source: str, since: str, on_uncovered: str = "warn") -> dict:
     from dataclasses import asdict
 
     from .analysis.binding_detector import BindingDetector
-    from .snapshots import _relpath, _snapshot_dir, read_manifest
+    from .analysis.helpers import relative_to
+    from .snapshots import _snapshot_dir, read_manifest
 
+    # Same normalisation as the full build, so file paths and the cache key agree.
+    source = str(Path(source).resolve())
     manifest = read_manifest(since)
     active = active_manifest()
     if manifest.package and manifest.package != active.package:
@@ -1397,18 +1403,19 @@ def update_index(source: str, since: str, on_uncovered: str = "warn") -> dict:
     new_bindings = [
         b
         for b in prior.get("bindings", [])
-        if _relpath(b.get("file_path", ""), prior_source) not in dirty
+        if relative_to(b.get("file_path", ""), prior_source) not in dirty
     ]
     new_kernels = [
         k
         for k in prior.get("cuda_kernels", [])
-        if _relpath(k.get("file_path", ""), prior_source) not in dirty
+        if relative_to(k.get("file_path", ""), prior_source) not in dirty
     ]
 
     detector = BindingDetector(
         macro_aliases=active.cpp_macro_aliases,
         token_map=active.cpp_token_map,
         registration_macros=active.registration_macros,
+        source_root=source,
     )
     src = Path(source)
     # Same harness boundary as the full build: search dirs, exclusion

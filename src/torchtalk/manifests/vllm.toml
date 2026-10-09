@@ -27,11 +27,28 @@ exclude_patterns = [
 [cpp.macro_aliases]
 TORCH_LIBRARY_EXPAND = "TORCH_LIBRARY"
 TORCH_LIBRARY_IMPL_EXPAND = "TORCH_LIBRARY_IMPL"
-# csrc/dispatch_utils.h wraps AT_DISPATCH_SWITCH; only this alias has call sites.
+# Dtype dispatch wrappers around AT_DISPATCH_SWITCH: csrc/dispatch_utils.h and
+# csrc/libtorch_stable/dispatch_utils.h. The canonical name only has to start
+# with AT_DISPATCH_ for the detector to record a dispatch site.
 VLLM_DISPATCH_FLOATING_TYPES = "AT_DISPATCH_FLOATING_TYPES"
+VLLM_DISPATCH_HALF_TYPES = "AT_DISPATCH_HALF_TYPES"
+VLLM_DISPATCH_FP8_TYPES = "AT_DISPATCH_FP8_TYPES"
+VLLM_DISPATCH_QUANT_TYPES = "AT_DISPATCH_QUANT_TYPES"
+VLLM_DISPATCH_FLOATING_AND_BYTE_TYPES = "AT_DISPATCH_FLOATING_AND_BYTE_TYPES"
+VLLM_DISPATCH_INTEGRAL_TYPES = "AT_DISPATCH_INTEGRAL_TYPES"
+VLLM_DISPATCH_INTEGRAL_AND_UNSIGNED_TYPES = "AT_DISPATCH_INTEGRAL_AND_UNSIGNED_TYPES"
+VLLM_STABLE_DISPATCH_FLOATING_TYPES = "AT_DISPATCH_FLOATING_TYPES"
+VLLM_STABLE_DISPATCH_HALF_TYPES = "AT_DISPATCH_HALF_TYPES"
+VLLM_STABLE_DISPATCH_FP8_TYPES = "AT_DISPATCH_FP8_TYPES"
+VLLM_STABLE_DISPATCH_QUANT_TYPES = "AT_DISPATCH_QUANT_TYPES"
+VLLM_STABLE_DISPATCH_IDX_TYPES = "AT_DISPATCH_INDEX_TYPES"
+VLLM_STABLE_DISPATCH_INTEGRAL_TYPES = "AT_DISPATCH_INTEGRAL_TYPES"
+VLLM_STABLE_DISPATCH_INTEGRAL_AND_UNSIGNED_TYPES = "AT_DISPATCH_INTEGRAL_AND_UNSIGNED_TYPES"
 
 [cpp.token_map]
-TORCH_EXTENSION_NAME = "_C"
+# CMake defines TORCH_EXTENSION_NAME per extension target (cmake/utils.cmake
+# define_extension_target); only the ROCm bindings build under another name.
+TORCH_EXTENSION_NAME = { "" = "_C", "csrc/rocm/" = "_rocm_C" }
 
 [python]
 string_registries = [
@@ -66,7 +83,7 @@ target_arg = 1
 registry = "custom_ops"
 
 [expected_minimums]
-bindings = 1013
+bindings = 1088
 cuda_kernels = 200
 python_modules = 2300
 nn_modules = 1280

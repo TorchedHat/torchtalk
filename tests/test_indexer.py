@@ -548,8 +548,8 @@ class TestUpdateIndex:
                 self.cuda_kernels = []
 
         class FakeDetector:
-            def __init__(self, **_kwargs):
-                pass
+            def __init__(self, **kwargs):
+                assert kwargs["source_root"] == str((tmp_path / "src").resolve())
 
             def has_binding_markers(self, content):
                 return has_binding_patterns(content)

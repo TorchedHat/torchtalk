@@ -126,62 +126,11 @@ async def _do_list_test_utils() -> str:
     md = create_formatter()
     md.h2("Test Utilities")
 
-    # Curated details for well-known modules; other manifest entries list
-    # with their path only.
-    utility_info = {
-        "torch/testing/_internal/common_utils.py": {
-            "name": "common_utils",
-            "description": "Core test utilities: TestCase, device/dtype helpers",
-            "key_items": [
-                "TestCase",
-                "run_tests",
-                "instantiate_parametrized_tests",
-                "IS_CUDA",
-            ],
-        },
-        "torch/testing/_internal/common_device_type.py": {
-            "name": "common_device_type",
-            "description": "Device-agnostic testing infrastructure",
-            "key_items": [
-                "instantiate_device_type_tests",
-                "ops",
-                "onlyCPU",
-                "onlyCUDA",
-            ],
-        },
-        "torch/testing/_internal/common_dtype.py": {
-            "name": "common_dtype",
-            "description": "Data type testing utilities",
-            "key_items": ["floating_types", "integral_types", "all_types_and_complex"],
-        },
-        "torch/testing/_internal/common_cuda.py": {
-            "name": "common_cuda",
-            "description": "CUDA-specific test utilities",
-            "key_items": ["TEST_CUDA", "TEST_MULTIGPU", "TEST_CUDNN"],
-        },
-        "torch/testing/_internal/opinfo/core.py": {
-            "name": "opinfo",
-            "description": "Operator test info registry (OpInfo)",
-            "key_items": ["OpInfo", "SampleInput", "DecorateInfo"],
-        },
-        "torch/testing/_comparison.py": {
-            "name": "comparison",
-            "description": "Tensor comparison and assertions",
-            "key_items": ["assert_close", "assert_equal"],
-        },
-        "torch/testing/_internal/hypothesis_utils.py": {
-            "name": "hypothesis_utils",
-            "description": "Property-based testing with Hypothesis",
-            "key_items": ["tensor_strategy", "dtype_strategy"],
-        },
-    }
-
-    utility_paths = active_manifest().test_utility_modules
+    manifest = active_manifest()
     md.h3("Core Utilities")
-    if not utility_paths:
+    if not manifest.test_utility_modules:
         md.text("*No test utility modules are configured for this harness*")
-    curated_hits = 0
-    for path in utility_paths:
+    for path in manifest.test_utility_modules:
         if path in _state.test_utilities:
             exists = True
         elif _state.source:
@@ -189,14 +138,9 @@ async def _do_list_test_utils() -> str:
         else:
             exists = False
         status = "[ok]" if exists else "[missing]"
-        info = utility_info.get(path)
-        name = info["name"] if info else Path(path).stem
-        md.item(f"**{name}** {status}")
-        if info:
-            curated_hits += 1
-            md.item(f"*{info['description']}*", 1)
-            md.item(f"Key: `{', '.join(info['key_items'][:4])}`", 1)
-        md.item(f"Path: `{path}`", 1)
+        md.item(f"**{path}** {status}")
+        if note := manifest.test_utility_notes.get(path):
+            md.item(f"*{note}*", 1)
         md.blank()
 
     md.h3("Test Infrastructure Stats")
@@ -208,28 +152,10 @@ async def _do_list_test_utils() -> str:
     else:
         md.text("*Test infrastructure not yet indexed*")
 
-    if not curated_hits:
-        return md.build()
-
-    md.h3("Common Test Patterns")
-    patterns = [
-        (
-            "Device-type tests",
-            "`@instantiate_device_type_tests`",
-            "Run tests across CPU/CUDA",
-        ),
-        ("Parametrized tests", "`@parametrize`", "Run tests with multiple inputs"),
-        ("OpInfo tests", "`@ops(op_db)`", "Test operators using OpInfo metadata"),
-        ("Gradient check", "`gradcheck(fn, inputs)`", "Verify autograd correctness"),
-        (
-            "Assert close",
-            "`torch.testing.assert_close(a, b)`",
-            "Compare tensors with tolerance",
-        ),
-    ]
-    for name, code, desc in patterns:
-        md.item(f"**{name}**: {code}")
-        md.item(f"*{desc}*", 1)
+    if manifest.test_patterns:
+        md.h3("Common Test Patterns")
+        for code, desc in manifest.test_patterns.items():
+            md.item(f"`{code}`: *{desc}*")
 
     return md.build()
 

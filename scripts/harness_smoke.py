@@ -7,20 +7,23 @@ manifest (src/torchtalk/manifests/<target>.toml).
 Usage:
     python scripts/harness_smoke.py --harness pytorch --source /path/to/pytorch
     python scripts/harness_smoke.py --harness pytorch --clone
+    python scripts/harness_smoke.py --list
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
-from torchtalk.harness import get_harness, list_harnesses
+from torchtalk.harness import get_harness
 from torchtalk.integration_manifest import (
     IntegrationManifestError,
+    integration_manifest_paths,
     load_integration_manifest,
 )
 
@@ -70,20 +73,39 @@ def sparse_clone(repo_url: str, ref: str, paths: list[str], dest: Path) -> None:
     subprocess.run(["git", "checkout", "--detach", "FETCH_HEAD"], cwd=dest, check=True)
 
 
+def smoke_targets() -> list[str]:
+    """Integration targets whose harness declares `[expected_minimums]`.
+
+    CI builds the smoke matrix from this, so a target needs both an anchor
+    file and thresholds before it is smoke-tested.
+    """
+    return [
+        p.stem
+        for p in integration_manifest_paths(MANIFESTS_DIR)
+        if get_harness(p.stem).manifest.expected_minimums
+    ]
+
+
 def main():
-    targets = sorted(
-        n for n in list_harnesses() if get_harness(n).manifest.expected_minimums
-    )
+    targets = smoke_targets()
     parser = argparse.ArgumentParser(description="Harness smoke test")
-    parser.add_argument("--harness", required=True, choices=targets)
-    group = parser.add_mutually_exclusive_group(required=True)
+    parser.add_argument("--harness", choices=targets)
+    group = parser.add_mutually_exclusive_group()
     group.add_argument("--source", type=Path)
     group.add_argument(
         "--clone",
         action="store_true",
         help="clone the manifest's pinned version tag or commit SHA",
     )
+    group.add_argument(
+        "--list", action="store_true", help="print the smoke targets as JSON and exit"
+    )
     args = parser.parse_args()
+    if args.list:
+        print(json.dumps(targets))
+        return
+    if not args.harness or not (args.source or args.clone):
+        parser.error("--harness and one of --source/--clone are required")
 
     manifest = _load_manifest(args.harness)
     repo_url = _clone_url(manifest["repo"])

@@ -7,16 +7,43 @@ on:
     paths:
       - "src/torchtalk/analysis/**"
       - "src/torchtalk/integration_manifest.py"
+      - "src/torchtalk/manifests/**"
       - "tests/test_binding_detector_pytorch.py"
       - "tests/integration/**"
       - ".github/workflows/integration-tests.yml"
 
 jobs:
+  targets:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.list.outputs.targets }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install -e .
+
+      - name: List targets from tests/integration/*.yml
+        id: list
+        run: |
+          python3 << 'SCRIPT'
+          import json, os
+          from torchtalk.integration_manifest import integration_manifest_paths
+
+          targets = [p.stem for p in integration_manifest_paths("tests/integration")]
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"targets={json.dumps(targets)}\n")
+          SCRIPT
+
   integration:
+    needs: targets
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        target: [pytorch, vllm]
+        target: ${{ fromJson(needs.targets.outputs.matrix) }}
     steps:
       - name: Checkout torchtalk
         uses: actions/checkout@v4

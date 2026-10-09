@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 
 import pytest
 
@@ -150,15 +151,19 @@ class TestPythonCallersFor:
         result = _python_callers_for("at::native::add")
         assert result == [{"caller_qualname": "torch.x.f", "file": "/x.py", "line": 12}]
 
-    def test_falls_back_to_aten_prefix(self):
-        # No binding but bare-name + aten:: guess hits.
+    def test_falls_back_to_op_namespace(self, monkeypatch):
+        # No binding; the bare name is tried under each manifest op namespace.
+        manifest = dataclasses.replace(
+            graph_mod.active_manifest(), op_namespaces={"fw": "myns"}
+        )
+        monkeypatch.setattr(graph_mod, "active_manifest", lambda: manifest)
         indexer._state.by_cpp_name = {}
         indexer._state.py_to_cpp_edges = {
-            "aten::relu": [
+            "myns::relu": [
                 {"caller_qualname": "torch.nn.f", "file": "/nn.py", "line": 5}
             ]
         }
-        result = _python_callers_for("at::native::relu")
+        result = _python_callers_for("fw::native::relu")
         assert len(result) == 1
         assert result[0]["caller_qualname"] == "torch.nn.f"
 

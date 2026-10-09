@@ -8,6 +8,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+from .helpers import relative_to
 from .patterns import has_binding_patterns, should_exclude
 
 log = logging.getLogger(__name__)
@@ -180,11 +181,12 @@ class BindingDetector:
     def __init__(
         self,
         macro_aliases: dict[str, str] | None = None,
-        token_map: dict[str, str] | None = None,
+        token_map: dict[str, str | dict[str, str]] | None = None,
         search_dirs: tuple[str, ...] | None = None,
         exclude_patterns: tuple[str, ...] | None = None,
         registration_macros: tuple[str, ...] | None = None,
         call_wrappers: tuple[str, ...] | None = None,
+        source_root: str | None = None,
     ):
         from tree_sitter_language_pack import get_parser
 
@@ -197,13 +199,21 @@ class BindingDetector:
         self.exclude_patterns = exclude_patterns or ()
         self.registration_macros = registration_macros or ()
         self.call_wrappers = call_wrappers or _IMPL_WRAPPERS
+        # Checkout root; per-path token values match against paths under it.
+        self.source_root = source_root or ""
         log.info("BindingDetector initialized with C++/CUDA support")
 
-    def _preprocess(self, content: str) -> str:
+    def _preprocess(self, content: str, file_path: str = "") -> str:
         """Expand manifest macro aliases and tokens (line-count preserving)."""
         for alias, canonical in self.macro_aliases.items():
             content = re.sub(rf"\b{re.escape(alias)}\b", canonical, content)
+        rel = relative_to(file_path, self.source_root)
         for token, value in self.token_map.items():
+            if isinstance(value, dict):
+                prefixes = sorted((p for p in value if rel.startswith(p)), key=len)
+                if not prefixes:
+                    continue
+                value = value[prefixes[-1]]
             content = re.sub(rf"\b{re.escape(token)}\b", value, content)
         return content
 
@@ -222,7 +232,7 @@ class BindingDetector:
         graph = BindingGraph()
 
         if self.macro_aliases or self.token_map:
-            content = self._preprocess(content)
+            content = self._preprocess(content, file_path)
 
         is_cuda = file_path.endswith((".cu", ".cuh"))
         parser = self.cuda_parser if is_cuda else self.cpp_parser
@@ -475,13 +485,15 @@ class BindingDetector:
         lib_pattern = r"TORCH_LIBRARY(?:_FRAGMENT)?\s*\(\s*(\w+)\s*,\s*(\w+)\s*\)"
         for match in re.finditer(lib_pattern, content):
             namespace = match.group(1)
-            line_number = content[: match.start()].count("\n") + 1
 
             # Find ops defined in this library block
             block_start = content.find("{", match.end())
             if block_start != -1:
                 block_end = self._find_matching_brace(content, block_start)
                 block_content = content[block_start:block_end]
+                # Offsets are counted from the brace, so the base line is the
+                # brace's line even when the macro header spans several lines.
+                line_number = content[:block_start].count("\n") + 1
 
                 self._extract_torch_ops(
                     block_content,
@@ -501,12 +513,12 @@ class BindingDetector:
         for match in re.finditer(impl_pattern, content):
             namespace = match.group(1)
             dispatch_key = match.group(2)
-            line_number = content[: match.start()].count("\n") + 1
 
             block_start = content.find("{", match.end())
             if block_start != -1:
                 block_end = self._find_matching_brace(content, block_start)
                 block_content = content[block_start:block_end]
+                line_number = content[:block_start].count("\n") + 1
 
                 self._extract_torch_ops(
                     block_content,

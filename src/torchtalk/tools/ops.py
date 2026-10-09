@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Literal
 
 from ..analysis.helpers import safe_sort_key, truncate
+from ..analysis.python_analyzer import PyClass, PyFunction
 from ..formatting import create_formatter
 from ..indexer import _ensure_loaded, _fuzzy_find, _impls_from_extractor, _state
 from .common import _rel_path, _with_note
@@ -51,6 +52,57 @@ def _similar_functions(name: str, limit: int = 10) -> list[str]:
         if len(unique) >= limit:
             break
     return unique
+
+
+def _dispatch_table(md, bindings: list[dict]) -> None:
+    """Backend / C++ function / file:line table for dispatch registrations."""
+    rows = []
+    seen = set()
+    for b in bindings:
+        key = (b.get("dispatch_key"), b.get("cpp_name"), b.get("file_path"))
+        if key in seen:
+            continue
+        seen.add(key)
+        dispatch = b.get("dispatch_key") or "default"
+        cpp = b.get("cpp_name") or "N/A"
+        path = _rel_path(b.get("file_path") or "")
+        line = f":{b['line_number']}" if b.get("line_number") else ""
+        rows.append([dispatch, f"`{cpp}`", f"`{path}{line}`"])
+    if rows:
+        md.table(["Backend", "C++ Function", "File"], rows[:20])
+
+
+def _exact_bindings(name: str) -> list[dict]:
+    """Bindings registered under `name`, as a Python name or a C++ name."""
+    return _state.by_python_name.get(name) or _state.by_cpp_name.get(name, [])
+
+
+def _bindings_for_symbol(cpp_symbol: str) -> list[dict]:
+    """Bindings a Python call site reaches: `ns::op` or a bare pybind name."""
+    ns, _, op = cpp_symbol.rpartition("::")
+    return _exact_bindings(f"{ns}.{op}" if ns else op)
+
+
+def _registered_as(name: str) -> list[dict]:
+    """Resolved registration records keyed by `name` (manifest registries)."""
+    records = _state.registrations.get("records", [])
+    return [r for r in records if r.get("kind") == "resolved" and r.get("key") == name]
+
+
+def _python_symbol(target: str, rel_file: str) -> PyFunction | PyClass | None:
+    """The function or class a registration target names.
+
+    A bare name is accepted from the record's own file or, when unambiguous,
+    anywhere; a dotted target must match its qualified name. Anything else
+    is left unresolved rather than guessed.
+    """
+    bare = target.rsplit(".", 1)[-1]
+    found = _state.py_functions.get(bare, []) + _state.py_classes.get(bare, [])
+    pick = [s for s in found if _rel_path(s.file_path) == rel_file]
+    pick = pick or [s for s in found if s.qualified_name == target]
+    if not pick and len(found) == 1 and "." not in target:
+        pick = found
+    return pick[0] if pick else None
 
 
 async def trace(
@@ -104,9 +156,7 @@ async def trace(
     fuzzy_bindings = False
     if focus in ("full", "dispatch"):
         # From binding detector (TORCH_LIBRARY_IMPL registrations)
-        bindings = _state.by_python_name.get(function_name, [])
-        if not bindings:
-            bindings = _state.by_cpp_name.get(function_name, [])
+        bindings = _exact_bindings(function_name)
         if not bindings:
             found = _fuzzy_find(function_name, _state.by_python_name)
             if found:
@@ -118,21 +168,7 @@ async def trace(
             if fuzzy_bindings:
                 title += " — fuzzy match"
             md.h3(title)
-            rows = []
-            seen = set()
-            for b in bindings:
-                key = (b.get("dispatch_key"), b.get("cpp_name"), b.get("file_path"))
-                if key in seen:
-                    continue
-                seen.add(key)
-                dispatch = b.get("dispatch_key") or "default"
-                cpp = b.get("cpp_name") or "N/A"
-                path = _rel_path(b.get("file_path") or "")
-                line = f":{b['line_number']}" if b.get("line_number") else ""
-                rows.append([dispatch, f"`{cpp}`", f"`{path}{line}`"])
-
-            if rows:
-                md.table(["Backend", "C++ Function", "File"], rows[:20])
+            _dispatch_table(md, bindings)
             md.blank()
 
         # From native_functions.yaml dispatch config
@@ -200,7 +236,28 @@ async def trace(
                 md.item(f"*... and {len(unique_impls) - 10} more*")
             md.blank()
 
-    found_anything = native or bindings or impls
+    # Resolved Python-side registrations (custom ops, class registries): the
+    # op may be a Python function whose body calls the C++ bindings above.
+    registered = _registered_as(function_name) if focus != "yaml" else []
+    if registered:
+        md.h3("Python Registrations")
+        for r in registered:
+            symbol = _python_symbol(r["target"], r["file"])
+            target, loc = r["target"], f"{r['file']}:{r['line']}"
+            if symbol is not None:
+                target = symbol.qualified_name
+                loc = f"{_rel_path(symbol.file_path)}:{symbol.line_number}"
+            md.item(f"`{r['registry']}` → `{target}` (`{loc}`)")
+            if symbol is None:
+                continue
+            funcs = symbol.methods if isinstance(symbol, PyClass) else [symbol]
+            calls = [b for f in funcs for b in f.cpp_bindings]
+            _dispatch_table(
+                md, [b for c in calls for b in _bindings_for_symbol(c.cpp_symbol)]
+            )
+        md.blank()
+
+    found_anything = native or bindings or impls or registered
 
     if not found_anything:
         similar = _similar_functions(function_name)
