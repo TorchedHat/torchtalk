@@ -146,7 +146,13 @@ Common shapes, in the order to try them:
    `python_package_roots` matches the directory that holds `__init__.py`.
 4. **0 CUDA kernels** — check `cpp_search_dirs` includes the `.cu` directory.
 5. **0 C++ call-graph edges** — expected without `compile_commands.json`;
-   not a manifest problem.
+   not a manifest problem. Configure the framework's build once with
+   `-DCMAKE_EXPORT_COMPILE_COMMANDS=ON` (vLLM: with `torch` installed,
+   `VLLM_PYTHON_EXECUTABLE`, `VLLM_TARGET_DEVICE` and `TORCH_CUDA_ARCH_LIST`
+   set, and a writable source tree because the configure step writes
+   generated kernels into `csrc/`). Only TUs of that build are covered, and
+   `.cu` TUs need a clang that supports the installed CUDA toolkit (see the
+   README).
 
 If a manifest field can't express it, file an issue against `analysis/` with
 the file + line that's mis-detected and the count delta. Don't work around it

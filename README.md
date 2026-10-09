@@ -2,11 +2,7 @@
 
 # TorchTalk
 
-**Give your coding agent structural understanding of the entire codebase.**
-
-Python → C++ → CUDA
-
-*Every codebase speaks more than one language. Now your agent does too.*
+**Structural understanding of a Python, C++ and CUDA codebase, served to your coding agent over MCP.**
 
 [![CI](https://github.com/TorchedHat/torchtalk/actions/workflows/integration-tests.yml/badge.svg)](https://github.com/TorchedHat/torchtalk/actions/workflows/integration-tests.yml)
 [![python](https://img.shields.io/badge/python-3.10%2B-0969da)](pyproject.toml)
@@ -40,7 +36,7 @@ flowchart LR
 - **Binding chains.** Trace `torch.matmul` → `at::native::matmul` → `LinearAlgebra.cpp:1996` in one query.
 - **Impact analysis.** Ask what breaks if a GEMM kernel changes and get every caller with file and line, plus the affected Python test files.
 - **Dispatch mapping.** See which backend (CPU, CUDA, MPS) handles each operation.
-- **C++ call graphs.** 60K+ functions with call edges, extracted with libclang.
+- **C++ call graphs.** Function definitions and call edges extracted with libclang, including CUDA kernel launches.
 - **Test discovery.** Find the existing tests for any operator before writing new ones.
 - **Cross-framework edges.** Every import from an extension into its base framework becomes an `ExternalRef` edge. Indexing vLLM v0.31.0 produces 2,413 of them across 2,569 modules.
 - **Framework agnostic.** Conventions live in TOML manifests, not code. Onboarding a new framework is a small data PR.
@@ -53,8 +49,9 @@ pip install -r requirements.txt
 pip install -e .
 ```
 
-The C++ call graph needs `libclang` installed. Set `LIBCLANG_LIBRARY_FILE` to
-use a specific copy.
+The C++ call graph needs the `libclang` shared library (version 19 or newer)
+on the system. TorchTalk finds it through `ctypes.util.find_library`; set
+`LIBCLANG_LIBRARY_FILE` to use a specific copy.
 
 TorchTalk is a standard MCP server and works with any MCP client. Register it with your agent:
 
@@ -76,9 +73,28 @@ Repo instructions for agents live in `AGENTS.md`, which Claude Code, Codex,
 Cursor and Gemini CLI read. See [docs/agent-setup.md](docs/agent-setup.md).
 
 On first run TorchTalk builds its index and caches it under `~/.cache/torchtalk/`.
-The C++ call graph continues building in the background, so the tools work immediately. You need a
-source checkout of the framework you are indexing, and optionally a
-`compile_commands.json` from a one-time build for the full C++ call graph.
+The C++ call graph continues building in the background, so the tools work
+immediately. You need a source checkout of the framework you are indexing.
+
+### C++ call graph
+
+The `graph` and `affected` tools need a `compile_commands.json`. Configure the
+framework's C++ build once with `-DCMAKE_EXPORT_COMPILE_COMMANDS=ON` (PyTorch
+exports it by default) and leave the file at `<source>/compile_commands.json`
+or `<source>/build/compile_commands.json`. The call graph covers the
+translation units of that build: a CUDA configuration of vLLM covers
+`csrc/*.cu` but not `csrc/cpu/`.
+
+Kernel launch edges come from parsing `.cu` files as CUDA, which needs:
+
+- `clang` on `PATH`, with a major version that supports the installed CUDA
+  toolkit. With CUDA 13.3, clang 19 and 21 fail on the CUDA headers and lose
+  the launch edges; clang 22 parses them.
+- `CUDA_HOME` set when the toolkit is not at `/usr/local/cuda`.
+- `TORCHTALK_CUDA_ARCH` to pick the `--cuda-gpu-arch` (default `sm_80`).
+
+Without a CUDA-capable clang, `.cu` files are parsed host-side as C++, which
+keeps the function definitions but not the launch edges.
 
 ## Supported Frameworks
 
@@ -98,7 +114,8 @@ torchtalk index build --source /path/to/vllm --harness vllm
 ```
 
 A repo can also ship its own `.torchtalk.toml` at its root, which
-`index build` and `index update` activate automatically. Manifests support
+`index build`, `index update` and `mcp-serve` activate automatically unless
+`--harness` is given. Manifests support
 `extends` to inherit from `torch-extension`, `depends_on` to name
 the harnesses that receive `ExternalRef` edges, and `expected_minimums` for
 the counts the smoke test must reach.
@@ -115,7 +132,7 @@ and open a tracking issue from the
 |------|-------------|
 | `get_status()` | TorchTalk readiness summary across bindings, call graph, modules, tests |
 | `trace(func, focus?)` | Trace any op: Python → YAML → C++ → file:line |
-| `search(query, mode?, backend?)` | mode="bindings": dispatch registrations. mode="kernels": CUDA kernel launches |
+| `search(query, mode?, backend?, limit?)` | mode="bindings": dispatch registrations. mode="kernels": CUDA kernel launches |
 | `graph(func, mode?, depth?, fuzzy_all_levels?, walk_python?, focus?)` | mode="callers": inbound. mode="calls": outbound. mode="impact": transitive callers |
 | `modules(name, mode?, focus?)` | mode="trace": class details (focus="full" adds bases/docstring). mode="list": browse by category ("nn", "optim", "all") |
 | `tests(query?, mode?, limit?, focus?)` | mode="find": search tests (focus narrows to functions/classes/files). mode="utils": list utilities. mode="file_info": test file details |
@@ -128,8 +145,8 @@ and open a tracking issue from the
 | `init --source <path> [--harness <name>] [--set-default]` | Save a source path (and optionally a default harness) to config |
 | `status` | Show config and cache status |
 | `mcp-serve [--source <path>] [--harness <name>]` | Start the MCP server |
-| `index build [--no-wait] [--harness <name>]` | Build or refresh the index and exit (headless) |
-| `index update --since <snapshot>` | Incrementally refresh for files changed since `<snapshot>`'s commit |
+| `index build [--source <path>] [--no-wait] [--harness <name>]` | Build or refresh the index and exit (headless) |
+| `index update --since <snapshot> [--on-uncovered warn\|fail\|widen]` | Incrementally refresh for files changed since `<snapshot>`'s commit |
 | `snapshot save\|load\|list\|delete\|diff\|export\|import` | Capture, restore, compare, and ship index snapshots (see below) |
 | `cursor-add -C <project> -p <source>` | Register TorchTalk in a Cursor project |
 
@@ -192,11 +209,13 @@ then exact commit match, then the most recent ancestor commit (via
 
 Incremental update re-parses only the C++/CUDA files that
 `git diff <baseline-commit>..HEAD` reports as changed, and evicts their
-contributions from the C++ call graph before re-attributing. Header changes are resolved via
-per-TU include sets captured during the baseline build
-(`TranslationUnit.get_includes()`). Every TU whose include closure contains a changed
-header is re-parsed. Over-invalidation is possible, never under-invalidation. A changed header not
-in any TU's baseline include set is surfaced as a warning with up to 5 sample paths.
+contributions from the C++ call graph before re-attributing. Header changes
+are resolved through the per-TU include sets captured during the baseline
+build: every TU whose include closure contains a changed header is re-parsed.
+A changed header outside every TU's baseline include set is reported with up
+to 5 sample paths; `--on-uncovered` chooses whether that warns (default),
+fails the command, or widens the re-parse set by grepping the compile
+database for the header.
 
 **Change-gated workflow.** Use `snapshot diff --json` upstream to
 decide what, if anything, to re-run:
