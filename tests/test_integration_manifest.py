@@ -14,6 +14,7 @@ from torchtalk.analysis.binding_detector import BindingType
 from torchtalk.harness import ManifestError
 from torchtalk.integration_manifest import (
     IntegrationManifestError,
+    integration_manifest_paths,
     load_integration_manifest,
     supported_anchor_checks,
 )
@@ -311,6 +312,12 @@ class TestIntegrationManifestHarnessIdentity:
             _load(tmp_path, _valid_manifest())
 
 
+def test_manifest_paths_skip_templates(tmp_path):
+    for name in ("b.yml", "a.yml", "_template.yml", "notes.txt"):
+        (tmp_path / name).write_text("")
+    assert [p.name for p in integration_manifest_paths(tmp_path)] == ["a.yml", "b.yml"]
+
+
 def test_all_integration_consumers_use_shared_loader():
     runner = (REPO_ROOT / "tests" / "test_binding_detector_pytorch.py").read_text()
     smoke = (REPO_ROOT / "scripts" / "harness_smoke.py").read_text()
@@ -320,3 +327,21 @@ def test_all_integration_consumers_use_shared_loader():
     assert "load_integration_manifest" in runner
     assert "load_integration_manifest" in smoke
     assert "load_integration_manifest" in workflow
+
+
+def test_ci_matrices_derived():
+    workflows = REPO_ROOT / ".github" / "workflows"
+    cases = (
+        (
+            "integration-tests.yml",
+            "integration",
+            "target",
+            "integration_manifest_paths",
+        ),
+        ("harness-smoke.yml", "harness-smoke", "harness", "harness_smoke.py --list"),
+    )
+    for name, job, key, derivation in cases:
+        text = (workflows / name).read_text()
+        assert derivation in text
+        matrix = yaml.safe_load(text)["jobs"][job]["strategy"]["matrix"][key]
+        assert matrix.startswith("${{ fromJson(")

@@ -25,6 +25,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .analysis.helpers import relative_to
 from .config import CACHE_DIR, cache_paths, resolve_source, source_hash
 from .harness import active_manifest
 from .symbols import content_fingerprint as _content_fingerprint
@@ -559,16 +560,6 @@ def _load_snapshot_payload(name: str) -> tuple[list[dict], str]:
     return bindings, manifest.pytorch_source
 
 
-def _relpath(fp: str, source: str) -> str:
-    """Strip the PyTorch source prefix from a file path, if present."""
-    if not fp:
-        return fp
-    prefix = source.rstrip("/") + "/"
-    if fp.startswith(prefix):
-        return fp[len(prefix) :]
-    return fp
-
-
 def _binding_key(b: dict) -> tuple[str, str, str]:
     return (
         b.get("python_name") or "",
@@ -581,7 +572,7 @@ def _file_signatures(bindings: list[dict], source: str) -> dict[str, str]:
     """Map relative-file-path -> hash of its bindings, for fast file-level diff."""
     per_file: dict[str, list] = {}
     for b in bindings:
-        fp = _relpath(b.get("file_path") or "", source)
+        fp = relative_to(b.get("file_path") or "", source)
         if not fp:
             continue
         entry = (*_binding_key(b), b.get("line_number") or 0)

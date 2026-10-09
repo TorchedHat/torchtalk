@@ -72,6 +72,16 @@ def truncate(text: str, max_len: int = 80) -> str:
     return text[: max_len - 3] + "..."
 
 
+def relative_to(fp: str, source: str) -> str:
+    """Strip the source checkout prefix from a file path, if present."""
+    if not fp:
+        return fp
+    prefix = source.rstrip("/") + "/"
+    if fp.startswith(prefix):
+        return fp[len(prefix) :]
+    return fp
+
+
 def dedupe_by_key(items: list[dict], key: str) -> list[dict]:
     """Deduplicate list of dicts by a key."""
     seen: set[Any] = set()

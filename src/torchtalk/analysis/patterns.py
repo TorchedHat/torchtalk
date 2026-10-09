@@ -59,6 +59,11 @@ EXCLUDE_PATTERNS = [
     "/examples/",
 ]
 
+# File suffixes the binding scan reads. Headers are included because kernel
+# templates and dispatch sites live there too.
+CPP_SOURCE_EXTS = (".cpp", ".cc", ".cxx", ".cu", ".cuh")
+CPP_HEADER_EXTS = (".h", ".hpp", ".hxx", ".hh", ".inc")
+
 # Patterns to detect C++ binding code
 CPP_BINDING_PATTERNS = [
     "TORCH_LIBRARY",

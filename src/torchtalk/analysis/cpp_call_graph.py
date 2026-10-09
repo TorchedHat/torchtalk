@@ -25,6 +25,10 @@ from .patterns import CPP_SEARCH_DIRS, should_exclude, should_include_dir
 
 log = logging.getLogger(__name__)
 
+# Bump when the saved call graph changes shape or when the compile flags
+# handed to libclang change, so caches built by an older version are rebuilt.
+_CALL_GRAPH_CACHE_FORMAT_VERSION = 2
+
 
 try:
     import clang.cindex  # noqa: F401
@@ -222,9 +226,26 @@ def _discover_cuda_env() -> dict | None:
     }
 
 
+def _keep_args(compile_args: list[str]) -> list[str]:
+    """Keep the include, define and language-standard flags of a compile command.
+
+    CMake writes system include paths as `-isystem <dir>` (two tokens), so the
+    value following a bare `-I`, `-isystem` or `-D` is kept with its flag.
+    """
+    keep: list[str] = []
+    args = iter(compile_args)
+    for a in args:
+        if a in ("-I", "-isystem", "-D"):
+            value = next(args, None)
+            if value is not None:
+                keep.extend((a, value))
+        elif a.startswith(("-I", "-isystem", "-D", "-std")):
+            keep.append(a)
+    return keep
+
+
 def _cu_args(compile_args: list[str], cuda_env: dict) -> list[str]:
     """Translate an nvcc compile-command tail into libclang CUDA args."""
-    keep = [a for a in compile_args if a.startswith(("-I", "-D", "-std"))]
     out = [
         "-x",
         "cuda",
@@ -235,14 +256,14 @@ def _cu_args(compile_args: list[str], cuda_env: dict) -> list[str]:
     ]
     for inc in cuda_env.get("extra_isystem", []):
         out.extend(["-isystem", inc])
-    return out + keep
+    return out + _keep_args(compile_args)
 
 
 def _translate_args(
     file_path: str, compile_args: list[str], cuda_env: dict | None
 ) -> list[str]:
     """Pick the libclang arg set for a TU based on extension and CUDA availability."""
-    keep = [a for a in compile_args if a.startswith(("-I", "-D", "-std"))]
+    keep = _keep_args(compile_args)
     if file_path.endswith(".cu"):
         if cuda_env:
             return _cu_args(compile_args, cuda_env)
@@ -265,8 +286,8 @@ def _synthesize_missing_cu_entries(
 
     PyTorch's compile_commands.json can list fewer .cu TUs than exist on disk
     (e.g. CUDA build off, partial targets). Reusing a kept entry's raw args is
-    safe because `_translate_args` strips everything except `-I/-D/-std` for
-    `.cu`, then `_cu_args` adds the CUDA-specific flags.
+    safe because `_translate_args` keeps only what `_keep_args` keeps, then
+    `_cu_args` adds the CUDA-specific flags.
     """
     extra: list[tuple[str, list[str]]] = []
     seen: set[str] = set()
@@ -1004,6 +1025,7 @@ class CppCallGraphExtractor:
     def save_cache(self, cache_key: str, fingerprint: str | None = None) -> Path:
         cache_path = self.cache_dir / f"{cache_key}.json"
         data = self.get_call_graph_data()
+        data["format_version"] = _CALL_GRAPH_CACHE_FORMAT_VERSION
         if fingerprint:
             data["source_fingerprint"] = fingerprint
         with open(cache_path, "w") as f:
@@ -1018,6 +1040,9 @@ class CppCallGraphExtractor:
         try:
             with open(cache_path) as f:
                 data = json.load(f)
+            if data.get("format_version") != _CALL_GRAPH_CACHE_FORMAT_VERSION:
+                log.info("Call graph cache format is outdated; rebuilding")
+                return False
             if (
                 expect_fingerprint
                 and data.get("source_fingerprint") != expect_fingerprint

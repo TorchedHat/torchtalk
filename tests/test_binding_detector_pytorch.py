@@ -23,23 +23,17 @@ from torchtalk import harness as harness_mod
 from torchtalk.analysis.binding_detector import BindingDetector, BindingType
 from torchtalk.integration_manifest import (
     IntegrationManifestError,
+    integration_manifest_paths,
     load_integration_manifest,
 )
 
 MANIFESTS_DIR = Path(__file__).parent / "integration"
 
 
-def _manifest_paths() -> list[Path]:
-    """List target YAML manifests, excluding templates."""
-    return sorted(
-        path for path in MANIFESTS_DIR.glob("*.yml") if not path.name.startswith("_")
-    )
-
-
 def _load_manifests() -> list[dict]:
     """Load valid manifests for anchor parametrization without collection errors."""
     manifests = []
-    for path in _manifest_paths():
+    for path in integration_manifest_paths(MANIFESTS_DIR):
         try:
             manifests.append(load_integration_manifest(path))
         except IntegrationManifestError:
@@ -59,7 +53,7 @@ def _source_path(manifest: dict) -> Path | None:
     return None
 
 
-def _configured_detector(manifest: dict) -> BindingDetector:
+def _configured_detector(manifest: dict, source_root: str = "") -> BindingDetector:
     """Build a detector using the conventions named by the manifest filename."""
     conventions = harness_mod.get_harness(manifest["_name"]).manifest
     return BindingDetector(
@@ -68,6 +62,7 @@ def _configured_detector(manifest: dict) -> BindingDetector:
         exclude_patterns=conventions.exclude_patterns,
         registration_macros=conventions.registration_macros,
         call_wrappers=conventions.cpp_call_wrappers or None,
+        source_root=source_root,
     )
 
 
@@ -109,7 +104,11 @@ def _anchor_params() -> list[tuple[dict, dict, Path | None]]:
 PARAMS = _anchor_params()
 
 
-@pytest.mark.parametrize("manifest_path", _manifest_paths(), ids=lambda path: path.stem)
+@pytest.mark.parametrize(
+    "manifest_path",
+    integration_manifest_paths(MANIFESTS_DIR),
+    ids=lambda path: path.stem,
+)
 def test_integration_manifest_is_valid(manifest_path):
     """Report invalid checked-in YAML as a test failure, not a collection error."""
     load_integration_manifest(manifest_path)
@@ -127,7 +126,7 @@ class TestIntegrationAnchors:
         """Verify a single anchor from the integration manifest."""
         if source is None:
             pytest.skip(f"Checkout unavailable: {manifest.get('env_var')} is not set")
-        detector = _configured_detector(manifest)
+        detector = _configured_detector(manifest, str(source))
         self._run_anchor(manifest, detector, source, anchor)
 
     def _run_anchor(self, manifest, detector, source, anchor):

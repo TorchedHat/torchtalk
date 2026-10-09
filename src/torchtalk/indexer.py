@@ -13,12 +13,13 @@ from typing import Any
 
 from .analysis.helpers import fuzzy_distance_limit, levenshtein_distance, truncate
 from .analysis.patterns import (
-    has_binding_patterns as _has_binding_patterns,
+    CPP_HEADER_EXTS,
+    CPP_SOURCE_EXTS,
+    is_vendor_path,
 )
 from .analysis.patterns import (
     has_test_patterns as _has_test_patterns,
 )
-from .analysis.patterns import is_vendor_path
 from .analysis.patterns import (
     should_exclude as _should_exclude,
 )
@@ -52,6 +53,7 @@ class ServerState:
 
     py_modules: dict[str, Any] = field(default_factory=dict)
     py_classes: dict[str, list[Any]] = field(default_factory=dict)
+    py_functions: dict[str, list[Any]] = field(default_factory=dict)
     nn_modules: list[Any] = field(default_factory=list)
     py_to_cpp_edges: dict[str, list[dict]] = field(default_factory=dict)
     alias_map: dict[str, str] = field(default_factory=dict)
@@ -117,11 +119,12 @@ def _source_fingerprint(source: str) -> str:
     return hashlib.md5(f"tree:{count}:{newest}".encode()).hexdigest()[:16]
 
 
-# Bump when the bindings-cache schema changes (e.g. a new field added to
-# `native_functions` entries). v2 introduced `python_module`; v3 added
-# package identity to metadata; v4 added the `registrations` section; v5
-# renamed binding "line" → "line_number".
-_BINDINGS_CACHE_FORMAT_VERSION = 5
+# Bump when the bindings-cache schema or the detector's output changes; the
+# source fingerprint only covers the indexed checkout. v2 introduced
+# `python_module`; v3 added package identity to metadata; v4 added the
+# `registrations` section; v5 renamed binding "line" → "line_number"; v6
+# changed detector output (e.g. header files, impl dispatch keys).
+_BINDINGS_CACHE_FORMAT_VERSION = 6
 
 
 def _cache_metadata(source: str, manifest: ConventionManifest | None = None) -> dict:
@@ -440,10 +443,12 @@ def _build_index(
     detector = BindingDetector(
         macro_aliases=manifest.cpp_macro_aliases,
         token_map=manifest.cpp_token_map,
+        paste_macros=manifest.cpp_paste_macros,
         search_dirs=manifest.cpp_search_dirs,
         exclude_patterns=manifest.exclude_patterns,
         registration_macros=manifest.registration_macros,
         call_wrappers=manifest.cpp_call_wrappers or None,
+        source_root=source,
     )
     graph = detector.detect_bindings_in_directory(source)
 
@@ -591,6 +596,16 @@ def _init_cpp_call_graph(source: str):
         log.error(f"Failed to init C++ call graph: {e}")
 
 
+# Shown wherever a tool needs the C++ call graph and the checkout has no
+# compile database. PyTorch's own build writes one; CMake-based extensions
+# need the export flag.
+COMPILE_COMMANDS_HINT = (
+    "generate `compile_commands.json` in the checkout root or `build/` "
+    "(PyTorch: `python setup.py develop`; CMake builds: "
+    "`-DCMAKE_EXPORT_COMPILE_COMMANDS=ON`), then rebuild the index."
+)
+
+
 def _cpp_status() -> str:
     """Get C++ call graph status. Empty string if ready."""
     if _state.cpp_building:
@@ -606,10 +621,12 @@ def _cpp_status() -> str:
                 return (
                     "C++ call graph unavailable - "
                     "`compile_commands.json` not found.\n\n"
-                    "**To enable:** Build PyTorch once:\n"
-                    f"```\ncd {_state.source}\npython setup.py develop\n```"
+                    f"**To enable:** {COMPILE_COMMANDS_HINT}"
                 )
-        return "C++ call graph unavailable. Install libclang or build PyTorch."
+        return (
+            "C++ call graph unavailable. Install libclang and generate "
+            "`compile_commands.json`."
+        )
 
     return ""
 
@@ -646,11 +663,12 @@ def _init_python_modules(source: str):
         log.info(f"Alias map: {len(_state.alias_map)} torch.<op> aliases")
 
         manifest = active_manifest()
+        src = Path(source)
         analyzer = PythonAnalyzer(
             alias_map=_state.alias_map,
             package_roots=manifest.python_package_roots or None,
+            source_root=src,
         )
-        src = Path(source)
 
         dirs_to_analyze = [src / d for d in manifest.python_search_dirs]
 
@@ -668,6 +686,7 @@ def _init_python_modules(source: str):
             index = build_module_index(all_modules)
             _state.py_modules = all_modules
             _state.py_classes = index["by_class"]
+            _state.py_functions = index["by_function"]
             _state.nn_modules = index["nn_modules"]
             log.info(
                 f"Loaded {len(all_modules)} Python modules, "
@@ -1313,8 +1332,11 @@ def update_index(source: str, since: str, on_uncovered: str = "warn") -> dict:
     from dataclasses import asdict
 
     from .analysis.binding_detector import BindingDetector
-    from .snapshots import _relpath, _snapshot_dir, read_manifest
+    from .analysis.helpers import relative_to
+    from .snapshots import _snapshot_dir, read_manifest
 
+    # Same normalisation as the full build, so file paths and the cache key agree.
+    source = str(Path(source).resolve())
     manifest = read_manifest(since)
     active = active_manifest()
     if manifest.package and manifest.package != active.package:
@@ -1358,8 +1380,6 @@ def update_index(source: str, since: str, on_uncovered: str = "warn") -> dict:
     except (subprocess.CalledProcessError, FileNotFoundError) as e:
         raise RuntimeError(f"git diff failed: {e}") from e
 
-    cpp_exts = (".cpp", ".cc", ".cxx", ".cu", ".cuh")
-    header_exts = (".h", ".hpp", ".hxx", ".hh", ".inc")
     yaml_files = {
         p for p in (active.native_functions_yaml, active.derivatives_yaml) if p
     }
@@ -1375,36 +1395,41 @@ def update_index(source: str, since: str, on_uncovered: str = "warn") -> dict:
         status, path = parts[0], parts[-1]
         if path in yaml_files:
             yaml_changed = True
-        if path.endswith(header_exts):
+        if path.endswith(CPP_HEADER_EXTS):
             changed_headers.add(path)
             continue
-        if not path.endswith(cpp_exts):
+        if not path.endswith(CPP_SOURCE_EXTS):
             continue
         (removed_cpp if status.startswith("D") else changed_cpp).add(path)
 
-    dirty = changed_cpp | removed_cpp
+    # Headers are rescanned for bindings like sources; a deleted one simply
+    # drops out below because it no longer exists.
+    dirty = changed_cpp | removed_cpp | changed_headers
     prior_source = manifest.pytorch_source
     new_bindings = [
         b
         for b in prior.get("bindings", [])
-        if _relpath(b.get("file_path", ""), prior_source) not in dirty
+        if relative_to(b.get("file_path", ""), prior_source) not in dirty
     ]
     new_kernels = [
         k
         for k in prior.get("cuda_kernels", [])
-        if _relpath(k.get("file_path", ""), prior_source) not in dirty
+        if relative_to(k.get("file_path", ""), prior_source) not in dirty
     ]
 
     detector = BindingDetector(
         macro_aliases=active.cpp_macro_aliases,
         token_map=active.cpp_token_map,
+        paste_macros=active.cpp_paste_macros,
+        registration_macros=active.registration_macros,
+        source_root=source,
     )
     src = Path(source)
     # Same harness boundary as the full build: search dirs, exclusion
     # patterns, and the binding-pattern prefilter must all match
     # detect_bindings_in_directory, or incremental results diverge.
     bounds = tuple(d.rstrip("/") + "/" for d in active.cpp_search_dirs)
-    for rel in changed_cpp:
+    for rel in changed_cpp | changed_headers:
         if bounds and not rel.startswith(bounds):
             continue
         # Exclusion runs on the repo-relative path: patterns describe repo
@@ -1418,7 +1443,7 @@ def update_index(source: str, since: str, on_uncovered: str = "warn") -> dict:
             content = full.read_text(errors="ignore")
         except OSError:
             continue
-        if not _has_binding_patterns(content, active.registration_macros):
+        if not detector.has_binding_markers(content):
             continue
         g = detector.detect_bindings(str(full), content)
         new_bindings.extend(b.to_dict() for b in g.bindings)

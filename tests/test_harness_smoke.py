@@ -1,10 +1,14 @@
-"""Tests for the harness smoke script's pinned sparse checkout."""
+"""Tests for the harness smoke script's pinned sparse checkout and target listing."""
 
 from __future__ import annotations
 
 import importlib.util
+import json
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 REPO_ROOT = Path(__file__).parent.parent
 SCRIPT_PATH = REPO_ROOT / "scripts" / "harness_smoke.py"
@@ -47,3 +51,24 @@ def test_sparse_clone_checks_out_full_commit_sha(tmp_path):
     assert _git("rev-parse", "HEAD", cwd=destination) == commit
     assert (destination / "pkg" / "data.txt").read_text() == "pinned commit\n"
     assert not (destination / "outside").exists()
+
+
+def test_list_targets(tmp_path, monkeypatch, capsys):
+    minimums = {"with": {"bindings": 1}, "without": {}}
+    for name in minimums:
+        (tmp_path / f"{name}.yml").write_text("")
+    monkeypatch.setattr(harness_smoke, "MANIFESTS_DIR", tmp_path)
+    monkeypatch.setattr(
+        harness_smoke,
+        "get_harness",
+        lambda name: SimpleNamespace(
+            manifest=SimpleNamespace(expected_minimums=minimums[name])
+        ),
+    )
+    monkeypatch.setattr("sys.argv", ["harness_smoke.py", "--list"])
+    harness_smoke.main()
+    assert json.loads(capsys.readouterr().out) == ["with"]
+
+    monkeypatch.setattr("sys.argv", ["harness_smoke.py", "--harness", "with"])
+    with pytest.raises(SystemExit):
+        harness_smoke.main()

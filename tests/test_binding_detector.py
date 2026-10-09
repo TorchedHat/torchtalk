@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from torchtalk.analysis.binding_detector import (
     _DEVICE_PATTERN,
     _KERNEL_PATTERN,
@@ -128,6 +130,28 @@ class TestImplRegex:
         bindings = self._detect(src)
         cpp_names = {cpp for _, cpp in bindings}
         assert "unsupportedDynamicOp" in cpp_names
+
+    def test_dispatch_key_argument(self):
+        src = """
+        TORCH_LIBRARY(ext, m) {
+            m.impl("foo", torch::kCUDA, &foo_cuda);
+            m.impl("bar", c10::DispatchKey::CPU, TORCH_FN(bar_cpu));
+            m.impl("baz", &baz);
+            m.impl("qux", torch::dispatch(DispatchKey::Autograd, TORCH_FN(ns::qux)));
+        }
+        """
+        graph = BindingDetector().detect_bindings("test.cpp", src)
+        impls = {
+            b.python_name: (b.cpp_name, b.dispatch_key)
+            for b in graph.bindings
+            if b.binding_type == BindingType.TORCH_LIBRARY_IMPL.value
+        }
+        assert impls == {
+            "ext.foo": ("foo_cuda", "CUDA"),
+            "ext.bar": ("bar_cpu", "CPU"),
+            "ext.baz": ("baz", None),
+            "ext.qux": ("qux", "Autograd"),
+        }
 
 
 class TestKernelPattern:
@@ -326,6 +350,31 @@ class TestManifestMacroConfig:
         assert graph.bindings[0].namespace == "_C"
         assert "TORCH_EXTENSION_NAME" not in {b.namespace for b in graph.bindings}
 
+    def test_token_values_by_path(self):
+        code = (
+            "TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {\n"
+            '  ops.def("op_a(Tensor t) -> Tensor");\n'
+            "}\n"
+        )
+        detector = BindingDetector(
+            macro_aliases={"TORCH_LIBRARY_EXPAND": "TORCH_LIBRARY"},
+            token_map={"TORCH_EXTENSION_NAME": {"": "_C", "csrc/rocm/": "_rocm_C"}},
+            source_root="/repo",
+        )
+        namespaces = {
+            path: detector.detect_bindings(path, code).bindings[0].namespace
+            for path in ("/repo/csrc/rocm/x.cpp", "/repo/csrc/x.cpp", "/elsewhere.cpp")
+        }
+        assert namespaces == {
+            "/repo/csrc/rocm/x.cpp": "_rocm_C",
+            "/repo/csrc/x.cpp": "_C",
+            "/elsewhere.cpp": "_C",
+        }
+        # No default and no matching prefix: the token is left as written.
+        detector.token_map = {"TORCH_EXTENSION_NAME": {"csrc/rocm/": "_rocm_C"}}
+        graph = detector.detect_bindings("/repo/csrc/x.cpp", code)
+        assert graph.bindings[0].namespace == "TORCH_EXTENSION_NAME"
+
     def test_unconfigured_detector_is_unchanged(self):
         code = (
             'TORCH_LIBRARY(aten, m) { m.def("relu(Tensor self) -> Tensor"); }\n'
@@ -347,6 +396,20 @@ class TestManifestMacroConfig:
         )
         graph = self._detector().detect_bindings("/w.cpp", code)
         assert {b.namespace for b in graph.bindings if b.namespace} == {"_C"}
+
+    def test_paste_macro_names_library(self):
+        code = (
+            "TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _custom_ar), ar) {\n"
+            '  ar.def("qr_max_size() -> int");\n'
+            "}\n"
+        )
+        assert self._detector().detect_bindings("/b.cpp", code).bindings == []
+        detector = self._detector()
+        detector.paste_macros = ("CONCAT",)
+        graph = detector.detect_bindings("/b.cpp", code)
+        assert [(b.namespace, b.cpp_name) for b in graph.bindings] == [
+            ("_C_custom_ar", "qr_max_size")
+        ]
 
 
 class TestModuleVarTorchOps:
@@ -468,6 +531,19 @@ class TestSearchDirBounds:
         graph = detector.detect_bindings_in_directory(str(repo))
         assert graph.bindings == []
 
+    def test_headers_scanned(self, tmp_path_factory):
+        repo = tmp_path_factory.mktemp("scandir")
+        (repo / "csrc").mkdir()
+        (repo / "csrc" / "kernel.h").write_text(
+            "template <int N>\n__global__ void marlin(const int* a) {}\n"
+        )
+        graph = BindingDetector(search_dirs=("csrc",)).detect_bindings_in_directory(
+            str(repo)
+        )
+        assert [(k.name, Path(k.file_path).name) for k in graph.cuda_kernels] == [
+            ("marlin", "kernel.h")
+        ]
+
 
 class TestManifestExcludeAndPrefilter:
     """Manifest exclude_patterns and registration_macros drive directory scans."""
@@ -507,6 +583,22 @@ class TestManifestExcludeAndPrefilter:
         fallback = BindingDetector(search_dirs=("csrc",))
         assert fallback.detect_bindings_in_directory(str(repo)).bindings
 
+    def test_macro_alias_passes_prefilter(self, tmp_path_factory):
+        # vLLM's csrc/cpu files reach AT_DISPATCH only through an alias, so
+        # the raw-content prefilter must accept alias names too.
+        repo = tmp_path_factory.mktemp("scandir")
+        (repo / "csrc").mkdir()
+        (repo / "csrc" / "activation.cpp").write_text(
+            'VLLM_DISPATCH_FLOATING_TYPES(x.scalar_type(), "silu_and_mul", [&] {});\n'
+        )
+        aliases = {"VLLM_DISPATCH_FLOATING_TYPES": "AT_DISPATCH_FLOATING_TYPES"}
+        detector = BindingDetector(search_dirs=("csrc",), macro_aliases=aliases)
+        graph = detector.detect_bindings_in_directory(str(repo))
+        types = [b.binding_type for b in graph.bindings]
+        assert types == [BindingType.AT_DISPATCH.value]
+        content = (repo / "csrc" / "activation.cpp").read_text()
+        assert not BindingDetector(search_dirs=("csrc",)).has_binding_markers(content)
+
 
 class TestCallWrappers:
     def test_default_wrappers_include_box_and_selective(self):
@@ -527,3 +619,27 @@ class TestCallWrappers:
             "ops.cpp", src
         )
         assert "relu_kernel" in {b.cpp_name for b in graph.bindings}
+
+
+class TestMultiLineLibraryHeader:
+    """Line numbers stay exact when the registration macro header wraps."""
+
+    def test_impl_lines_from_brace(self):
+        code = (
+            "TORCH_LIBRARY_IMPL(_C_cuda_utils, CompositeExplicitAutograd,\n"
+            "                   cuda_utils) {\n"
+            '  cuda_utils.impl("get_device_attribute", &get_device_attribute);\n'
+            '  cuda_utils.impl("get_max_shared_memory",\n'
+            "                  &get_max_shared_memory);\n"
+            "}\n"
+            "TORCH_LIBRARY_FRAGMENT(\n"
+            "    _C_cuda_utils, cuda_utils) {\n"
+            '  cuda_utils.def("get_device_attribute(int a) -> int");\n'
+            "}\n"
+        )
+        graph = BindingDetector().detect_bindings("/x.cpp", code)
+        impl, op = BindingType.TORCH_LIBRARY_IMPL.value, BindingType.TORCH_OP.value
+        lines = {(b.binding_type, b.cpp_name): b.line_number for b in graph.bindings}
+        assert lines[(impl, "get_device_attribute")] == 3
+        assert lines[(impl, "get_max_shared_memory")] == 4
+        assert lines[(op, "get_device_attribute")] == 9

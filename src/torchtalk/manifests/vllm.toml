@@ -1,4 +1,5 @@
 # vLLM (vllm-project/vllm). Delta over torch-extension.
+# expected_minimums: v0.31.0 sparse-clone results (csrc, vllm, tests) minus 10%.
 
 [package]
 name = "vllm"
@@ -11,6 +12,11 @@ python_search_dirs = [
 python_package_roots = [
     "vllm",
 ]
+test_utility_modules = [
+    "tests/utils.py",
+    "tests/conftest.py",
+    "tests/kernels/utils.py",
+]
 exclude_patterns = [
     "/tests/",
     "/benchmarks/",
@@ -18,12 +24,36 @@ exclude_patterns = [
     "__pycache__",
 ]
 
+[cpp]
+# csrc/torch_bindings.cpp registers the ROCm all-reduce ops under
+# CONCAT(TORCH_EXTENSION_NAME, _custom_ar), i.e. _C_custom_ar.
+paste_macros = ["CONCAT"]
+
 [cpp.macro_aliases]
 TORCH_LIBRARY_EXPAND = "TORCH_LIBRARY"
 TORCH_LIBRARY_IMPL_EXPAND = "TORCH_LIBRARY_IMPL"
+# Dtype dispatch wrappers around AT_DISPATCH_SWITCH: csrc/dispatch_utils.h and
+# csrc/libtorch_stable/dispatch_utils.h. The canonical name only has to start
+# with AT_DISPATCH_ for the detector to record a dispatch site.
+VLLM_DISPATCH_FLOATING_TYPES = "AT_DISPATCH_FLOATING_TYPES"
+VLLM_DISPATCH_HALF_TYPES = "AT_DISPATCH_HALF_TYPES"
+VLLM_DISPATCH_FP8_TYPES = "AT_DISPATCH_FP8_TYPES"
+VLLM_DISPATCH_QUANT_TYPES = "AT_DISPATCH_QUANT_TYPES"
+VLLM_DISPATCH_FLOATING_AND_BYTE_TYPES = "AT_DISPATCH_FLOATING_AND_BYTE_TYPES"
+VLLM_DISPATCH_INTEGRAL_TYPES = "AT_DISPATCH_INTEGRAL_TYPES"
+VLLM_DISPATCH_INTEGRAL_AND_UNSIGNED_TYPES = "AT_DISPATCH_INTEGRAL_AND_UNSIGNED_TYPES"
+VLLM_STABLE_DISPATCH_FLOATING_TYPES = "AT_DISPATCH_FLOATING_TYPES"
+VLLM_STABLE_DISPATCH_HALF_TYPES = "AT_DISPATCH_HALF_TYPES"
+VLLM_STABLE_DISPATCH_FP8_TYPES = "AT_DISPATCH_FP8_TYPES"
+VLLM_STABLE_DISPATCH_QUANT_TYPES = "AT_DISPATCH_QUANT_TYPES"
+VLLM_STABLE_DISPATCH_IDX_TYPES = "AT_DISPATCH_INDEX_TYPES"
+VLLM_STABLE_DISPATCH_INTEGRAL_TYPES = "AT_DISPATCH_INTEGRAL_TYPES"
+VLLM_STABLE_DISPATCH_INTEGRAL_AND_UNSIGNED_TYPES = "AT_DISPATCH_INTEGRAL_AND_UNSIGNED_TYPES"
 
 [cpp.token_map]
-TORCH_EXTENSION_NAME = "_C"
+# CMake defines TORCH_EXTENSION_NAME per extension target (cmake/utils.cmake
+# define_extension_target); only the ROCm bindings build under another name.
+TORCH_EXTENSION_NAME = { "" = "_C", "csrc/rocm/" = "_rocm_C" }
 
 [python]
 string_registries = [
@@ -56,3 +86,12 @@ call = "direct_register_custom_op"
 key_arg = 0
 target_arg = 1
 registry = "custom_ops"
+
+[expected_minimums]
+bindings = 1116
+cuda_kernels = 208
+python_modules = 2300
+nn_modules = 1280
+external_refs = 2170
+registration_records = 550
+test_files = 1780

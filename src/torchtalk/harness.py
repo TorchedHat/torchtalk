@@ -42,15 +42,24 @@ class ConventionManifest:
     # content markers identifying test files in package-internal test dirs
     test_content_patterns: tuple[str, ...] = ("TestCase", "pytest", "unittest")
     test_utility_modules: tuple[str, ...] = ()
+    # [tests] text shown by the tests tool: utility module path → one-line
+    # note, and test-pattern snippet → what it does.
+    test_utility_notes: dict[str, str] = field(default_factory=dict)
+    test_patterns: dict[str, str] = field(default_factory=dict)
     exclude_patterns: tuple[str, ...] = ()
     registration_macros: tuple[str, ...] = ()
     native_functions_yaml: str = ""
     derivatives_yaml: str = ""
     # C++ extractor config: alias macro → canonical macro it expands to
     # (e.g. {"TORCH_LIBRARY_EXPAND": "TORCH_LIBRARY"}), and token → literal
-    # substitutions (e.g. {"TORCH_EXTENSION_NAME": "_C"}).
+    # substitutions (e.g. {"TORCH_EXTENSION_NAME": "_C"}). A token the build
+    # defines per target takes a table of repo-relative path prefix → literal;
+    # the longest prefix matching the file wins and "" is the default.
     cpp_macro_aliases: dict[str, str] = field(default_factory=dict)
-    cpp_token_map: dict[str, str] = field(default_factory=dict)
+    cpp_token_map: dict[str, str | dict[str, str]] = field(default_factory=dict)
+    # Token-pasting macros: a single-line, non-nested `CONCAT(a, b)` is read
+    # as the identifier `ab`.
+    cpp_paste_macros: tuple[str, ...] = ()
     # Python extractor config (analysis/extractors.py):
     # decorator qualname → registry it populates
     decorator_registries: dict[str, str] = field(default_factory=dict)
@@ -110,6 +119,7 @@ _SECTION_FIELDS: dict[str, dict[str, str]] = {
         "registration_macros": "registration_macros",
         "macro_aliases": "cpp_macro_aliases",
         "token_map": "cpp_token_map",
+        "paste_macros": "cpp_paste_macros",
         "call_wrappers": "cpp_call_wrappers",
     },
     "python": {
@@ -126,6 +136,7 @@ _SECTION_FIELDS: dict[str, dict[str, str]] = {
         "cpp_namespaces": "cpp_namespaces",
         "base_class_namespaces": "base_class_namespaces",
     },
+    "tests": {"utility_notes": "test_utility_notes", "patterns": "test_patterns"},
 }
 _FIELD_TYPES = {f.name: f.type for f in fields(ConventionManifest)}
 _PACKAGE_KEYS = {"name", "extends", "depends_on"}
@@ -164,7 +175,7 @@ def _flatten(data: dict[str, Any], origin: str) -> dict[str, Any]:
             out[mapping[key]] = value
     if "expected_minimums" in data:
         out["expected_minimums"] = data["expected_minimums"]
-    known = {"package", "paths", "cpp", "python", "bridge", "expected_minimums"}
+    known = {"package", "expected_minimums", *_SECTION_FIELDS}
     for section in data:
         if section not in known:
             raise ManifestError(f"{origin}: unknown section [{section}]")
@@ -205,6 +216,17 @@ def _coerce(name: str, value: Any, origin: str = "<dict>") -> Any:
                 f"{origin}: [expected_minimums] values must be integers"
             )
         return dict(value)
+    if name == "cpp_token_map":
+        if not isinstance(value, dict) or not all(
+            isinstance(v, str)
+            or (isinstance(v, dict) and all(isinstance(s, str) for s in v.values()))
+            for v in value.values()
+        ):
+            raise ManifestError(
+                f"{origin}: [cpp.token_map] values must be strings or tables of "
+                "path prefix -> string"
+            )
+        return dict(value)
     if ftype.startswith("tuple"):
         if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
             raise ManifestError(f"{origin}: {name} must be a list of strings")
@@ -214,13 +236,14 @@ def _coerce(name: str, value: Any, origin: str = "<dict>") -> Any:
             raise ManifestError(f"{origin}: {name} must be a string")
         return value
     if ftype.startswith("dict"):
+        allow_int = "int" in ftype
         if not isinstance(value, dict) or not all(
-            isinstance(v, (str, int)) and not isinstance(v, bool)
+            isinstance(v, str)
+            or (allow_int and isinstance(v, int) and not isinstance(v, bool))
             for v in value.values()
         ):
-            raise ManifestError(
-                f"{origin}: {name} must be a table of strings or integers"
-            )
+            kinds = "strings or integers" if allow_int else "strings"
+            raise ManifestError(f"{origin}: {name} must be a table of {kinds}")
         return dict(value)
     return value
 

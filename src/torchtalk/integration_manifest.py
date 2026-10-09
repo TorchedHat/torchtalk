@@ -77,6 +77,13 @@ def supported_anchor_checks() -> frozenset[str]:
     return frozenset(_CHECK_FIELDS)
 
 
+def integration_manifest_paths(directory: str | Path) -> list[Path]:
+    """Target YAML files under ``directory``; ``_``-prefixed templates are skipped."""
+    return sorted(
+        p for p in Path(directory).glob("*.yml") if not p.name.startswith("_")
+    )
+
+
 def _fail(origin: str, location: str, message: str) -> None:
     raise IntegrationManifestError(f"{origin}: {location}: {message}")
 

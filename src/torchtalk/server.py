@@ -9,7 +9,9 @@ from typing import Literal
 from mcp.server.fastmcp import FastMCP
 
 from .formatting import coverage_note, create_formatter
+from .harness import active_harness_name
 from .indexer import (
+    COMPILE_COMMANDS_HINT,
     _auto_detect_source,
     _init_from_source,
     _load_from_json,
@@ -38,9 +40,10 @@ async def get_status() -> str:
     md.h2("TorchTalk Status")
 
     if _state.source:
-        md.code("PyTorch Source", _state.source)
+        md.code("Source", _state.source)
     else:
-        md.bold("PyTorch Source", "Not configured")
+        md.bold("Source", "Not configured")
+    md.bold("Harness", active_harness_name())
     md.blank()
 
     if _state.bindings:
@@ -90,18 +93,14 @@ async def get_status() -> str:
         md.bold("Status", "Not available")
         if _state.source:
             src = Path(_state.source)
-            # PyTorch's `python setup.py develop` lands compile_commands.json
-            # in `build/`; some checkouts have it at the root. Check both,
-            # matching cli.py / indexer.py / cpp_call_graph.py.
+            # Checked at the root and under `build/`, matching cli.py /
+            # indexer.py / cpp_call_graph.py.
             if not (
                 (src / "compile_commands.json").exists()
                 or (src / "build" / "compile_commands.json").exists()
             ):
                 md.item("Missing compile_commands.json", 1)
-                md.item(
-                    "Fix: Build PyTorch with `python setup.py develop`",
-                    1,
-                )
+                md.item(f"Fix: {COMPILE_COMMANDS_HINT}", 1)
     md.blank()
 
     md.h3("Python Modules")
@@ -174,7 +173,7 @@ async def get_status() -> str:
             [
                 "`trace`",
                 ready,
-                "Trace a PyTorch op: Python → C++ → file:line",
+                "Trace an op: Python → C++ → file:line",
             ],
             [
                 "`search`",
@@ -212,7 +211,7 @@ async def trace(
     function_name: str,
     focus: Literal["full", "yaml", "dispatch"] = "full",
 ) -> str:
-    """Trace a PyTorch op from Python to C++ implementation with file:line locations."""
+    """Trace an op from Python to its C++ implementation with file:line locations."""
     return await _do_trace(function_name, focus)
 
 
@@ -223,7 +222,7 @@ async def search(
     backend: str = "",
     limit: int = 10,
 ) -> str:
-    """Search PyTorch bindings or CUDA kernels by name.
+    """Search bindings or CUDA kernels by name.
 
     mode='bindings' for dispatch registrations (filterable by `backend`),
     mode='kernels' for GPU kernel launches (`backend` is ignored — kernels
@@ -289,7 +288,7 @@ async def tests(
     limit: int = 10,
     focus: Literal["all", "functions", "classes", "files"] = "all",
 ) -> str:
-    """Query PyTorch test infrastructure.
+    """Query the indexed test infrastructure.
 
     mode='find' to search tests by `query`; `focus` narrows results to a
     single category. mode='utils' lists test utility modules (`query` and
@@ -329,8 +328,7 @@ def run_server(
                 _load_from_json(index_path)
             else:
                 log.warning(
-                    "No PyTorch source specified. "
-                    "Tools will return errors until data is loaded."
+                    "No source specified. Tools return errors until data is loaded."
                 )
         except Exception:
             log.exception("Background init failed")

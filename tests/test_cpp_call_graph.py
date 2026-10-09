@@ -56,6 +56,15 @@ class TestTranslateArgs:
         out = _translate_args("/x.cpp", raw, cuda_env=None)
         assert out == ["-I/foo", "-DBAR=1", "-std=c++17"]
 
+    def test_keeps_system_include_pairs(self):
+        raw = ["-isystem", "/torch/include", "-isystem/py", "-I", "/csrc", "-O2"]
+        out = _translate_args("/x.cpp", raw, cuda_env=None)
+        assert out == ["-isystem", "/torch/include", "-isystem/py", "-I", "/csrc"]
+
+    def test_drops_trailing_flag_without_value(self):
+        out = _translate_args("/x.cpp", ["-I/foo", "-isystem"], cuda_env=None)
+        assert out == ["-I/foo"]
+
     def test_cu_without_cuda_env_parses_host_side_as_cpp(self):
         raw = ["-O2", "-I/foo", "-DBAR=1", "-std=c++17"]
         out = _translate_args("/x.cu", raw, cuda_env=None)
@@ -823,6 +832,14 @@ class TestCacheFingerprint:
         self._seeded(extractor).save_cache("k", fingerprint="fp1")
         fresh = CppCallGraphExtractor(cache_dir=tmp_path)
         assert fresh.load_cache("k") is True
+
+    def test_outdated_format_rejected(self, extractor, tmp_path):
+        path = self._seeded(extractor).save_cache("k", fingerprint="fp1")
+        data = json.loads(path.read_text())
+        data["format_version"] = 1
+        path.write_text(json.dumps(data))
+        fresh = CppCallGraphExtractor(cache_dir=tmp_path)
+        assert fresh.load_cache("k", expect_fingerprint="fp1") is False
 
 
 class TestLevenshteinCap:

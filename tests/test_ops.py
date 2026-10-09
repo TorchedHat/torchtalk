@@ -24,6 +24,9 @@ def state_without_call_graph():
         s.cuda_kernels,
         s.cpp_extractor,
         s.source,
+        s.registrations,
+        s.py_functions,
+        s.py_classes,
     )
     s.native_functions = {
         "add": {
@@ -54,6 +57,9 @@ def state_without_call_graph():
             s.cuda_kernels,
             s.cpp_extractor,
             s.source,
+            s.registrations,
+            s.py_functions,
+            s.py_classes,
         ) = saved
         indexer._build_indexes(s)
 
@@ -68,6 +74,132 @@ class TestTraceWithoutCallGraph:
         out = asyncio.run(trace("definitely_not_an_op_xyz"))
         assert "definitely_not_an_op_xyz" in out
         assert "not found" in out.lower()
+
+
+class TestTracePythonRegistrations:
+    """A registration record links an op name to its Python target and onward."""
+
+    @staticmethod
+    def _record(key, target, file, line=40):
+        return {
+            "registry": "custom_ops",
+            "key": key,
+            "target": target,
+            "kind": "resolved",
+            "via": "call",
+            "file": file,
+            "line": line,
+        }
+
+    @staticmethod
+    def _func(name, module, line, calls=()):
+        from torchtalk.analysis.python_analyzer import PyBinding, PyFunction
+
+        return PyFunction(
+            name=name,
+            qualified_name=f"{module}.{name}",
+            file_path=f"/src/{module.replace('.', '/')}.py",
+            line_number=line,
+            cpp_bindings=[PyBinding(cpp_symbol=c, line=line + 3) for c in calls],
+        )
+
+    @staticmethod
+    def _binding(python_name, cpp_name, line, dispatch_key="CUDA"):
+        return {
+            "python_name": python_name,
+            "cpp_name": cpp_name,
+            "type": "torch_library_impl",
+            "dispatch_key": dispatch_key,
+            "file_path": "/src/csrc/bindings.cpp",
+            "line_number": line,
+        }
+
+    def test_registered_op_traces(self, state_without_call_graph):
+        s = state_without_call_graph
+        s.registrations = {
+            "records": [self._record("fused_norm", "_fused_norm_impl", "pkg/ops.py")]
+        }
+        impl = self._func("_fused_norm_impl", "pkg.ops", 12, ["_C::rms_norm"])
+        s.py_functions = {"_fused_norm_impl": [impl]}
+        s.bindings = [self._binding("_C.rms_norm", "rms_norm", 7)]
+        indexer._build_indexes(s)
+
+        out = asyncio.run(trace("fused_norm"))
+        assert "Python Registrations" in out
+        assert "`custom_ops` → `pkg.ops._fused_norm_impl` (`pkg/ops.py:12`)" in out
+        assert "csrc/bindings.cpp:7" in out
+        assert "not found" not in out.lower()
+
+        assert "csrc/bindings.cpp:7" in asyncio.run(trace("fused_norm", "dispatch"))
+        assert "Python Registrations" not in asyncio.run(trace("fused_norm", "yaml"))
+
+    def test_bare_pybind_call(self, state_without_call_graph):
+        s = state_without_call_graph
+        s.registrations = {"records": [self._record("op", "op_impl", "pkg/ops.py")]}
+        s.py_functions = {"op_impl": [self._func("op_impl", "pkg.ops", 5, ["foo"])]}
+        s.bindings = [
+            {
+                "python_name": "foo",
+                "cpp_name": "foo_cuda_impl",
+                "type": "pybind_function",
+                "file_path": "/src/csrc/pybind.cpp",
+                "line_number": 9,
+            }
+        ]
+        indexer._build_indexes(s)
+        assert "csrc/pybind.cpp:9" in asyncio.run(trace("op"))
+
+    def test_class_target_methods(self, state_without_call_graph):
+        from torchtalk.analysis.python_analyzer import PyClass
+
+        s = state_without_call_graph
+        s.registrations = {
+            "records": [self._record("norm", "pkg.layers.Norm", "pkg/layers.py")]
+        }
+        fwd = self._func("forward_cuda", "pkg.layers", 30, ["_C::rms_norm"])
+        cls = PyClass(
+            name="Norm",
+            qualified_name="pkg.layers.Norm",
+            file_path="/src/pkg/layers.py",
+            line_number=20,
+            bases=["nn.Module"],
+            decorators=[],
+            docstring=None,
+            methods=[fwd],
+        )
+        s.py_functions = {}
+        s.py_classes = {"Norm": [cls]}
+        s.bindings = [self._binding("_C.rms_norm", "rms_norm", 7)]
+        indexer._build_indexes(s)
+
+        out = asyncio.run(trace("norm"))
+        assert "`pkg.layers.Norm` (`pkg/layers.py:20`)" in out
+        assert "csrc/bindings.cpp:7" in out
+
+    def test_other_file_not_guessed(self, state_without_call_graph):
+        s = state_without_call_graph
+        s.registrations = {"records": [self._record("op", "impl", "pkg/a.py", 3)]}
+        s.py_functions = {
+            "impl": [self._func("impl", "pkg.b", 8), self._func("impl", "pkg.c", 9)]
+        }
+        out = asyncio.run(trace("op"))
+        assert "`custom_ops` → `impl` (`pkg/a.py:3`)" in out
+        assert "pkg/b.py" not in out and "pkg/c.py" not in out
+
+        s.py_functions["impl"].append(self._func("impl", "pkg.a", 3))
+        out = asyncio.run(trace("op"))
+        assert "`pkg.a.impl` (`pkg/a.py:3`)" in out
+
+    def test_unresolved_target(self, state_without_call_graph):
+        s = state_without_call_graph
+        s.registrations = {
+            "records": [self._record("triton_only", "triton_impl", "pkg/triton.py", 3)]
+        }
+        s.py_functions = {}
+        out = asyncio.run(trace("triton_only"))
+        assert "Python Registrations" in out
+        assert "`custom_ops` → `triton_impl` (`pkg/triton.py:3`)" in out
+        assert "not found" not in out.lower()
 
 
 class TestCudaKernelsWithoutCallGraph:
@@ -88,6 +220,34 @@ class TestTraceImplDedupe:
         out = asyncio.run(trace("add"))
         assert "add_v0" in out
         assert "add_v1" in out
+
+
+class TestTraceMergesNameLookups:
+    def test_dispatch_site_does_not_hide_registration(self, state_without_call_graph):
+        s = state_without_call_graph
+        s.native_functions = {}
+        s.bindings = [
+            {
+                "python_name": "wvSplitK",
+                "cpp_name": "wvSplitK",
+                "type": "at_dispatch",
+                "file_path": "/src/k.cu",
+                "line_number": 9,
+            },
+            {
+                "python_name": "_rocm_C.wvSplitK",
+                "cpp_name": "wvSplitK",
+                "type": "torch_library_impl",
+                "dispatch_key": "CUDA",
+                "file_path": "/src/b.cpp",
+                "line_number": 3,
+            },
+        ]
+        indexer._build_indexes(s)
+        out = asyncio.run(trace("wvSplitK", focus="dispatch"))
+        assert "k.cu:9" in out
+        assert "b.cpp:3" in out
+        assert out.count("k.cu:9") == 1
 
 
 class TestTraceFuzzyLabeling:

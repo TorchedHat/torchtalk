@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from torchtalk import indexer, snapshots
+from torchtalk.analysis.patterns import has_binding_patterns
 from torchtalk.analysis.python_analyzer import (
     PyBinding,
     PyClass,
@@ -453,6 +454,7 @@ class TestUpdateIndex:
         outside_rel = "tools/outside.cpp"
         excluded_rel = "aten/src/ATen/native/test_helper.cpp"
         unpatterned_rel = "aten/src/ATen/native/plain.cpp"
+        header_rel = "aten/src/ATen/native/kernel.h"
         (src / changed_rel).parent.mkdir(parents=True)
         (src / outside_rel).parent.mkdir(parents=True)
         cache = tmp_path / "cache"
@@ -482,6 +484,13 @@ class TestUpdateIndex:
                     "file_path": str(src / outside_rel),
                     "line_number": 3,
                 },
+                {
+                    "python_name": "stale_header",
+                    "cpp_name": "at::stale_header",
+                    "dispatch_key": "CPU",
+                    "file_path": str(src / header_rel),
+                    "line_number": 4,
+                },
             ],
             "cuda_kernels": [],
             "native_functions": {},
@@ -509,6 +518,7 @@ class TestUpdateIndex:
         (src / outside_rel).write_text("TORCH_LIBRARY(aten, m) {}")
         (src / excluded_rel).write_text("TORCH_LIBRARY(aten, m) {}")
         (src / unpatterned_rel).write_text("// no binding patterns here")
+        (src / header_rel).write_text("__global__ void k() {}")
 
         monkeypatch.setattr(snapshots, "SNAPSHOTS_DIR", cache / "snapshots")
         monkeypatch.setattr(indexer, "CACHE_DIR", cache)
@@ -524,7 +534,7 @@ class TestUpdateIndex:
             class R:
                 stdout = (
                     f"M\t{changed_rel}\nM\t{outside_rel}\n"
-                    f"M\t{excluded_rel}\nM\t{unpatterned_rel}\n"
+                    f"M\t{excluded_rel}\nM\t{unpatterned_rel}\nM\t{header_rel}\n"
                 )
 
             return R()
@@ -532,11 +542,11 @@ class TestUpdateIndex:
         monkeypatch.setattr(subprocess, "run", fake_diff)
 
         class FakeBindingGraph:
-            def __init__(self):
+            def __init__(self, name):
                 class B:
                     def to_dict(self):
                         return {
-                            "python_name": "reindexed",
+                            "python_name": name,
                             "cpp_name": "at::reindexed",
                             "dispatch_key": "CPU",
                             "file_path": str(src / changed_rel),
@@ -547,11 +557,14 @@ class TestUpdateIndex:
                 self.cuda_kernels = []
 
         class FakeDetector:
-            def __init__(self, **_kwargs):
-                pass
+            def __init__(self, **kwargs):
+                assert kwargs["source_root"] == str((tmp_path / "src").resolve())
 
-            def detect_bindings(self, _path, _content):
-                return FakeBindingGraph()
+            def has_binding_markers(self, content):
+                return has_binding_patterns(content)
+
+            def detect_bindings(self, path, _content):
+                return FakeBindingGraph(Path(path).stem)
 
         monkeypatch.setattr(
             "torchtalk.analysis.binding_detector.BindingDetector", FakeDetector
@@ -560,13 +573,16 @@ class TestUpdateIndex:
         stats = update_index(str(src), since="baseline")
 
         assert stats["cpp_files_changed"] == 4
-        # stable + reindexed; stale dropped; the out-of-bounds, excluded, and
-        # pattern-free changed files are not re-detected
-        assert stats["bindings_total"] == 2
-
+        assert stats["headers_changed"] == 1
+        # The changed source and header are re-detected and their stale rows
+        # dropped; the out-of-bounds, excluded, and pattern-free files are not.
+        assert stats["bindings_total"] == 3
         written = json.loads(Path(cache / "bindings.json").read_text())
-        names = {b["python_name"] for b in written["bindings"]}
-        assert names == {"stable", "reindexed"}
+        assert {b["python_name"] for b in written["bindings"]} == {
+            "stable",
+            "changed",
+            "kernel",
+        }
 
 
 class TestWidenReparseSet:

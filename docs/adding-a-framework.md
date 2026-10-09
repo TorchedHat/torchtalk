@@ -39,12 +39,18 @@ python_package_roots = ["myfw"]
 
 [cpp]
 # call_wrappers = ["MYFW_BOX"]        # macros that wrap fn pointers in registrations
+# paste_macros = ["CONCAT"]           # CONCAT(a, b) is read as the identifier ab
 
 # [python.op_namespaces]
 # myfw = "myfw"                       # TORCH_LIBRARY(myfw, m) → "myfw::"
 
 [bridge]
 # cpp_namespaces / base_class_namespaces — inherited from torch-extension
+
+# [tests.utility_notes]                 # shown by tests(mode="utils")
+# "myfw/testing/utils.py" = "Shared fixtures and tensor factories"
+# [tests.patterns]
+# "@myfw_case" = "Runs a test per device"
 
 [expected_minimums]
 bindings = 100
@@ -98,8 +104,8 @@ SHA provides the immutable pin, while tags can be moved upstream.
 
 Keep `sparse_paths` minimal — CI sparse-clones only those directories.
 
-Then add `<name>` to `matrix.target` in
-`.github/workflows/integration-tests.yml`.
+CI picks the file up automatically: `.github/workflows/integration-tests.yml`
+builds its matrix from `tests/integration/*.yml`.
 
 Verify:
 
@@ -114,8 +120,10 @@ python -m pytest tests/test_binding_detector_pytorch.py -v -k myfw
 `scripts/harness_smoke.py` indexes a real checkout and fails if any count is
 below `[expected_minimums]` in the manifest. Set each minimum to roughly
 90% of the count you measured in step 1 — tight enough to catch a detector
-regression, loose enough to survive upstream churn. Then add `<name>` to
-`.github/workflows/harness-smoke.yml`.
+regression, loose enough to survive upstream churn. Declaring the section is
+enough: `.github/workflows/harness-smoke.yml` builds its matrix from
+`scripts/harness_smoke.py --list`, which names every target from step 2 whose
+manifest has one.
 
 Verify:
 
@@ -123,8 +131,9 @@ Verify:
 python scripts/harness_smoke.py --harness myfw --clone
 ```
 
-`--harness` only lists harnesses that have `expected_minimums`, so if yours is
-missing from `--help`, step 1 isn't done.
+`--harness` only lists targets that have both an anchor file and
+`expected_minimums`, so if yours is missing from `--help`, step 2 or step 3
+isn't done.
 
 ## 4. When the counts look wrong
 
@@ -137,7 +146,13 @@ Common shapes, in the order to try them:
    `python_package_roots` matches the directory that holds `__init__.py`.
 4. **0 CUDA kernels** — check `cpp_search_dirs` includes the `.cu` directory.
 5. **0 C++ call-graph edges** — expected without `compile_commands.json`;
-   not a manifest problem.
+   not a manifest problem. Configure the framework's build once with
+   `-DCMAKE_EXPORT_COMPILE_COMMANDS=ON` (vLLM: with `torch` installed,
+   `VLLM_PYTHON_EXECUTABLE`, `VLLM_TARGET_DEVICE` and `TORCH_CUDA_ARCH_LIST`
+   set, and a writable source tree because the configure step writes
+   generated kernels into `csrc/`). Only TUs of that build are covered, and
+   `.cu` TUs need a clang that supports the installed CUDA toolkit (see the
+   README).
 
 If a manifest field can't express it, file an issue against `analysis/` with
 the file + line that's mis-detected and the count delta. Don't work around it
@@ -154,5 +169,5 @@ fix it in the same PR series. The next framework should be easier than yours.
 |---|---|---|
 | `pytorch` | root | defines the conventions; `depends_on = []` |
 | `torch-extension` | abstract base | not indexable; `extends` target for everything else |
-| `vllm` | extension | first real instance (PR #10); integration anchors + minimums are the open B1/B2 tasks |
+| `vllm` | extension | first real instance (PR #10); anchors and minimums in place |
 | `torchvision` | extension | manifest only — the intended "do it from the doc" test of this page |

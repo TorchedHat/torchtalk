@@ -86,13 +86,17 @@ class TestManifestOpFields:
         assert "torch/_decomp/decompositions.py" in m.decomp_alias_paths
         assert m.dispatch_stub_root == "aten/src/ATen/native"
         assert "TORCH_BOX" in m.cpp_call_wrappers
+        assert set(m.test_utility_notes) <= set(m.test_utility_modules)
+        assert m.test_utility_notes and m.test_patterns
 
     def test_empty_by_default(self):
         m = ConventionManifest(package="x", cpp_search_dirs=("csrc",))
         assert m.op_namespaces == {}
+        assert m.test_utility_notes == {} and m.test_patterns == {}
         assert m.decomp_alias_paths == ()
         assert m.dispatch_stub_root == ""
         assert m.cpp_call_wrappers == ()
+        assert m.cpp_paste_macros == ()
 
 
 class TestTomlManifests:
@@ -128,6 +132,10 @@ class TestTomlManifests:
         assert PYTORCH_MANIFEST.expected_minimums["native_functions"] == 2400
         assert PYTORCH_MANIFEST.depends_on == ()
 
+    def test_vllm_expected_minimums(self):
+        assert harness_mod.VLLM_MANIFEST.expected_minimums["bindings"] == 1116
+        assert "native_functions" not in harness_mod.VLLM_MANIFEST.expected_minimums
+
     def test_bridge_section_inherited_from_torch_extension(self):
         base = harness_mod.load_builtin_manifest("torch-extension")
         assert "at" in base.cpp_namespaces and "c10" in base.cpp_namespaces
@@ -160,9 +168,14 @@ class TestTomlManifests:
         expected = ("/tests/", "/benchmarks/", "/examples/", "__pycache__")
         assert m.exclude_patterns == expected
         assert m.cpp_macro_aliases["TORCH_LIBRARY_EXPAND"] == "TORCH_LIBRARY"
+        assert m.cpp_token_map == {
+            "TORCH_EXTENSION_NAME": {"": "_C", "csrc/rocm/": "_rocm_C"}
+        }
+        assert m.cpp_paste_macros == ("CONCAT",)
         assert m.registration_calls[0].call == "direct_register_custom_op"
         assert m.registration_calls[1].key_arg == 0
         assert m.string_dispatchers == {"collective_rpc": 0}
+        assert m.test_utility_notes == {} and m.test_patterns == {}
         assert len(m.string_registries) == 10
 
     def test_extends_replaces_not_appends(self, tmp_path):
@@ -210,6 +223,8 @@ class TestTomlManifests:
             "[expected_minimums]\nbindings = true": "must be integers",
             '[[cpp.registration_calls]]\ncall = "x"': "registration_calls",
             "[python.op_namespaces]\nx = true": "table of strings",
+            "[tests.patterns]\nx = 1": "table of strings",
+            "[cpp.token_map]\nT = { a = 1 }": r"\[cpp.token_map\] values",
         }
         for body, msg in cases.items():
             p = tmp_path / "v.toml"

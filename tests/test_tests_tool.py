@@ -1,10 +1,12 @@
 """Tests for the test-discovery tool implementations."""
 
 import asyncio
+import dataclasses
 
 import pytest
 
 from torchtalk import indexer
+from torchtalk.tools import tests as tests_mod
 from torchtalk.tools.tests import (
     _do_find_similar_tests,
     _do_list_test_utils,
@@ -177,12 +179,25 @@ class TestFindSimilarTests:
 class TestListTestUtils:
     def test_renders_utility_names(self, test_tool_state):
         out = asyncio.run(_do_list_test_utils())
-        assert "common_utils" in out
-        assert "opinfo" in out
+        assert "**torch/testing/_internal/common_utils.py**" in out
 
     def test_stats_displayed(self, test_tool_state):
         out = asyncio.run(_do_list_test_utils())
         assert "Test files indexed:" in out
+
+    def test_notes_and_patterns_from_manifest(self, test_tool_state, monkeypatch):
+        manifest = dataclasses.replace(
+            tests_mod.active_manifest(),
+            test_utility_modules=("fw/utils.py", "fw/other.py"),
+            test_utility_notes={"fw/utils.py": "Shared fixtures"},
+            test_patterns={"@fw_case": "Runs per device"},
+        )
+        monkeypatch.setattr(tests_mod, "active_manifest", lambda: manifest)
+        out = asyncio.run(_do_list_test_utils())
+        assert "**fw/utils.py**" in out and "*Shared fixtures*" in out
+        assert "**fw/other.py**" in out
+        assert "`@fw_case`: *Runs per device*" in out
+        assert "instantiate_device_type_tests" not in out
 
 
 class TestTestFileInfo:

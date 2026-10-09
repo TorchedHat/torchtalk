@@ -111,6 +111,22 @@ register_decomposition = "decompositions"
 [python.op_namespaces]
 torch = "aten"
 
+[tests.utility_notes]
+"torch/testing/_internal/common_utils.py" = "Core test utilities: TestCase, run_tests, instantiate_parametrized_tests, IS_CUDA"
+"torch/testing/_internal/common_device_type.py" = "Device-agnostic testing: instantiate_device_type_tests, ops, onlyCPU, onlyCUDA"
+"torch/testing/_internal/common_dtype.py" = "Data type helpers: floating_types, integral_types, all_types_and_complex"
+"torch/testing/_internal/common_cuda.py" = "CUDA-specific helpers: TEST_CUDA, TEST_MULTIGPU, TEST_CUDNN"
+"torch/testing/_internal/opinfo/core.py" = "Operator test info registry: OpInfo, SampleInput, DecorateInfo"
+"torch/testing/_internal/hypothesis_utils.py" = "Property-based testing with Hypothesis: tensor_strategy, dtype_strategy"
+"torch/testing/_comparison.py" = "Tensor comparison and assertions: assert_close, assert_equal"
+
+[tests.patterns]
+"@instantiate_device_type_tests" = "Run tests across CPU/CUDA"
+"@parametrize" = "Run tests with multiple inputs"
+"@ops(op_db)" = "Test operators using OpInfo metadata"
+"gradcheck(fn, inputs)" = "Verify autograd correctness"
+"torch.testing.assert_close(a, b)" = "Compare tensors with tolerance"
+
 [expected_minimums]
 native_functions = 2400
 bindings = 2100

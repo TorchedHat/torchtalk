@@ -213,5 +213,5 @@ class TestTraceModule:
         trace_module_state.py_classes = {}
         out = asyncio.run(_do_trace_module("Linear"))
         assert out == (
-            "Python module analysis not available. Ensure PyTorch source is loaded."
+            "Python module analysis not available. Ensure a source is loaded."
         )

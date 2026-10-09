@@ -6,6 +6,7 @@ import os
 
 from ..analysis.helpers import dedupe_by_key
 from ..formatting import create_formatter
+from ..harness import active_manifest
 from ..indexer import _cpp_status, _ensure_loaded, _state
 from .common import _rel_path, _with_note
 
@@ -45,7 +46,8 @@ def _python_callers_for(cpp_func: str) -> list[dict]:
     """Look up Python source callers of `cpp_func` via the M1 edge index.
 
     Tries known bindings first (binding's python_name → cpp_symbol form),
-    then falls back to bare-name guesses (`aten::<bare>`, `<bare>`).
+    then falls back to bare-name guesses under each manifest op namespace
+    (e.g. `aten::<bare>`) and finally `<bare>`.
     """
     bare = cpp_func.rsplit("::", 1)[-1]
     edges = _state.py_to_cpp_edges
@@ -60,7 +62,8 @@ def _python_callers_for(cpp_func: str) -> list[dict]:
                 continue
             seen_keys.add(key)
             out.extend(edges.get(key, []))
-    for key in (f"aten::{bare}", bare):
+    namespaces = active_manifest().op_namespaces.values()
+    for key in (*(f"{ns}::{bare}" for ns in namespaces), bare):
         if key in seen_keys:
             continue
         seen_keys.add(key)
